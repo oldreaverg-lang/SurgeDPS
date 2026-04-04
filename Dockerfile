@@ -10,20 +10,10 @@ RUN npm run build
 # Output: /app/ui/dist/
 
 
-# ─── Stage 2: Python runtime with GDAL ───────────────────────────────────────
-FROM python:3.11-slim
-
-# Suppress debconf interactive prompts during apt-get
-ENV DEBIAN_FRONTEND=noninteractive
-
-# GDAL and rasterio system deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gdal-bin \
-        libgdal-dev \
-        libproj-dev \
-        gcc \
-        g++ \
-    && rm -rf /var/lib/apt/lists/*
+# ─── Stage 2: Python runtime ──────────────────────────────────────────────────
+# rasterio ≥1.3, shapely ≥2.0, and numpy all ship pre-built binary wheels
+# on PyPI that bundle their own native libs — no system GDAL needed.
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
