@@ -350,10 +350,11 @@ class CellHandler(BaseHTTPRequestHandler):
             print(f"  Grid origin: ({storm.grid_origin_lon}, {storm.grid_origin_lat})")
             print(f"{'='*60}\n")
 
-            # Return immediately with empty cell data — cells load lazily
-            # when the user clicks them via GET /api/cell?col=N&row=N.
-            # Synchronous pre-loading caused Railway request timeouts.
-            center_data = _empty_fc_pair()
+            # Load only the center cell (0,0) so the map has something to
+            # show immediately and neighbors become clickable. The full grid
+            # loads lazily as the user clicks adjacent cells.
+            print("Loading eye cell (0,0)...")
+            center_data = load_cell(0, 0)
             grid_cells = None
 
             # R5: Attach validation confidence after cell load
