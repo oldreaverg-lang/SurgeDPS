@@ -139,7 +139,7 @@ def generate_surge_raster(
     radial = np.where(
         r_ratio <= 1.0,
         r_ratio ** 0.6,                       # Inside Rmax: ramps up
-        np.exp(-0.5 * (r_ratio - 1.0) ** 1.2)  # Outside Rmax: decays
+        np.exp(-0.5 * np.maximum(r_ratio - 1.0, 0) ** 1.2)  # Outside Rmax: decays
     )
 
     # ── Asymmetry (surge is higher to right of track in NH) ──

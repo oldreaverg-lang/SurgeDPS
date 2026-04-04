@@ -99,34 +99,34 @@ def raster_to_geojson(
             json.dump({"type": "FeatureCollection", "features": []}, f)
         return output_path
 
-    # Vectorize
-    features = []
+    # Vectorize — collect all shapes per depth class, then union them
+    depth_ranges = [
+        (0.3, 0.3), (0.3, 0.9), (0.9, 1.8),
+        (1.8, 3.0), (3.0, 5.0), (5.0, 10.0), (10.0, 20.0)
+    ]
+    class_polys: dict = {}
     for geom, value in shapes(
         classified, mask=(classified > 0), transform=transform
     ):
         if value == 0:
             continue
+        cls = int(value)
+        class_polys.setdefault(cls, []).append(shape(geom))
 
-        # Compute representative depth for this class
-        depth_ranges = [
-            (0.3, 0.3), (0.3, 0.9), (0.9, 1.8),
-            (1.8, 3.0), (3.0, 5.0), (5.0, 10.0), (10.0, 20.0)
-        ]
-        if int(value) < len(depth_ranges):
-            lo, hi = depth_ranges[int(value)]
+    features = []
+    for cls, polys in class_polys.items():
+        # Merge all pixels of the same depth class into one smooth polygon
+        merged = unary_union(polys)
+        merged = merged.simplify(0.002, preserve_topology=True)
+        if merged.is_empty or not merged.is_valid:
+            continue
+
+        if cls < len(depth_ranges):
+            lo, hi = depth_ranges[cls]
             avg_depth = (lo + hi) / 2
         else:
             avg_depth = 12.0
 
-        # Simplify geometry to reduce file size
-        poly = shape(geom)
-        if simplify_tolerance > 0:
-            poly = poly.simplify(simplify_tolerance, preserve_topology=True)
-
-        if poly.is_empty or not poly.is_valid:
-            continue
-
-        # Convert depth to feet for display
         depth_ft = avg_depth * 3.28084
 
         features.append({
@@ -134,9 +134,9 @@ def raster_to_geojson(
             "properties": {
                 depth_property: round(avg_depth, 2),
                 "depth_ft": round(depth_ft, 1),
-                "class": int(value),
+                "class": cls,
             },
-            "geometry": mapping(poly),
+            "geometry": mapping(merged),
         })
 
     geojson = {
