@@ -1,0 +1,2166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SurgeDPS — Real-Time Flood Risk Map</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --surge-color: #00bcd4;
+      --surge-dark: #006064;
+      --rain-color: #9c27b0;
+      --rain-dark: #4a148c;
+      --compound-color: #673ab7;
+      --compound-dark: #1a237e;
+      --overlap-color: #311b92;
+      --panel-bg: rgba(15, 23, 42, 0.92);
+      --panel-border: rgba(100, 116, 139, 0.3);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --accent: #38bdf8;
+      --danger: #f43f5e;
+      --radius: 10px;
+      --shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: #0f172a;
+      color: var(--text-primary);
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* ─── Map ──────────────────────────────────────── */
+    #map {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+    }
+
+    /* ─── Top Bar ──────────────────────────────────── */
+    .top-bar {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      pointer-events: none;
+    }
+    .top-bar > * { pointer-events: auto; }
+
+    .logo {
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+      box-shadow: var(--shadow);
+    }
+    .logo svg { width: 22px; height: 22px; flex-shrink: 0; }
+    .logo-text { font-weight: 700; font-size: 15px; letter-spacing: -0.3px; }
+    .logo-sub { font-size: 10px; color: var(--text-secondary); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* ─── Search Bar ───────────────────────────────── */
+    .search-container {
+      flex: 1;
+      max-width: 420px;
+      position: relative;
+    }
+    .search-input {
+      width: 100%;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      padding: 10px 14px 10px 38px;
+      font-size: 14px;
+      color: var(--text-primary);
+      outline: none;
+      font-family: inherit;
+      box-shadow: var(--shadow);
+      transition: border-color 0.2s;
+    }
+    .search-input::placeholder { color: var(--text-secondary); }
+    .search-input:focus { border-color: var(--accent); }
+    .search-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-secondary);
+      width: 16px;
+      height: 16px;
+    }
+    .search-results {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      max-height: 240px;
+      overflow-y: auto;
+      display: none;
+      box-shadow: var(--shadow);
+    }
+    .search-results.active { display: block; }
+    .search-result-item {
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      border-bottom: 1px solid var(--panel-border);
+      transition: background 0.15s;
+    }
+    .search-result-item:hover { background: rgba(56, 189, 248, 0.1); }
+    .search-result-item:last-child { border-bottom: none; }
+
+    /* ─── Storm Banner ─────────────────────────────── */
+    .storm-banner {
+      background: linear-gradient(135deg, rgba(244,63,94,0.15), rgba(244,63,94,0.05));
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(244,63,94,0.3);
+      border-radius: var(--radius);
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: var(--shadow);
+      white-space: nowrap;
+    }
+    .storm-banner.inactive {
+      background: linear-gradient(135deg, rgba(34,197,94,0.12), rgba(34,197,94,0.04));
+      border-color: rgba(34,197,94,0.3);
+    }
+    .storm-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .storm-banner.inactive .storm-dot {
+      background: #22c55e;
+      animation: none;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.3); }
+    }
+    .storm-name { font-weight: 600; font-size: 13px; }
+    .storm-detail { font-size: 11px; color: var(--text-secondary); }
+
+    /* ─── Layer Panel (Left) ───────────────────────── */
+    .layer-panel {
+      position: absolute;
+      top: 68px;
+      left: 12px;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      padding: 14px;
+      width: 260px;
+      box-shadow: var(--shadow);
+    }
+    .panel-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+    }
+    .layer-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0;
+    }
+    .layer-toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .layer-toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: rgba(100, 116, 139, 0.3);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.25s;
+    }
+    .toggle-slider::after {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 2px;
+      top: 2px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.25s;
+    }
+    .layer-toggle input:checked + .toggle-slider { background: var(--accent); }
+    .layer-toggle input:checked + .toggle-slider::after { transform: translateX(16px); }
+
+    .layer-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+    .layer-label { font-size: 13px; font-weight: 500; flex: 1; }
+    .layer-desc {
+      padding: 2px 0 6px 46px;
+      font-size: 10px;
+      color: var(--text-secondary);
+      line-height: 1.4;
+    }
+
+    .opacity-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 2px 0 6px 46px;
+    }
+    .opacity-label { font-size: 10px; color: var(--text-secondary); width: 50px; }
+    .opacity-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 3px;
+      background: rgba(100, 116, 139, 0.4);
+      border-radius: 2px;
+      outline: none;
+    }
+    .opacity-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+    }
+
+    .layer-divider {
+      height: 1px;
+      background: var(--panel-border);
+      margin: 8px 0;
+    }
+
+    /* ─── Severity Legend ──────────────────────────── */
+    .legend {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--panel-border);
+    }
+    .legend-title {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+    .severity-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+      font-size: 11px;
+    }
+    .severity-swatch {
+      width: 16px;
+      height: 10px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .severity-label { font-weight: 600; min-width: 65px; }
+    .severity-range { color: var(--text-secondary); min-width: 50px; }
+    .severity-context { color: var(--text-secondary); font-size: 10px; }
+
+    /* ─── Time Slider (Bottom) ─────────────────────── */
+    .time-panel {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: var(--shadow);
+      min-width: 520px;
+    }
+    .time-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .time-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 4px;
+      background: rgba(100, 116, 139, 0.4);
+      border-radius: 2px;
+      outline: none;
+    }
+    .time-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.5);
+    }
+    .time-ticks {
+      display: flex;
+      justify-content: space-between;
+      padding: 0 7px;
+      margin-top: -2px;
+    }
+    .time-tick {
+      font-size: 9px;
+      color: var(--text-secondary);
+      text-align: center;
+      width: 30px;
+    }
+    .time-current {
+      font-size: 15px;
+      font-weight: 700;
+      white-space: nowrap;
+      min-width: 60px;
+      text-align: right;
+      color: var(--accent);
+    }
+    .time-date {
+      font-size: 10px;
+      color: var(--text-secondary);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .time-phase {
+      font-size: 10px;
+      font-weight: 600;
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+    .play-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .play-btn:hover { background: #7dd3fc; }
+    .play-btn svg { width: 14px; height: 14px; fill: #0f172a; }
+
+    /* ─── Enhanced Depth Query Panel ───────────────── */
+    .depth-popup {
+      position: absolute;
+      z-index: 20;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      box-shadow: var(--shadow);
+      pointer-events: none;
+      display: none;
+      min-width: 220px;
+      max-width: 280px;
+    }
+    .depth-popup.active { display: block; pointer-events: auto; }
+    .depth-popup-type {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+    .depth-popup-title { font-size: 11px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .depth-value { font-size: 28px; font-weight: 700; }
+    .depth-value .unit { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
+    .depth-severity {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+    .depth-context {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.4;
+    }
+    .depth-breakdown { margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+    .depth-breakdown-row { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+    .depth-breakdown-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+    .depth-close {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+    }
+
+    /* ─── Welcome Overlay ──────────────────────────── */
+    .welcome-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 25;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.5);
+    }
+    .welcome-overlay.hidden { display: none; }
+    .welcome-card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 28px 32px;
+      max-width: 440px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    }
+    .welcome-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .welcome-subtitle {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 18px;
+    }
+    .welcome-tip {
+      display: flex;
+      gap: 10px;
+      padding: 8px 0;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .welcome-tip-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+      background: rgba(56, 189, 248, 0.15);
+    }
+    .welcome-tip-text { flex: 1; }
+    .welcome-tip-title { font-weight: 600; font-size: 13px; }
+    .welcome-tip-desc { font-size: 12px; color: var(--text-secondary); }
+    .welcome-btn {
+      display: block;
+      width: 100%;
+      margin-top: 18px;
+      background: var(--accent);
+      color: #0f172a;
+      font-weight: 700;
+      font-size: 14px;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .welcome-btn:hover { background: #7dd3fc; }
+
+    /* ─── Paywall Overlay ──────────────────────────── */
+    .paywall-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 15;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    .paywall-overlay.active { display: flex; }
+    .paywall-card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 16px;
+      padding: 28px 32px;
+      text-align: center;
+      max-width: 380px;
+      pointer-events: auto;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    }
+    .paywall-icon { font-size: 36px; margin-bottom: 12px; }
+    .paywall-title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+    .paywall-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; line-height: 1.5; }
+    .paywall-btn {
+      display: inline-block;
+      background: linear-gradient(135deg, var(--accent), #818cf8);
+      color: #0f172a;
+      font-weight: 700;
+      font-size: 14px;
+      padding: 10px 28px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .paywall-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(56, 189, 248, 0.4); }
+    .paywall-price { margin-top: 10px; font-size: 11px; color: var(--text-secondary); }
+
+    /* ─── GPS Button ───────────────────────────────── */
+    .gps-btn {
+      position: absolute;
+      bottom: 90px;
+      right: 12px;
+      z-index: 10;
+      width: 40px;
+      height: 40px;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: color 0.2s, border-color 0.2s;
+      box-shadow: var(--shadow);
+    }
+    .gps-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .gps-btn svg { width: 18px; height: 18px; }
+
+    /* ─── Info Panel (Right) ───────────────────────── */
+    .info-panel {
+      position: absolute;
+      top: 68px;
+      right: 12px;
+      z-index: 10;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      padding: 14px;
+      width: 220px;
+      box-shadow: var(--shadow);
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+    .info-label { color: var(--text-secondary); }
+    .info-value { font-weight: 600; }
+
+    /* ─── Mobile responsive ────────────────────────── */
+    @media (max-width: 768px) {
+      .layer-panel { width: 220px; padding: 10px; }
+      .time-panel { min-width: auto; left: 12px; right: 12px; transform: none; padding: 10px 14px; }
+      .info-panel { display: none; }
+      .search-container { max-width: 200px; }
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- ─── Welcome Overlay ────────────────────────────── -->
+<div class="welcome-overlay" id="welcomeOverlay">
+  <div class="welcome-card">
+    <div class="welcome-title">Hurricane Milton — Flood Risk Map</div>
+    <div class="welcome-subtitle">Real-time storm surge and rainfall flood predictions for Florida's Gulf Coast</div>
+
+    <div class="welcome-tip">
+      <div class="welcome-tip-icon">&#127752;</div>
+      <div class="welcome-tip-text">
+        <div class="welcome-tip-title">Colored zones = flood risk areas</div>
+        <div class="welcome-tip-desc">Cyan = storm surge (ocean), Purple = rainfall (rivers), Violet = compound (both combined). Deeper color = deeper water.</div>
+      </div>
+    </div>
+
+    <div class="welcome-tip">
+      <div class="welcome-tip-icon">&#128433;</div>
+      <div class="welcome-tip-text">
+        <div class="welcome-tip-title">Click or hover any zone</div>
+        <div class="welcome-tip-desc">See predicted flood depth in feet, severity level, and what it means for your safety.</div>
+      </div>
+    </div>
+
+    <div class="welcome-tip">
+      <div class="welcome-tip-icon">&#9201;</div>
+      <div class="welcome-tip-text">
+        <div class="welcome-tip-title">Drag the time slider</div>
+        <div class="welcome-tip-desc">See how flooding changes from now through 72 hours. Colors intensify as the storm approaches landfall at T+36h.</div>
+      </div>
+    </div>
+
+    <div class="welcome-tip">
+      <div class="welcome-tip-icon">&#128736;</div>
+      <div class="welcome-tip-text">
+        <div class="welcome-tip-title">Toggle layers on/off</div>
+        <div class="welcome-tip-desc">Use the panel on the left to show or hide surge, rainfall, and compound flood layers.</div>
+      </div>
+    </div>
+
+    <button class="welcome-btn" id="welcomeBtn">Explore the Map</button>
+  </div>
+</div>
+
+<!-- ─── Top Bar ─────────────────────────────────────── -->
+<div class="top-bar">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" fill="rgba(56,189,248,0.2)" stroke="var(--accent)"/>
+    </svg>
+    <div>
+      <div class="logo-text">SurgeDPS</div>
+      <div class="logo-sub">Flood Risk Intelligence</div>
+    </div>
+  </div>
+
+  <div class="search-container">
+    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+    </svg>
+    <input type="text" class="search-input" id="searchInput" placeholder="Search address or location..." />
+    <div class="search-results" id="searchResults"></div>
+  </div>
+
+  <div class="storm-banner" id="stormBanner">
+    <div class="storm-dot"></div>
+    <div>
+      <div class="storm-name" id="stormName">Hurricane Milton</div>
+      <div class="storm-detail" id="stormDetail">Cat 4 &bull; 150 mph &bull; Advisory #12</div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Layer Panel ─────────────────────────────────── -->
+<div class="layer-panel" id="layerPanel">
+  <div class="panel-title">Flood Layers</div>
+
+  <div class="layer-item">
+    <label class="layer-toggle">
+      <input type="checkbox" id="toggleSurge" checked />
+      <span class="toggle-slider"></span>
+    </label>
+    <div class="layer-color" style="background: var(--surge-color)"></div>
+    <span class="layer-label">Storm Surge</span>
+  </div>
+  <div class="layer-desc">Ocean water pushed inland by hurricane winds</div>
+  <div class="opacity-row" id="opacitySurgeRow">
+    <span class="opacity-label">Opacity</span>
+    <input type="range" class="opacity-slider" id="opacitySurge" min="0" max="100" value="70" />
+  </div>
+
+  <div class="layer-item">
+    <label class="layer-toggle">
+      <input type="checkbox" id="toggleRainfall" checked />
+      <span class="toggle-slider"></span>
+    </label>
+    <div class="layer-color" style="background: var(--rain-color)"></div>
+    <span class="layer-label">Rainfall Flooding</span>
+  </div>
+  <div class="layer-desc">River and inland flooding from heavy rain</div>
+  <div class="opacity-row" id="opacityRainfallRow">
+    <span class="opacity-label">Opacity</span>
+    <input type="range" class="opacity-slider" id="opacityRainfall" min="0" max="100" value="70" />
+  </div>
+
+  <div class="layer-item">
+    <label class="layer-toggle">
+      <input type="checkbox" id="toggleCompound" checked />
+      <span class="toggle-slider"></span>
+    </label>
+    <div class="layer-color" style="background: var(--compound-color)"></div>
+    <span class="layer-label">Compound Flood</span>
+  </div>
+  <div class="layer-desc">Surge + rainfall combined — worst-case flooding</div>
+  <div class="opacity-row" id="opacityCompoundRow">
+    <span class="opacity-label">Opacity</span>
+    <input type="range" class="opacity-slider" id="opacityCompound" min="0" max="100" value="70" />
+  </div>
+
+  <div class="layer-divider"></div>
+
+  <div class="layer-item">
+    <label class="layer-toggle">
+      <input type="checkbox" id="toggleOverlap" checked />
+      <span class="toggle-slider"></span>
+    </label>
+    <div class="layer-color" style="background: var(--overlap-color)"></div>
+    <span class="layer-label">Overlap Zone</span>
+  </div>
+
+  <!-- Severity Legend -->
+  <div class="legend">
+    <div class="legend-title">Severity Guide</div>
+    <div class="severity-row">
+      <div class="severity-swatch" style="background: rgba(0,188,212,0.3)"></div>
+      <span class="severity-label">Minor</span>
+      <span class="severity-range">&lt; 1 ft</span>
+      <span class="severity-context">Cars may stall</span>
+    </div>
+    <div class="severity-row">
+      <div class="severity-swatch" style="background: rgba(0,188,212,0.5)"></div>
+      <span class="severity-label">Moderate</span>
+      <span class="severity-range">1–3 ft</span>
+      <span class="severity-context">Evacuate</span>
+    </div>
+    <div class="severity-row">
+      <div class="severity-swatch" style="background: rgba(0,151,167,0.65)"></div>
+      <span class="severity-label">Serious</span>
+      <span class="severity-range">3–6 ft</span>
+      <span class="severity-context">Life-threatening</span>
+    </div>
+    <div class="severity-row">
+      <div class="severity-swatch" style="background: rgba(0,96,100,0.8)"></div>
+      <span class="severity-label" style="color:#f87171">Severe</span>
+      <span class="severity-range">6–10 ft</span>
+      <span class="severity-context" style="color:#f87171">Structures flood</span>
+    </div>
+    <div class="severity-row">
+      <div class="severity-swatch" style="background: rgba(0,55,60,0.9)"></div>
+      <span class="severity-label" style="color:#ef4444">Extreme</span>
+      <span class="severity-range">10+ ft</span>
+      <span class="severity-context" style="color:#ef4444">Catastrophic</span>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Storm Info Panel (Right) ────────────────────── -->
+<div class="info-panel" id="infoPanel">
+  <div class="panel-title">Storm Details</div>
+  <div class="info-row"><span class="info-label">Storm</span><span class="info-value" id="infoName">Milton</span></div>
+  <div class="info-row"><span class="info-label">Category</span><span class="info-value" id="infoCat">4</span></div>
+  <div class="info-row"><span class="info-label">Winds</span><span class="info-value" id="infoWind">150 mph</span></div>
+  <div class="info-row"><span class="info-label">Pressure</span><span class="info-value" id="infoPressure">940 mb</span></div>
+  <div class="info-row"><span class="info-label">Movement</span><span class="info-value" id="infoMovement">ENE 12 mph</span></div>
+  <div class="info-row"><span class="info-label">Advisory</span><span class="info-value" id="infoAdvisory">#12</span></div>
+  <div style="height:1px;background:var(--panel-border);margin:8px 0"></div>
+  <div class="info-row"><span class="info-label">Zoom</span><span class="info-value" id="infoZoom">—</span></div>
+  <div class="info-row"><span class="info-label">Tier</span><span class="info-value" id="infoTier" style="color: #22c55e">Free</span></div>
+</div>
+
+<!-- ─── Time Slider ─────────────────────────────────── -->
+<div class="time-panel" id="timePanel">
+  <button class="play-btn" id="playBtn" title="Play animation">
+    <svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>
+  </button>
+  <div>
+    <div class="time-label">Forecast</div>
+    <div class="time-ticks">
+      <span class="time-tick">Now</span>
+      <span class="time-tick">+12h</span>
+      <span class="time-tick">+24h</span>
+      <span class="time-tick">+36h</span>
+      <span class="time-tick">+48h</span>
+      <span class="time-tick">+60h</span>
+      <span class="time-tick">+72h</span>
+    </div>
+    <input type="range" class="time-slider" id="timeSlider" min="0" max="12" value="0" step="1" />
+  </div>
+  <div>
+    <div class="time-current" id="timeDisplay">T+0h</div>
+    <div class="time-date" id="timeDate">—</div>
+    <div class="time-phase" id="timePhase" style="color: #22c55e">Approaching</div>
+  </div>
+</div>
+
+<!-- ─── GPS Button ──────────────────────────────────── -->
+<button class="gps-btn" id="gpsBtn" title="Go to my location">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+  </svg>
+</button>
+
+<!-- ─── Depth Query Popup ───────────────────────────── -->
+<div class="depth-popup" id="depthPopup">
+  <button class="depth-close" id="depthClose">&times;</button>
+  <div class="depth-popup-type" id="depthType"></div>
+  <div class="depth-popup-title">Predicted Flood Depth</div>
+  <div class="depth-value" id="depthValue">—</div>
+  <div class="depth-severity" id="depthSeverity"></div>
+  <div class="depth-context" id="depthContext"></div>
+  <div class="depth-breakdown" id="depthBreakdown"></div>
+</div>
+
+<!-- ─── Paywall Overlay ─────────────────────────────── -->
+<div class="paywall-overlay" id="paywallOverlay">
+  <div class="paywall-card">
+    <div class="paywall-icon">&#128274;</div>
+    <div class="paywall-title">High-Resolution Flood Data</div>
+    <div class="paywall-desc">
+      Unlock LiDAR-precision, parcel-level flood depth predictions
+      with compound surge + rainfall modeling.
+    </div>
+    <button class="paywall-btn" id="paywallBtn">Unlock HD Data</button>
+    <div class="paywall-price">$4.99 per storm &bull; or $9.99/month</div>
+  </div>
+</div>
+
+<!-- ─── Scripts ─────────────────────────────────────── -->
+<script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  // ── Welcome overlay — wire up IMMEDIATELY so button always works ──
+  (function earlyWelcome() {
+    const overlay = document.getElementById('welcomeOverlay');
+    const btn = document.getElementById('welcomeBtn');
+    if (overlay && btn) {
+      btn.addEventListener('click', function() { overlay.classList.add('hidden'); });
+    }
+  })();
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Configuration
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const CONFIG = {
+    tileBaseUrl: window.location.hostname === 'localhost'
+      ? ''
+      : window.location.origin,
+
+    signedUrlEndpoint: '',
+    freeMaxZoom: 12,
+    premiumMinZoom: 13,
+    geocodeUrl: 'https://nominatim.openstreetmap.org/search',
+
+    storm: {
+      id: 'AL142024',
+      name: 'Milton',
+      type: 'Hurricane',
+      category: 4,
+      wind_mph: 150,
+      pressure_mb: 940,
+      movement: 'ENE at 12 mph',
+      advisory: 12,
+      center: [-82.5, 27.5],  // Centered on FL Gulf Coast for demo
+      coneCoords: [
+        [-88.5, 23.0], [-87.0, 22.5], [-84.5, 23.0],
+        [-82.0, 25.0], [-80.5, 27.5], [-80.0, 29.0],
+        [-81.0, 30.0], [-83.0, 30.5], [-86.0, 29.5],
+        [-89.0, 27.0], [-89.5, 25.0], [-88.5, 23.0]
+      ],
+      trackCoords: [
+        [-93.0, 20.0], [-91.5, 21.0], [-90.0, 22.0],
+        [-88.5, 23.5], [-86.3, 25.4], [-84.0, 27.0],
+        [-82.0, 28.5], [-80.5, 29.5]
+      ],
+      forecastPoints: [
+        { coord: [-86.3, 25.4], label: 'Current', hours: 0 },
+        { coord: [-84.0, 27.0], label: '+12h', hours: 12 },
+        { coord: [-82.0, 28.5], label: '+24h', hours: 24 },
+        { coord: [-81.0, 29.2], label: '+36h (Landfall)', hours: 36 },
+        { coord: [-80.5, 29.5], label: '+48h', hours: 48 },
+      ]
+    },
+
+    timesteps: [0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72],
+    landfallHour: 36,  // Storm makes landfall at T+36h
+  };
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Severity System
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function getSeverity(depth) {
+    if (depth < 1) return { label: 'Minor', color: '#4ade80', bg: 'rgba(74,222,128,0.2)', context: 'Shallow flooding. Cars may stall in low areas.' };
+    if (depth < 3) return { label: 'Moderate', color: '#facc15', bg: 'rgba(250,204,21,0.2)', context: 'Significant flooding. Evacuate flood-prone areas. Roads impassable.' };
+    if (depth < 6) return { label: 'Serious', color: '#fb923c', bg: 'rgba(251,146,60,0.2)', context: 'Life-threatening flooding. Water enters ground-floor structures.' };
+    if (depth < 10) return { label: 'Severe', color: '#f87171', bg: 'rgba(248,113,113,0.2)', context: 'Life-threatening flooding. Single-story structures inundated.' };
+    return { label: 'Extreme', color: '#ef4444', bg: 'rgba(239,68,68,0.2)', context: 'Catastrophic flooding. Complete structural destruction possible.' };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Map Initialization
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: {
+      version: 8,
+      name: 'SurgeDPS Dark',
+      sources: {
+        'carto-dark': {
+          type: 'raster',
+          tiles: [
+            'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+            'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+          ],
+          tileSize: 256,
+          attribution: '&copy; <a href="https://carto.com">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+        }
+      },
+      layers: [{
+        id: 'carto-dark-layer',
+        type: 'raster',
+        source: 'carto-dark',
+        minzoom: 0,
+        maxzoom: 20
+      }]
+    },
+    center: CONFIG.storm.center,
+    zoom: 7.5,
+    maxZoom: 18,
+    attributionControl: true,
+  });
+
+  map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Raster Flood Model — Dense Grid Generation
+  // Generates continuous pixel-level flood coverage
+  // like NOAA SLOSH / NWS storm surge inundation maps
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // Seeded PRNG for consistent demo renders
+  let _seed = 42;
+  function srand() { _seed = (_seed * 16807) % 2147483647; return (_seed - 1) / 2147483646; }
+
+  // ── Distance helpers ─────────────────────────────
+  function distToSeg(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const t = Math.max(0, Math.min(1, ((px-x1)*dx + (py-y1)*dy) / (dx*dx + dy*dy || 1e-10)));
+    return Math.sqrt((px - x1 - t*dx)**2 + (py - y1 - t*dy)**2) * 111.0; // km
+  }
+  function distToPoly(px, py, coords) {
+    let min = Infinity;
+    for (let i = 0; i < coords.length - 1; i++) {
+      min = Math.min(min, distToSeg(px, py, coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1]));
+    }
+    return min;
+  }
+  function pointInPoly(px, py, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  // Simple 2D hash noise for terrain variation
+  function noise2d(x, y) {
+    const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+  function smoothNoise(x, y, scale) {
+    const sx = x * scale, sy = y * scale;
+    const ix = Math.floor(sx), iy = Math.floor(sy);
+    const fx = sx - ix, fy = sy - iy;
+    const a = noise2d(ix, iy), b = noise2d(ix+1, iy);
+    const c = noise2d(ix, iy+1), d = noise2d(ix+1, iy+1);
+    const u = fx*fx*(3-2*fx), v = fy*fy*(3-2*fy);
+    return a*(1-u)*(1-v) + b*u*(1-v) + c*(1-u)*v + d*u*v;
+  }
+
+  // ── Florida Gulf Coast Geography ─────────────────
+  // Main coastline: Cedar Key → Naples (ocean-facing shore)
+  const COAST_MAIN = [
+    [-83.04,29.14],[-83.01,29.10],[-82.97,29.06],[-82.93,29.02],[-82.88,28.97],
+    [-82.84,28.93],[-82.80,28.88],[-82.78,28.83],[-82.77,28.78],[-82.76,28.73],
+    [-82.76,28.68],[-82.77,28.63],[-82.78,28.58],[-82.79,28.53],[-82.80,28.48],
+    [-82.81,28.43],[-82.82,28.38],[-82.82,28.33],[-82.83,28.28],[-82.83,28.23],
+    [-82.83,28.18],[-82.83,28.13],[-82.84,28.08],[-82.84,28.04],[-82.84,28.00],
+    [-82.83,27.96],[-82.82,27.92],[-82.80,27.88],[-82.78,27.85],[-82.75,27.82],
+    // Clearwater / Indian Rocks
+    [-82.77,27.78],[-82.78,27.74],[-82.78,27.70],[-82.77,27.66],[-82.76,27.62],
+    // St. Pete Beach area
+    [-82.74,27.58],[-82.73,27.54],[-82.74,27.50],[-82.74,27.46],
+    // Anna Maria / Longboat
+    [-82.73,27.42],[-82.71,27.38],[-82.69,27.34],[-82.68,27.30],
+    // Siesta Key / Venice
+    [-82.66,27.26],[-82.63,27.22],[-82.60,27.18],[-82.57,27.14],[-82.54,27.10],
+    [-82.50,27.06],[-82.46,27.02],[-82.42,26.98],[-82.38,26.94],
+    // Charlotte Harbor mouth
+    [-82.32,26.90],[-82.27,26.86],[-82.22,26.82],[-82.18,26.78],[-82.14,26.74],
+    // Sanibel / Captiva / Fort Myers Beach
+    [-82.10,26.70],[-82.05,26.66],[-82.00,26.63],[-81.96,26.60],[-81.92,26.56],
+    [-81.88,26.52],[-81.87,26.48],[-81.86,26.44],[-81.86,26.40],[-81.86,26.36],
+    // Naples area
+    [-81.86,26.32],[-81.85,26.28],[-81.84,26.24],[-81.83,26.20],[-81.82,26.16],
+    [-81.81,26.12],[-81.80,26.08],[-81.80,26.04],[-81.80,26.00],
+  ];
+
+  // Tampa Bay — enclosed water body (simplified outline)
+  const TAMPA_BAY = [
+    [-82.74,27.88],[-82.70,27.86],[-82.66,27.84],[-82.64,27.82],[-82.62,27.80],
+    [-82.60,27.78],[-82.58,27.76],[-82.56,27.74],[-82.54,27.72],[-82.52,27.70],
+    [-82.50,27.68],[-82.48,27.66],[-82.46,27.64],[-82.44,27.63],[-82.42,27.62],
+    [-82.40,27.62],[-82.38,27.63],[-82.36,27.65],[-82.35,27.67],[-82.34,27.70],
+    [-82.34,27.73],[-82.35,27.76],[-82.37,27.79],[-82.40,27.82],[-82.43,27.84],
+    [-82.46,27.85],[-82.50,27.86],[-82.54,27.87],[-82.58,27.88],[-82.62,27.89],
+    [-82.66,27.90],[-82.70,27.90],[-82.74,27.88],
+  ];
+
+  // Charlotte Harbor — deep bay where Milton surge peaked
+  const CHARLOTTE_HARBOR = [
+    [-82.30,26.95],[-82.26,26.93],[-82.22,26.91],[-82.18,26.90],[-82.14,26.88],
+    [-82.10,26.86],[-82.07,26.84],[-82.04,26.82],[-82.02,26.80],[-82.00,26.78],
+    [-81.98,26.76],[-81.97,26.74],[-81.96,26.72],[-81.96,26.70],[-81.97,26.68],
+    [-81.99,26.66],[-82.02,26.65],[-82.05,26.66],[-82.08,26.68],[-82.10,26.70],
+    [-82.12,26.72],[-82.14,26.74],[-82.16,26.76],[-82.18,26.78],[-82.20,26.80],
+    [-82.22,26.82],[-82.24,26.84],[-82.26,26.86],[-82.28,26.89],[-82.30,26.92],
+    [-82.30,26.95],
+  ];
+
+  // Sarasota Bay
+  const SARASOTA_BAY = [
+    [-82.60,27.42],[-82.57,27.40],[-82.55,27.38],[-82.53,27.36],[-82.52,27.34],
+    [-82.50,27.32],[-82.48,27.30],[-82.46,27.28],[-82.44,27.26],[-82.43,27.24],
+    [-82.42,27.22],[-82.42,27.20],[-82.43,27.18],[-82.44,27.17],[-82.46,27.17],
+    [-82.48,27.18],[-82.50,27.20],[-82.52,27.22],[-82.53,27.24],[-82.54,27.26],
+    [-82.55,27.28],[-82.56,27.30],[-82.57,27.32],[-82.57,27.34],[-82.58,27.36],
+    [-82.58,27.38],[-82.59,27.40],[-82.60,27.42],
+  ];
+
+  // River centerlines (flowing toward Gulf)
+  const RIVERS = [
+    { name: 'Hillsborough River', maxDepth: 2.5, coords: [
+      [-82.18,28.06],[-82.22,28.03],[-82.26,28.00],[-82.30,27.97],[-82.34,27.95],
+      [-82.38,27.94],[-82.42,27.93],[-82.46,27.92],[-82.50,27.92],[-82.54,27.92],
+    ]},
+    { name: 'Alafia River', maxDepth: 2.0, coords: [
+      [-82.10,27.88],[-82.14,27.87],[-82.18,27.86],[-82.22,27.85],[-82.26,27.84],
+      [-82.30,27.83],[-82.34,27.82],[-82.38,27.80],[-82.42,27.78],
+    ]},
+    { name: 'Manatee River', maxDepth: 2.2, coords: [
+      [-82.16,27.55],[-82.20,27.54],[-82.24,27.53],[-82.28,27.52],[-82.32,27.51],
+      [-82.36,27.50],[-82.40,27.50],[-82.44,27.50],[-82.48,27.50],[-82.52,27.50],
+    ]},
+    { name: 'Peace River', maxDepth: 3.0, coords: [
+      [-81.82,27.48],[-81.83,27.42],[-81.84,27.36],[-81.86,27.30],[-81.88,27.24],
+      [-81.90,27.18],[-81.93,27.12],[-81.96,27.06],[-82.00,27.00],[-82.04,26.94],
+      [-82.08,26.88],[-82.12,26.84],
+    ]},
+    { name: 'Myakka River', maxDepth: 2.0, coords: [
+      [-82.14,27.38],[-82.18,27.34],[-82.22,27.30],[-82.26,27.26],[-82.30,27.22],
+      [-82.34,27.18],[-82.38,27.14],[-82.42,27.10],
+    ]},
+    { name: 'Caloosahatchee River', maxDepth: 2.5, coords: [
+      [-81.44,26.72],[-81.50,26.70],[-81.56,26.68],[-81.62,26.66],[-81.68,26.65],
+      [-81.74,26.64],[-81.80,26.63],[-81.86,26.62],[-81.90,26.60],
+    ]},
+    { name: 'Withlacoochee River', maxDepth: 1.5, coords: [
+      [-82.12,28.62],[-82.18,28.58],[-82.24,28.54],[-82.30,28.50],[-82.36,28.48],
+      [-82.42,28.46],[-82.48,28.44],[-82.54,28.42],[-82.60,28.40],
+    ]},
+    { name: 'Kissimmee–Okeechobee', maxDepth: 1.8, coords: [
+      [-81.30,28.28],[-81.32,28.20],[-81.34,28.12],[-81.36,28.04],[-81.38,27.96],
+      [-81.40,27.88],[-81.42,27.80],[-81.44,27.72],[-81.46,27.64],
+    ]},
+  ];
+
+  // Bay definitions with max surge depths
+  const BAYS = [
+    { name: 'Tampa Bay', ring: TAMPA_BAY, maxSurge: 10.5 },
+    { name: 'Charlotte Harbor', ring: CHARLOTTE_HARBOR, maxSurge: 12.5 },
+    { name: 'Sarasota Bay', ring: SARASOTA_BAY, maxSurge: 7.5 },
+  ];
+
+  // ── Grid-Based Flood Surface Generator ───────────
+  // Generates dense rectangular cells like NOAA SLOSH output
+  const GRID = {
+    west: -83.15, east: -81.25,
+    south: 26.00, north: 29.20,
+    step: 0.008, // ~890m cells
+  };
+
+  const surgeFeatures = [];
+  const rainfallFeatures = [];
+  const compoundFeatures = [];
+  let _fid = 0;
+
+  // Pre-compute: is each grid cell ocean-side or land-side of coast?
+  // Surge comes from west (Gulf), so points WEST of coastline are ocean
+  function isWestOfCoast(lon, lat) {
+    // Find nearest coast point at similar latitude
+    let nearestCoastLon = -999;
+    for (let i = 0; i < COAST_MAIN.length - 1; i++) {
+      const [x1, y1] = COAST_MAIN[i];
+      const [x2, y2] = COAST_MAIN[i + 1];
+      if ((y1 <= lat && y2 >= lat) || (y2 <= lat && y1 >= lat)) {
+        const t = (lat - y1) / (y2 - y1 || 1e-10);
+        const xAtLat = x1 + t * (x2 - x1);
+        if (xAtLat > nearestCoastLon) nearestCoastLon = xAtLat;
+      }
+    }
+    return lon < nearestCoastLon;
+  }
+
+  console.time('FloodGrid');
+  try {
+  for (let lat = GRID.south; lat < GRID.north; lat += GRID.step) {
+    for (let lon = GRID.west; lon < GRID.east; lon += GRID.step) {
+      const cx = lon + GRID.step / 2;
+      const cy = lat + GRID.step / 2;
+
+      // ── 1. Compute surge depth ──────────────────
+      let surgeDepth = 0;
+      let surgeName = '';
+
+      // Check if inside a bay (full surge)
+      for (const bay of BAYS) {
+        if (pointInPoly(cx, cy, bay.ring)) {
+          // Inside bay — full surge with slight distance attenuation from mouth
+          const distFromMouth = distToPoly(cx, cy, COAST_MAIN);
+          const bayFactor = Math.max(0.6, 1.0 - distFromMouth * 0.03);
+          surgeDepth = Math.max(surgeDepth, bay.maxSurge * bayFactor);
+          surgeName = bay.name;
+        }
+      }
+
+      // Coastal surge — distance from coastline, only on LAND side
+      if (surgeDepth === 0) {
+        const dCoast = distToPoly(cx, cy, COAST_MAIN);
+        const isOcean = isWestOfCoast(cx, cy);
+
+        if (!isOcean && dCoast < 6.0) {
+          // Terrain noise to create natural-looking flood edges
+          const terrainNoise = smoothNoise(cx, cy, 40) * 1.5 - 0.3;
+          // Base surge: 10ft at coast, exponential decay inland
+          const baseSurge = 10.0 * Math.exp(-dCoast * 0.55);
+          surgeDepth = Math.max(0, baseSurge + terrainNoise);
+
+          // Name the zone by latitude band
+          if (cy > 28.6) surgeName = 'Crystal River Coast';
+          else if (cy > 28.2) surgeName = 'Citrus Coast';
+          else if (cy > 27.8) surgeName = 'Clearwater–St. Pete';
+          else if (cy > 27.5) surgeName = 'Pinellas Coast';
+          else if (cy > 27.15) surgeName = 'Sarasota Coast';
+          else if (cy > 26.8) surgeName = 'Charlotte Coast';
+          else if (cy > 26.5) surgeName = 'Fort Myers Coast';
+          else if (cy > 26.2) surgeName = 'Naples Coast';
+          else surgeName = 'Collier Coast';
+        }
+        // Ocean side of barrier islands also gets surge
+        else if (isOcean && dCoast < 1.5) {
+          surgeDepth = 8.0 * Math.exp(-dCoast * 0.8);
+          surgeName = 'Barrier Island';
+        }
+      }
+
+      // ── 2. Compute rainfall depth ───────────────
+      let rainDepth = 0;
+      let rainName = '';
+
+      for (const river of RIVERS) {
+        const dRiver = distToPoly(cx, cy, river.coords);
+        if (dRiver < 3.5) {
+          const rNoise = smoothNoise(cx, cy, 25) * 0.8 - 0.2;
+          const baseRain = river.maxDepth * Math.exp(-dRiver * 0.6);
+          const d = Math.max(0, baseRain + rNoise);
+          if (d > rainDepth) {
+            rainDepth = d;
+            rainName = river.name + ' corridor';
+          }
+        }
+      }
+
+      // ── 3. Determine cell classification ────────
+      // Compound = surge + rain overlap
+      const hasSignificantSurge = surgeDepth > 0.5;
+      const hasSignificantRain = rainDepth > 0.5;
+
+      if (hasSignificantSurge && hasSignificantRain) {
+        // Compound zone — depths ADD (this is the dangerous case)
+        const compoundDepth = surgeDepth + rainDepth * 0.7; // partial additive
+        const name = surgeName + ' + ' + rainName;
+        compoundFeatures.push({
+          type: 'Feature',
+          properties: { depth: +compoundDepth.toFixed(1), type: 'compound', id: _fid++, name: name },
+          geometry: { type: 'Polygon', coordinates: [[[lon,lat],[lon+GRID.step,lat],[lon+GRID.step,lat+GRID.step],[lon,lat+GRID.step],[lon,lat]]] }
+        });
+      } else if (surgeDepth > 0.3) {
+        surgeFeatures.push({
+          type: 'Feature',
+          properties: { depth: +surgeDepth.toFixed(1), type: 'surge', id: _fid++, name: surgeName },
+          geometry: { type: 'Polygon', coordinates: [[[lon,lat],[lon+GRID.step,lat],[lon+GRID.step,lat+GRID.step],[lon,lat+GRID.step],[lon,lat]]] }
+        });
+      } else if (rainDepth > 0.3) {
+        rainfallFeatures.push({
+          type: 'Feature',
+          properties: { depth: +rainDepth.toFixed(1), type: 'rainfall', id: _fid++, name: rainName },
+          geometry: { type: 'Polygon', coordinates: [[[lon,lat],[lon+GRID.step,lat],[lon+GRID.step,lat+GRID.step],[lon,lat+GRID.step],[lon,lat]]] }
+        });
+      }
+    }
+  }
+
+  } catch(e) { console.error('FloodGrid error:', e); }
+  console.timeEnd('FloodGrid');
+  console.log(`Flood grid: ${surgeFeatures.length} surge, ${rainfallFeatures.length} rain, ${compoundFeatures.length} compound cells`);
+
+  const surgeGeoJSON = { type: 'FeatureCollection', features: surgeFeatures };
+  const rainfallGeoJSON = { type: 'FeatureCollection', features: rainfallFeatures };
+  const compoundGeoJSON = { type: 'FeatureCollection', features: compoundFeatures };
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Color Ramps — depth (ft) to color
+  // Uses color INTENSITY (not opacity) to encode depth
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // Color ramps — continuous depth-to-color for raster-like appearance
+  // Matches NOAA/NWS inundation map color conventions
+  function surgeColorExpr() {
+    return [
+      'interpolate', ['linear'], ['get', 'depth'],
+      0.3, 'rgba(178, 235, 242, 0.45)',
+      1.5, 'rgba(77, 208, 225, 0.55)',
+      3.0, 'rgba(0, 188, 212, 0.65)',
+      5.0, 'rgba(0, 151, 167, 0.72)',
+      7.0, 'rgba(0, 121, 107, 0.78)',
+      9.0, 'rgba(0, 96, 100, 0.84)',
+      12,  'rgba(0, 55, 60, 0.90)'
+    ];
+  }
+
+  function rainfallColorExpr() {
+    return [
+      'interpolate', ['linear'], ['get', 'depth'],
+      0.3, 'rgba(225, 190, 231, 0.40)',
+      1.0, 'rgba(186, 104, 200, 0.52)',
+      1.5, 'rgba(156, 39, 176, 0.60)',
+      2.0, 'rgba(126, 30, 156, 0.68)',
+      2.5, 'rgba(106, 27, 154, 0.75)',
+      3.5, 'rgba(74, 20, 140, 0.85)'
+    ];
+  }
+
+  function compoundColorExpr() {
+    return [
+      'interpolate', ['linear'], ['get', 'depth'],
+      1.0, 'rgba(209, 196, 233, 0.50)',
+      4.0, 'rgba(149, 117, 205, 0.60)',
+      7.0, 'rgba(103, 58, 183, 0.70)',
+      10,  'rgba(69, 39, 160, 0.80)',
+      13,  'rgba(49, 27, 146, 0.86)',
+      16,  'rgba(26, 35, 126, 0.92)'
+    ];
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Production: Load Storm Manifest from CDN
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  async function loadStormManifest(stormId) {
+    if (!CONFIG.tileBaseUrl) return null;
+    try {
+      const url = `${CONFIG.tileBaseUrl}/storms/${stormId}/manifest.json`;
+      const resp = await fetch(url);
+      if (!resp.ok) return null;
+      const manifest = await resp.json();
+      console.log(`Loaded manifest for ${manifest.storm_name} (advisory ${manifest.advisory_number})`);
+
+      CONFIG.storm.id = manifest.storm_id;
+      CONFIG.storm.name = manifest.storm_name;
+      CONFIG.storm.type = manifest.storm_type;
+      CONFIG.storm.advisory = manifest.advisory_number;
+      CONFIG.storm.center = manifest.center;
+      CONFIG.storm.wind_mph = manifest.wind_mph;
+      CONFIG.storm.pressure_mb = manifest.pressure_mb;
+
+      const nameEl = document.getElementById('infoStormName');
+      if (nameEl) nameEl.textContent = `${manifest.storm_type} ${manifest.storm_name}`;
+
+      return manifest;
+    } catch (e) {
+      console.warn('Manifest load failed, using demo data:', e);
+      return null;
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Load Vector Overlays from Manifest (PMTiles)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  async function loadOverlaysFromManifest() {
+    if (!CONFIG.tileBaseUrl) return;
+
+    try {
+      const manifest = await loadStormManifest(CONFIG.storm.id);
+      if (!manifest || !manifest.overlays) return;
+
+      const protocol = new pmtiles.Protocol();
+      maplibregl.addProtocol('pmtiles', protocol.tile);
+
+      for (const overlay of manifest.overlays) {
+        if (!overlay.tiles_url) continue;
+
+        const pmtilesUrl = `pmtiles://${CONFIG.tileBaseUrl}/${overlay.tiles_url}`;
+        const sourceName = `overlay-${overlay.name}`;
+
+        if (!map.getSource(sourceName)) {
+          map.addSource(sourceName, {
+            type: 'vector',
+            url: pmtilesUrl,
+          });
+        }
+
+        if (overlay.name === 'storm_cone') {
+          map.addLayer({
+            id: 'overlay-cone-fill',
+            type: 'fill',
+            source: sourceName,
+            'source-layer': 'storm_cone',
+            paint: overlay.style || {
+              'fill-color': 'rgba(255, 165, 0, 0.15)',
+              'fill-outline-color': 'rgba(255, 140, 0, 0.8)',
+            }
+          });
+          map.setLayoutProperty('forecast-cone-fill', 'visibility', 'none');
+          map.setLayoutProperty('forecast-cone-line', 'visibility', 'none');
+
+        } else if (overlay.name === 'storm_track') {
+          map.addLayer({
+            id: 'overlay-track-line',
+            type: 'line',
+            source: sourceName,
+            'source-layer': 'storm_track',
+            filter: ['==', ['get', 'layer'], 'track_line'],
+            paint: overlay.style || {
+              'line-color': '#FF4500',
+              'line-width': 3,
+            }
+          });
+          map.addLayer({
+            id: 'overlay-track-points',
+            type: 'circle',
+            source: sourceName,
+            'source-layer': 'storm_track',
+            filter: ['==', ['get', 'layer'], 'track_point'],
+            paint: {
+              'circle-radius': ['interpolate', ['linear'], ['get', 'wind_kt'], 34, 4, 64, 6, 137, 10],
+              'circle-color': ['match', ['get', 'category'],
+                'CAT5', '#FF0000', 'CAT4', '#FF4500', 'CAT3', '#FF8C00',
+                'CAT2', '#FFD700', 'CAT1', '#FFFF00', 'TS', '#00CED1',
+                '#90EE90'
+              ],
+              'circle-stroke-color': '#fff',
+              'circle-stroke-width': 1.5,
+            }
+          });
+          map.setLayoutProperty('storm-track-line', 'visibility', 'none');
+          map.setLayoutProperty('forecast-points-circles', 'visibility', 'none');
+          map.setLayoutProperty('forecast-points-labels', 'visibility', 'none');
+
+        } else if (overlay.name === 'reaches') {
+          map.addLayer({
+            id: 'overlay-reaches-line',
+            type: 'line',
+            source: sourceName,
+            'source-layer': 'reaches',
+            paint: overlay.style || {
+              'line-color': '#4FC3F7',
+              'line-width': 1,
+              'line-opacity': 0.6,
+            },
+            layout: { 'visibility': 'none' }
+          });
+
+        } else if (overlay.name === 'tide_gauges') {
+          map.addLayer({
+            id: 'overlay-tide-gauges',
+            type: 'circle',
+            source: sourceName,
+            'source-layer': 'tide_gauges',
+            paint: overlay.style || {
+              'circle-radius': 7,
+              'circle-color': '#4CAF50',
+              'circle-stroke-color': '#fff',
+              'circle-stroke-width': 2,
+            }
+          });
+          map.addLayer({
+            id: 'overlay-tide-gauge-labels',
+            type: 'symbol',
+            source: sourceName,
+            'source-layer': 'tide_gauges',
+            minzoom: 8,
+            layout: {
+              'text-field': ['concat', ['get', 'name'], '\n',
+                ['to-string', ['get', 'water_level_ft']], ' ft'],
+              'text-size': 11,
+              'text-offset': [0, -1.8],
+              'text-font': ['Open Sans Bold'],
+              'text-anchor': 'bottom',
+            },
+            paint: {
+              'text-color': '#E0F7FA',
+              'text-halo-color': 'rgba(0,0,0,0.8)',
+              'text-halo-width': 1.5,
+            }
+          });
+
+        } else if (overlay.name === 'damage') {
+          map.addLayer({
+            id: 'overlay-damage-circles',
+            type: 'circle',
+            source: sourceName,
+            'source-layer': 'damage',
+            minzoom: 8,
+            paint: overlay.style || {
+              'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 12, 5, 14, 8],
+              'circle-color': ['match', ['get', 'damage_category'],
+                'severe', '#D32F2F', 'major', '#FF5722',
+                'moderate', '#FF9800', 'minor', '#FFC107',
+                '#4CAF50'],
+              'circle-opacity': 0.8,
+              'circle-stroke-color': '#FFFFFF',
+              'circle-stroke-width': 0.5,
+            }
+          });
+          map.addLayer({
+            id: 'overlay-damage-labels',
+            type: 'symbol',
+            source: sourceName,
+            'source-layer': 'damage',
+            minzoom: 12,
+            layout: {
+              'text-field': ['concat', '$', ['to-string', ['round', ['get', 'estimated_loss_usd']]]],
+              'text-size': 10,
+              'text-offset': [0, -1.5],
+              'text-font': ['Open Sans Bold'],
+              'text-anchor': 'bottom',
+            },
+            paint: {
+              'text-color': '#FFEB3B',
+              'text-halo-color': 'rgba(0,0,0,0.8)',
+              'text-halo-width': 1.2,
+            }
+          });
+        }
+
+        console.log(`Loaded overlay: ${overlay.display_name} (${overlay.feature_count} features)`);
+      }
+
+      if (manifest.damage_summary && manifest.damage_summary.buildings_damaged > 0) {
+        showDamageSummary(manifest.damage_summary);
+      }
+    } catch (e) {
+      console.warn('Overlay loading failed (non-fatal):', e);
+    }
+  }
+
+  function showDamageSummary(summary) {
+    const panel = document.createElement('div');
+    panel.id = 'damage-summary-panel';
+    panel.style.cssText = `
+      position: absolute; bottom: 80px; right: 12px; z-index: 10;
+      background: var(--panel-bg); backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border); border-radius: var(--radius);
+      padding: 14px 18px; box-shadow: var(--shadow); max-width: 280px;
+      font-size: 13px; color: var(--text-primary);
+    `;
+
+    const loss = summary.total_loss_usd >= 1e9
+      ? `$${(summary.total_loss_usd / 1e9).toFixed(1)}B`
+      : summary.total_loss_usd >= 1e6
+        ? `$${(summary.total_loss_usd / 1e6).toFixed(1)}M`
+        : `$${(summary.total_loss_usd / 1e3).toFixed(0)}K`;
+
+    const cats = summary.damage_by_category || {};
+    panel.innerHTML = `
+      <div style="font-weight:700; margin-bottom:8px; font-size:14px;">
+        Estimated Damage
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px 12px; margin-bottom:8px;">
+        <span style="color:var(--text-secondary);">Assessed</span>
+        <span style="font-weight:600;">${summary.buildings_assessed.toLocaleString()}</span>
+        <span style="color:var(--text-secondary);">Damaged</span>
+        <span style="font-weight:600; color:#FF9800;">${summary.buildings_damaged.toLocaleString()}</span>
+        <span style="color:var(--text-secondary);">Total Loss</span>
+        <span style="font-weight:700; color:#F44336;">${loss}</span>
+      </div>
+      <div style="display:flex; gap:4px; height:14px; border-radius:4px; overflow:hidden;">
+        ${cats.none ? `<div style="flex:${cats.none}; background:#4CAF50;" title="None: ${cats.none}"></div>` : ''}
+        ${cats.minor ? `<div style="flex:${cats.minor}; background:#FFC107;" title="Minor: ${cats.minor}"></div>` : ''}
+        ${cats.moderate ? `<div style="flex:${cats.moderate}; background:#FF9800;" title="Moderate: ${cats.moderate}"></div>` : ''}
+        ${cats.major ? `<div style="flex:${cats.major}; background:#FF5722;" title="Major: ${cats.major}"></div>` : ''}
+        ${cats.severe ? `<div style="flex:${cats.severe}; background:#D32F2F;" title="Severe: ${cats.severe}"></div>` : ''}
+      </div>
+      <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:10px; color:var(--text-secondary);">
+        <span>None</span><span>Minor</span><span>Moderate</span><span>Major</span><span>Severe</span>
+      </div>
+    `;
+    document.body.appendChild(panel);
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Add Layers On Load
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  map.on('load', function() {
+
+    // ── Forecast Cone ──────────────────────────────
+    map.addSource('forecast-cone', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [CONFIG.storm.coneCoords]
+        }
+      }
+    });
+    map.addLayer({
+      id: 'forecast-cone-fill',
+      type: 'fill',
+      source: 'forecast-cone',
+      paint: {
+        'fill-color': 'rgba(248, 113, 113, 0.06)',
+      }
+    });
+    map.addLayer({
+      id: 'forecast-cone-line',
+      type: 'line',
+      source: 'forecast-cone',
+      paint: {
+        'line-color': 'rgba(248, 113, 113, 0.5)',
+        'line-width': 1.5,
+        'line-dasharray': [4, 3]
+      }
+    });
+
+    // ── Storm Track ────────────────────────────────
+    map.addSource('storm-track', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: CONFIG.storm.trackCoords
+        }
+      }
+    });
+    map.addLayer({
+      id: 'storm-track-line',
+      type: 'line',
+      source: 'storm-track',
+      paint: {
+        'line-color': '#f87171',
+        'line-width': 2.5,
+        'line-opacity': 0.8
+      }
+    });
+
+    // ── Forecast Points ────────────────────────────
+    map.addSource('forecast-points', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: CONFIG.storm.forecastPoints.map(fp => ({
+          type: 'Feature',
+          properties: { label: fp.label, hours: fp.hours },
+          geometry: { type: 'Point', coordinates: fp.coord }
+        }))
+      }
+    });
+    map.addLayer({
+      id: 'forecast-points-circles',
+      type: 'circle',
+      source: 'forecast-points',
+      paint: {
+        'circle-radius': 5,
+        'circle-color': '#f87171',
+        'circle-stroke-color': '#fff',
+        'circle-stroke-width': 1.5
+      }
+    });
+    map.addLayer({
+      id: 'forecast-points-labels',
+      type: 'symbol',
+      source: 'forecast-points',
+      layout: {
+        'text-field': ['get', 'label'],
+        'text-size': 10,
+        'text-offset': [0, -1.5],
+        'text-font': ['Open Sans Bold']
+      },
+      paint: {
+        'text-color': '#fca5a5',
+        'text-halo-color': 'rgba(0,0,0,0.7)',
+        'text-halo-width': 1
+      }
+    });
+
+    // ── Storm Center ───────────────────────────────
+    map.addSource('storm-center', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: CONFIG.storm.center }
+      }
+    });
+    map.addLayer({
+      id: 'storm-center-pulse',
+      type: 'circle',
+      source: 'storm-center',
+      paint: {
+        'circle-radius': 18,
+        'circle-color': 'rgba(248, 113, 113, 0.15)',
+        'circle-stroke-color': 'rgba(248, 113, 113, 0.4)',
+        'circle-stroke-width': 1
+      }
+    });
+    map.addLayer({
+      id: 'storm-center-dot',
+      type: 'circle',
+      source: 'storm-center',
+      paint: {
+        'circle-radius': 6,
+        'circle-color': '#ef4444',
+        'circle-stroke-color': '#fff',
+        'circle-stroke-width': 2
+      }
+    });
+
+    // ── Surge Layer (raster grid) ──────────────────
+    map.addSource('surge-data', { type: 'geojson', data: surgeGeoJSON });
+    map.addLayer({
+      id: 'surge-fill',
+      type: 'fill',
+      source: 'surge-data',
+      paint: {
+        'fill-color': surgeColorExpr(),
+        'fill-opacity': 0.85,
+        'fill-antialias': false  // sharp pixel edges like raster
+      }
+    });
+
+    // ── Rainfall Layer (raster grid) ───────────────
+    map.addSource('rainfall-data', { type: 'geojson', data: rainfallGeoJSON });
+    map.addLayer({
+      id: 'rainfall-fill',
+      type: 'fill',
+      source: 'rainfall-data',
+      paint: {
+        'fill-color': rainfallColorExpr(),
+        'fill-opacity': 0.85,
+        'fill-antialias': false
+      }
+    });
+
+    // ── Compound Layer (raster grid) ───────────────
+    map.addSource('compound-data', { type: 'geojson', data: compoundGeoJSON });
+    map.addLayer({
+      id: 'compound-fill',
+      type: 'fill',
+      source: 'compound-data',
+      paint: {
+        'fill-color': compoundColorExpr(),
+        'fill-opacity': 0.85,
+        'fill-antialias': false
+      }
+    });
+
+    // ── Overlap highlight (compound zones stand out) ─
+    map.addLayer({
+      id: 'overlap-fill',
+      type: 'fill',
+      source: 'compound-data',
+      paint: {
+        'fill-color': 'rgba(49, 27, 146, 0.12)',
+        'fill-antialias': false,
+      }
+    });
+
+    // ── River Reaches (empty source, populated from manifest) ──
+    map.addSource('reaches-data', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] }
+    });
+    map.addLayer({
+      id: 'reaches-line',
+      type: 'line',
+      source: 'reaches-data',
+      paint: {
+        'line-color': '#4FC3F7',
+        'line-width': ['interpolate', ['linear'], ['get', 'stream_order'], 1, 0.5, 3, 1.5, 5, 3],
+        'line-opacity': 0.6,
+      },
+      layout: { 'visibility': 'none' }
+    });
+
+    // ── Load Vector Overlays from Manifest ────────
+    loadOverlaysFromManifest();
+
+    // ── Interactions ───────────────────────────────
+    setupLayerToggles();
+    setupTimeSlider();
+    setupSearch();
+    setupClickQuery();
+    setupHoverQuery();
+    setupPaywall();
+    setupGPS();
+  });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Welcome Overlay
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupWelcome() {
+    const overlay = document.getElementById('welcomeOverlay');
+    const btn = document.getElementById('welcomeBtn');
+    btn.addEventListener('click', function() {
+      overlay.classList.add('hidden');
+    });
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Layer Toggles + Opacity
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupLayerToggles() {
+    const layers = {
+      surge: { toggle: 'toggleSurge', opacity: 'opacitySurge', ids: ['surge-fill'] },
+      rainfall: { toggle: 'toggleRainfall', opacity: 'opacityRainfall', ids: ['rainfall-fill'] },
+      compound: { toggle: 'toggleCompound', opacity: 'opacityCompound', ids: ['compound-fill'] },
+      overlap: { toggle: 'toggleOverlap', opacity: null, ids: ['overlap-fill'] },
+    };
+
+    Object.entries(layers).forEach(([key, cfg]) => {
+      const toggleEl = document.getElementById(cfg.toggle);
+      toggleEl.addEventListener('change', function() {
+        const vis = this.checked ? 'visible' : 'none';
+        cfg.ids.forEach(id => map.setLayoutProperty(id, 'visibility', vis));
+      });
+
+      if (cfg.opacity) {
+        const opacityEl = document.getElementById(cfg.opacity);
+        opacityEl.addEventListener('input', function() {
+          const val = this.value / 100;
+          const fillId = cfg.ids[0];
+          map.setPaintProperty(fillId, 'fill-opacity', val);
+        });
+      }
+    });
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Time Slider — uses color intensity, not opacity
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupTimeSlider() {
+    const slider = document.getElementById('timeSlider');
+    const display = document.getElementById('timeDisplay');
+    const dateDisplay = document.getElementById('timeDate');
+    const phaseDisplay = document.getElementById('timePhase');
+    const playBtn = document.getElementById('playBtn');
+    let playing = false;
+    let playInterval = null;
+
+    const baseDate = new Date();
+
+    function updateTime() {
+      const idx = parseInt(slider.value);
+      const hours = CONFIG.timesteps[idx] || 0;
+      display.textContent = hours === 0 ? 'Now' : `T+${hours}h`;
+
+      const forecastDate = new Date(baseDate.getTime() + hours * 3600 * 1000);
+      dateDisplay.textContent = forecastDate.toLocaleDateString('en-US', {
+        weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric'
+      });
+
+      // Storm phase indicator
+      const landfall = CONFIG.landfallHour;
+      if (hours < landfall - 12) {
+        phaseDisplay.textContent = 'Approaching';
+        phaseDisplay.style.color = '#22c55e';
+      } else if (hours < landfall) {
+        phaseDisplay.textContent = 'Nearing Landfall';
+        phaseDisplay.style.color = '#facc15';
+      } else if (hours <= landfall + 6) {
+        phaseDisplay.textContent = 'LANDFALL';
+        phaseDisplay.style.color = '#ef4444';
+      } else {
+        phaseDisplay.textContent = 'Post-Landfall';
+        phaseDisplay.style.color = '#fb923c';
+      }
+
+      // Color intensity scaling — peaks at landfall (T+36h)
+      // This creates a bell curve centered on landfall
+      const dist = Math.abs(hours - landfall);
+      const factor = Math.max(0.15, 1.0 - (dist / 48));
+
+      // Apply as a color-scaling multiplier via fill-opacity
+      // (In production, we'd swap tile timesteps; in demo we scale intensity)
+      if (map.getLayer('surge-fill')) {
+        const baseOpacity = document.getElementById('opacitySurge').value / 100;
+        map.setPaintProperty('surge-fill', 'fill-opacity', baseOpacity * factor);
+      }
+      if (map.getLayer('rainfall-fill')) {
+        const baseOpacity = document.getElementById('opacityRainfall').value / 100;
+        map.setPaintProperty('rainfall-fill', 'fill-opacity', baseOpacity * factor);
+      }
+      if (map.getLayer('compound-fill')) {
+        const baseOpacity = document.getElementById('opacityCompound').value / 100;
+        map.setPaintProperty('compound-fill', 'fill-opacity', baseOpacity * factor);
+      }
+    }
+
+    slider.addEventListener('input', updateTime);
+
+    playBtn.addEventListener('click', function() {
+      if (playing) {
+        clearInterval(playInterval);
+        playing = false;
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>';
+      } else {
+        playing = true;
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+        playInterval = setInterval(() => {
+          let val = parseInt(slider.value) + 1;
+          if (val > parseInt(slider.max)) val = 0;
+          slider.value = val;
+          updateTime();
+        }, 800);
+      }
+    });
+
+    updateTime();
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Address Search (Nominatim)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupSearch() {
+    const input = document.getElementById('searchInput');
+    const results = document.getElementById('searchResults');
+    let debounceTimer = null;
+
+    input.addEventListener('input', function() {
+      clearTimeout(debounceTimer);
+      const query = this.value.trim();
+      if (query.length < 3) {
+        results.classList.remove('active');
+        return;
+      }
+      debounceTimer = setTimeout(() => geocode(query), 400);
+    });
+
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        results.classList.remove('active');
+        this.blur();
+      }
+    });
+
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.search-container')) {
+        results.classList.remove('active');
+      }
+    });
+
+    async function geocode(query) {
+      try {
+        const url = `${CONFIG.geocodeUrl}?format=json&q=${encodeURIComponent(query)}&limit=5&countrycodes=us`;
+        const res = await fetch(url, {
+          headers: { 'User-Agent': 'SurgeDPS-FloodMap/1.0' }
+        });
+        const data = await res.json();
+
+        results.innerHTML = '';
+        if (data.length === 0) {
+          results.innerHTML = '<div class="search-result-item" style="color:var(--text-secondary)">No results found</div>';
+          results.classList.add('active');
+          return;
+        }
+
+        data.forEach(item => {
+          const div = document.createElement('div');
+          div.className = 'search-result-item';
+          div.textContent = item.display_name;
+          div.addEventListener('click', () => {
+            const lon = parseFloat(item.lon);
+            const lat = parseFloat(item.lat);
+            map.flyTo({ center: [lon, lat], zoom: 14, duration: 1500 });
+            input.value = item.display_name;
+            results.classList.remove('active');
+            showDepthAt(lon, lat);
+          });
+          results.appendChild(div);
+        });
+        results.classList.add('active');
+      } catch (err) {
+        console.error('Geocode error:', err);
+      }
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Click-to-Query Flood Depth (Enhanced)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupClickQuery() {
+    const popup = document.getElementById('depthPopup');
+    const closeBtn = document.getElementById('depthClose');
+
+    map.on('click', function(e) {
+      const { lng, lat } = e.lngLat;
+      showDepthAt(lng, lat, e.point);
+    });
+
+    closeBtn.addEventListener('click', () => {
+      popup.classList.remove('active');
+    });
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Hover-to-Query (cursor feedback)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupHoverQuery() {
+    const floodLayers = ['surge-fill', 'rainfall-fill', 'compound-fill'];
+
+    map.on('mousemove', function(e) {
+      const features = map.queryRenderedFeatures(e.point, { layers: floodLayers.filter(l => map.getLayer(l)) });
+      map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
+    });
+
+    map.on('mouseleave', function() {
+      map.getCanvas().style.cursor = '';
+    });
+  }
+
+  function showDepthAt(lng, lat, screenPoint) {
+    const popup = document.getElementById('depthPopup');
+    const typeEl = document.getElementById('depthType');
+    const valueEl = document.getElementById('depthValue');
+    const severityEl = document.getElementById('depthSeverity');
+    const contextEl = document.getElementById('depthContext');
+    const breakdownEl = document.getElementById('depthBreakdown');
+
+    const point = screenPoint || map.project([lng, lat]);
+    const surgeHits = map.queryRenderedFeatures(point, { layers: ['surge-fill'] });
+    const rainHits = map.queryRenderedFeatures(point, { layers: ['rainfall-fill'] });
+    const compoundHits = map.queryRenderedFeatures(point, { layers: ['compound-fill'] });
+
+    const surgeDepth = surgeHits.length > 0 ? surgeHits[0].properties.depth : 0;
+    const rainDepth = rainHits.length > 0 ? rainHits[0].properties.depth : 0;
+    const compoundDepth = compoundHits.length > 0 ? compoundHits[0].properties.depth : 0;
+
+    const maxDepth = Math.max(surgeDepth, rainDepth, compoundDepth);
+
+    if (maxDepth === 0) {
+      typeEl.textContent = '';
+      valueEl.innerHTML = 'No flooding <span class="unit">predicted</span>';
+      severityEl.style.display = 'none';
+      contextEl.textContent = 'This location is outside predicted flood zones for the current forecast.';
+      breakdownEl.innerHTML = '';
+    } else {
+      // Determine primary flood type
+      let primaryType = 'STORM SURGE';
+      let typeColor = 'var(--surge-color)';
+      if (compoundDepth >= surgeDepth && compoundDepth >= rainDepth) {
+        primaryType = 'COMPOUND FLOOD';
+        typeColor = 'var(--compound-color)';
+      } else if (rainDepth > surgeDepth) {
+        primaryType = 'RAINFALL FLOOD';
+        typeColor = 'var(--rain-color)';
+      }
+
+      typeEl.textContent = primaryType;
+      typeEl.style.color = typeColor;
+      valueEl.innerHTML = `${maxDepth.toFixed(1)} <span class="unit">ft</span>`;
+
+      const sev = getSeverity(maxDepth);
+      severityEl.textContent = sev.label;
+      severityEl.style.display = 'inline-block';
+      severityEl.style.background = sev.bg;
+      severityEl.style.color = sev.color;
+      contextEl.textContent = sev.context;
+
+      let html = '';
+      if (surgeDepth > 0) {
+        const name = surgeHits[0].properties.name || '';
+        html += `<div class="depth-breakdown-row"><div class="depth-breakdown-dot" style="background:var(--surge-color)"></div>Surge: ${surgeDepth.toFixed(1)} ft${name ? ' (' + name + ')' : ''}</div>`;
+      }
+      if (rainDepth > 0) {
+        const name = rainHits[0].properties.name || '';
+        html += `<div class="depth-breakdown-row"><div class="depth-breakdown-dot" style="background:var(--rain-color)"></div>Rainfall: ${rainDepth.toFixed(1)} ft${name ? ' (' + name + ')' : ''}</div>`;
+      }
+      if (compoundDepth > 0) {
+        const name = compoundHits[0].properties.name || '';
+        html += `<div class="depth-breakdown-row"><div class="depth-breakdown-dot" style="background:var(--compound-color)"></div>Combined: ${compoundDepth.toFixed(1)} ft${name ? ' (' + name + ')' : ''}</div>`;
+      }
+      breakdownEl.innerHTML = html;
+    }
+
+    const x = Math.min(point.x + 16, window.innerWidth - 300);
+    const y = Math.min(point.y - 20, window.innerHeight - 220);
+    popup.style.left = x + 'px';
+    popup.style.top = y + 'px';
+    popup.classList.add('active');
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Paywall (Zoom-Level Gating)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupPaywall() {
+    const overlay = document.getElementById('paywallOverlay');
+    const tierDisplay = document.getElementById('infoTier');
+    const zoomDisplay = document.getElementById('infoZoom');
+    let isPremium = false;
+
+    map.on('zoom', function() {
+      const zoom = map.getZoom();
+      zoomDisplay.textContent = zoom.toFixed(1);
+
+      if (!isPremium && zoom >= CONFIG.premiumMinZoom) {
+        overlay.classList.add('active');
+        tierDisplay.textContent = 'Locked';
+        tierDisplay.style.color = '#f43f5e';
+      } else {
+        overlay.classList.remove('active');
+        tierDisplay.textContent = isPremium ? 'Premium' : 'Free';
+        tierDisplay.style.color = isPremium ? 'var(--accent)' : '#22c55e';
+      }
+    });
+
+    document.getElementById('paywallBtn').addEventListener('click', async function() {
+      if (CONFIG.signedUrlEndpoint && CONFIG.storm.id) {
+        try {
+          const params = new URLSearchParams({
+            storm_id: CONFIG.storm.id,
+            advisory: String(CONFIG.storm.advisory).padStart(3, '0'),
+          });
+          const resp = await fetch(`${CONFIG.signedUrlEndpoint}?${params}`);
+          if (resp.ok) {
+            const data = await resp.json();
+            window._premiumSignedUrls = data.signed_urls;
+            window._premiumExpiresAt = data.expires_at;
+            console.log('Premium URLs acquired, expires:', data.expires_at);
+          }
+        } catch (e) {
+          console.warn('Signed URL fetch failed, using demo mode:', e);
+        }
+      }
+
+      isPremium = true;
+      overlay.classList.remove('active');
+      tierDisplay.textContent = 'Premium';
+      tierDisplay.style.color = 'var(--accent)';
+    });
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // GPS Location
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupGPS() {
+    document.getElementById('gpsBtn').addEventListener('click', function() {
+      if (!navigator.geolocation) {
+        alert('Geolocation not supported by your browser');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { longitude, latitude } = pos.coords;
+          map.flyTo({ center: [longitude, latitude], zoom: 14, duration: 1500 });
+
+          if (map.getSource('user-location')) {
+            map.getSource('user-location').setData({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: [longitude, latitude] }
+            });
+          } else {
+            map.addSource('user-location', {
+              type: 'geojson',
+              data: {
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [longitude, latitude] }
+              }
+            });
+            map.addLayer({
+              id: 'user-location-dot',
+              type: 'circle',
+              source: 'user-location',
+              paint: {
+                'circle-radius': 8,
+                'circle-color': '#38bdf8',
+                'circle-stroke-color': '#fff',
+                'circle-stroke-width': 2.5,
+              }
+            });
+            map.addLayer({
+              id: 'user-location-pulse',
+              type: 'circle',
+              source: 'user-location',
+              paint: {
+                'circle-radius': 20,
+                'circle-color': 'rgba(56, 189, 248, 0.15)',
+              }
+            });
+          }
+
+          setTimeout(() => showDepthAt(longitude, latitude), 500);
+        },
+        (err) => {
+          console.error('GPS error:', err);
+          alert('Could not get your location. Please check permissions.');
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    });
+  }
+
+})();
+</script>
+</body>
+</html>

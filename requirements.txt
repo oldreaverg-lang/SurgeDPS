@@ -1,0 +1,5 @@
+# SurgeDPS API Server — production dependencies
+numpy>=1.24
+requests>=2.31,<3.0
+rasterio>=1.3
+shapely>=2.0

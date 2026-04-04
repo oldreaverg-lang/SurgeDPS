@@ -1,0 +1,61 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "depth": 0.08, "zone": "< Ankle" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.337, 34.067],
+          [-118.328, 34.067],
+          [-118.328, 34.058],
+          [-118.337, 34.058],
+          [-118.337, 34.067]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "depth": 0.35, "zone": "Ankle to Knee" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.334, 34.064],
+          [-118.329, 34.064],
+          [-118.329, 34.060],
+          [-118.334, 34.060],
+          [-118.334, 34.064]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "depth": 0.8, "zone": "Knee to Waist" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.333, 34.063],
+          [-118.330, 34.063],
+          [-118.330, 34.061],
+          [-118.333, 34.061],
+          [-118.333, 34.063]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "depth": 1.5, "zone": "Waist to Head" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.332, 34.062],
+          [-118.331, 34.062],
+          [-118.331, 34.0615],
+          [-118.332, 34.0615],
+          [-118.332, 34.062]
+        ]]
+      }
+    }
+  ]
+}

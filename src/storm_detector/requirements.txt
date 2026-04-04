@@ -1,0 +1,9 @@
+# Storm Detector Lambda dependencies
+# Pin versions for reproducible Lambda builds
+
+requests>=2.31,<3.0
+boto3>=1.34,<2.0
+
+# Optional: only needed if extracting cone geometry locally
+# fiona>=1.9,<2.0
+# shapely>=2.0,<3.0

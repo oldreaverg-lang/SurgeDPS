@@ -1,0 +1,126 @@
+{
+  "Comment": "SurgeDPS Flood Modeling Pipeline — processes a single storm advisory through ingestion, modeling, tile generation, and publishing.",
+  "StartAt": "Ingest",
+  "States": {
+    "Ingest": {
+      "Type": "Task",
+      "Resource": "${IngestLambdaArn}",
+      "Comment": "Fetch DEM, P-Surge, NWM, QPF for storm area",
+      "TimeoutSeconds": 600,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "IngestFailed"
+        }
+      ],
+      "Next": "Model"
+    },
+
+    "Model": {
+      "Type": "Task",
+      "Resource": "${ModelLambdaArn}",
+      "Comment": "Run bathtub surge + rainfall + compound models",
+      "TimeoutSeconds": 900,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ModelFailed"
+        }
+      ],
+      "Next": "TileGen"
+    },
+
+    "TileGen": {
+      "Type": "Task",
+      "Resource": "${TileGenLambdaArn}",
+      "Comment": "Convert model outputs to COGs and PMTiles",
+      "TimeoutSeconds": 900,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "TileGenFailed"
+        }
+      ],
+      "Next": "Publish"
+    },
+
+    "Publish": {
+      "Type": "Task",
+      "Resource": "${PublishLambdaArn}",
+      "Comment": "Upload to S3, write manifest, invalidate CDN",
+      "TimeoutSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "PublishFailed"
+        }
+      ],
+      "Next": "PipelineComplete"
+    },
+
+    "PipelineComplete": {
+      "Type": "Succeed",
+      "Comment": "All stages completed successfully"
+    },
+
+    "IngestFailed": {
+      "Type": "Fail",
+      "Error": "IngestError",
+      "Cause": "Data ingestion stage failed after retries"
+    },
+
+    "ModelFailed": {
+      "Type": "Fail",
+      "Error": "ModelError",
+      "Cause": "Flood modeling stage failed after retries"
+    },
+
+    "TileGenFailed": {
+      "Type": "Fail",
+      "Error": "TileGenError",
+      "Cause": "Tile generation stage failed after retries"
+    },
+
+    "PublishFailed": {
+      "Type": "Fail",
+      "Error": "PublishError",
+      "Cause": "Publishing stage failed after retries"
+    }
+  }
+}

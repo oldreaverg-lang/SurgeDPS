@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.env
+.venv/
+venv/
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# Generated / cache
+tmp_integration/
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lock files (Office temp)
+.~lock.*
+
+# Excel / Word artifacts
+*.xlsx
+*.docx
