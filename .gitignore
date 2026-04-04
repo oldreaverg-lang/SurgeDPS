@@ -13,7 +13,6 @@ ui/dist/
 
 # Generated / cache
 tmp_integration/
-data/
 
 # OS
 .DS_Store
