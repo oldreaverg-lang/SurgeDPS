@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Map, { Source, Layer, NavigationControl, Popup } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -54,9 +54,6 @@ const LEGEND_ITEMS = [
 ];
 const CAT_COLORS: Record<number, string> = {
   0: '#5eead4', 1: '#facc15', 2: '#fb923c', 3: '#ef4444', 4: '#dc2626', 5: '#7f1d1d',
-};
-const CAT_LABELS: Record<number, string> = {
-  0: 'TS', 1: 'C1', 2: 'C2', 3: 'C3', 4: 'C4', 5: 'C5',
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
