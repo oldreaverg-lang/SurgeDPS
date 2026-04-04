@@ -149,7 +149,17 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
     <div className="w-72 bg-slate-900 border-r border-slate-700/50 flex flex-col h-screen overflow-hidden">
       {/* Header */}
       <div className="px-4 py-4 border-b border-slate-700/50 shrink-0">
-        <h1 className="text-base font-bold text-white tracking-tight">SurgeDPS</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-base font-bold text-white tracking-tight">SurgeDPS</h1>
+          <a
+            href="https://stormdps.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
+          >
+            StormDPS →
+          </a>
+        </div>
         <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">Storm Surge Analysis</p>
       </div>
 

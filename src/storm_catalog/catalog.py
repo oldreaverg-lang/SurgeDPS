@@ -86,15 +86,6 @@ CELL_HEIGHT = 0.3   # degrees latitude
 HISTORICAL_STORMS: List[StormEntry] = [
     # ── Category 5 ───────────────────────────────────────
     StormEntry(
-        storm_id="andrew_1992", name="Hurricane Andrew", year=1992,
-        category=5, status="historical",
-        landfall_lon=-80.3, landfall_lat=25.5,
-        max_wind_kt=145, min_pressure_mb=922,
-        heading_deg=270, speed_kt=18,
-        basin="AL", advisory="best-track",
-        dps_score=0.0,  # Pre-dates StormDPS dataset
-    ),
-    StormEntry(
         storm_id="michael_2018", name="Hurricane Michael", year=2018,
         category=5, status="historical",
         landfall_lon=-85.5, landfall_lat=30.2,
@@ -148,15 +139,6 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=350, speed_kt=15,
         basin="AL", advisory="best-track",
         dps_score=86.9,
-    ),
-    StormEntry(
-        storm_id="charley_2004", name="Hurricane Charley", year=2004,
-        category=4, status="historical",
-        landfall_lon=-82.2, landfall_lat=26.9,
-        max_wind_kt=130, min_pressure_mb=941,
-        heading_deg=15, speed_kt=21,
-        basin="AL", advisory="best-track",
-        dps_score=0.0,  # Pre-dates StormDPS dataset
     ),
     StormEntry(
         storm_id="ida_2021", name="Hurricane Ida", year=2021,
