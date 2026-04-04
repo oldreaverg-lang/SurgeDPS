@@ -311,8 +311,22 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(400, 'Missing ?q= parameter')
                 return
             try:
-                results = search_storms(q)
-                self._send_raw(200, json.dumps([_inject_dps(s.to_dict()) for s in results]).encode())
+                ql = q.lower().strip()
+                # Search curated HISTORICAL_STORMS first (better names + DPS scores)
+                seen_ids = set()
+                results = []
+                for s in HISTORICAL_STORMS:
+                    if ql in s.name.lower() or ql in s.storm_id.lower():
+                        results.append(_inject_dps(s.to_dict()))
+                        seen_ids.add(s.storm_id)
+                # Then fill remaining slots from HURDAT2
+                for s in search_storms(q):
+                    if s.storm_id not in seen_ids:
+                        results.append(_inject_dps(s.to_dict()))
+                        seen_ids.add(s.storm_id)
+                    if len(results) >= 20:
+                        break
+                self._send_raw(200, json.dumps(results).encode())
             except Exception as e:
                 self._send_error(500, str(e))
             return
