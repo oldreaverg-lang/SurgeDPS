@@ -487,7 +487,7 @@ class CellHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = int(os.environ.get('SURGE_API_PORT', 8000))
+    port = int(os.environ.get('PORT', os.environ.get('SURGE_API_PORT', 8000)))
     server = HTTPServer(('0.0.0.0', port), CellHandler)
     print(f"SurgeDPS Cell API running on http://localhost:{port}")
     print(f"Cell size: {CELL_WIDTH}° x {CELL_HEIGHT}°")
