@@ -11,9 +11,12 @@ RUN npm run build
 
 
 # ─── Stage 2: Python runtime ──────────────────────────────────────────────────
-# rasterio ≥1.3, shapely ≥2.0, and numpy all ship pre-built binary wheels
-# on PyPI that bundle their own native libs — no system GDAL needed.
+# rasterio wheels bundle GDAL but still need libexpat1 from the system.
 FROM python:3.11-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

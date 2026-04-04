@@ -119,7 +119,7 @@ OVERPASS_ENDPOINTS = [
 ]
 
 # Timeout for the Overpass server-side query (seconds)
-OVERPASS_TIMEOUT = 300
+OVERPASS_TIMEOUT = 25
 
 
 def _build_query(bbox: Tuple[float, float, float, float]) -> str:

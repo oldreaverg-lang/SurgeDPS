@@ -260,6 +260,9 @@ def load_cell(col: int, row: int) -> dict:
 def _empty_fc():
     return {"type": "FeatureCollection", "features": []}
 
+def _empty_fc_pair():
+    return {"buildings": _empty_fc(), "flood": _empty_fc()}
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # HTTP Server
@@ -347,23 +350,11 @@ class CellHandler(BaseHTTPRequestHandler):
             print(f"  Grid origin: ({storm.grid_origin_lon}, {storm.grid_origin_lat})")
             print(f"{'='*60}\n")
 
-            # R6: Auto-load 3x3 grid for Cat 3+ storms to capture full damage footprint
-            # For Cat 1-2, just load the eye cell (0,0)
-            if storm.category >= 3:
-                print(f"Pre-loading 3x3 grid for Cat {storm.category} storm...")
-                grid_cells = {}
-                for dc in [-1, 0, 1]:
-                    for dr in [-1, 0, 1]:
-                        k = f"{dc},{dr}"
-                        print(f"  Loading cell ({dc},{dr})...", end=" ", flush=True)
-                        grid_cells[k] = load_cell(dc, dr)
-                        n = len(grid_cells[k].get('buildings', {}).get('features', []))
-                        print(f"{n} buildings")
-                center_data = grid_cells.get("0,0", load_cell(0, 0))
-            else:
-                print("Pre-loading eye cell (0,0)...")
-                center_data = load_cell(0, 0)
-                grid_cells = None
+            # Return immediately with empty cell data — cells load lazily
+            # when the user clicks them via GET /api/cell?col=N&row=N.
+            # Synchronous pre-loading caused Railway request timeouts.
+            center_data = _empty_fc_pair()
+            grid_cells = None
 
             # R5: Attach validation confidence after cell load
             conf = _compute_confidence(storm.storm_id)
