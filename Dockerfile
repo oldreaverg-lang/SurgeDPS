@@ -13,6 +13,9 @@ RUN npm run build
 # ─── Stage 2: Python runtime with GDAL ───────────────────────────────────────
 FROM python:3.11-slim
 
+# Suppress debconf interactive prompts during apt-get
+ENV DEBIAN_FRONTEND=noninteractive
+
 # GDAL and rasterio system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gdal-bin \
@@ -21,9 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         g++ \
     && rm -rf /var/lib/apt/lists/*
-
-# Set GDAL version env so rasterio picks up the system lib
-RUN export GDAL_VERSION=$(gdal-config --version) && echo "GDAL $GDAL_VERSION"
 
 WORKDIR /app
 
