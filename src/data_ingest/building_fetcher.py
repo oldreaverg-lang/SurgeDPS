@@ -187,21 +187,34 @@ def fetch_buildings(
     cache: bool = True,
 ) -> str:
     """
-    Fetch real building footprints from OpenStreetMap for a bounding box.
+    Fetch building inventory for a bounding box.
 
-    Downloads all buildings via the Overpass API, classifies each one
-    into a HAZUS occupancy code, and writes a GeoJSON FeatureCollection
-    of Point features (centroids) with `id` and `type` properties —
-    the exact schema consumed by the damage pipeline.
+    Primary source: FEMA National Structure Inventory (NSI) — actual tabulated
+    replacement values, foundation heights, and footprint areas per building.
+
+    Fallback: OpenStreetMap via Overpass API — building type from tags plus
+    polygon-derived footprint area; no per-building value data.
+
+    The returned GeoJSON is consumed by estimate_damage_from_raster().
 
     Args:
         lon_min, lat_min, lon_max, lat_max: WGS-84 bounding box
         output_path: Where to write the GeoJSON result
-        cache: If True, skip the API call when output_path already exists
+        cache: If True, skip network calls when output_path already exists
+               and was written by the same source (NSI preferred)
 
     Returns:
         Path to the written GeoJSON file
     """
+    # ── Try NSI first ────────────────────────────────────────────
+    from .nsi_fetcher import fetch_buildings_nsi
+    nsi_result = fetch_buildings_nsi(lon_min, lat_min, lon_max, lat_max,
+                                     output_path, cache=cache)
+    if nsi_result:
+        return nsi_result
+
+    print("  [buildings] NSI unavailable, falling back to OpenStreetMap")
+    # ── OSM fallback below ────────────────────────────────────────
     if cache and os.path.exists(output_path):
         with open(output_path) as f:
             data = json.load(f)

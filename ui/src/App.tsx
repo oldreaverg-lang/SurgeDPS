@@ -48,10 +48,34 @@ const floodLayerStyle = {
   },
 };
 const LEGEND_ITEMS = [
-  { color: '#40E0D0', label: '< Ankle' }, { color: '#6495ED', label: 'Ankle–Knee' },
-  { color: '#4169E1', label: 'Knee–Waist' }, { color: '#8A2BE2', label: 'Waist–Head' },
-  { color: '#FF00FF', label: '> Head' },
+  { color: '#40E0D0', label: '< 0.5 ft' },
+  { color: '#6495ED', label: '0.5 – 1.5 ft' },
+  { color: '#4169E1', label: '1.5 – 3.5 ft' },
+  { color: '#8A2BE2', label: '3.5 – 6 ft' },
+  { color: '#FF00FF', label: '> 6 ft' },
 ];
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Building Type Lookup (Hazus codes → human-readable)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const BUILDING_TYPES: Record<string, string> = {
+  RES1: 'Single-Family Home', RES2: 'Mobile Home', RES3: 'Multi-Family Housing',
+  RES4: 'Hotel / Motel', RES5: 'Dormitory', RES6: 'Nursing Home',
+  COM1: 'Retail Store', COM2: 'Warehouse', COM3: 'Service Business',
+  COM4: 'Office Building', COM5: 'Bank / Financial', COM6: 'Hospital',
+  COM7: 'Medical Clinic', COM8: 'Entertainment Venue', COM9: 'Theater',
+  COM10: 'Parking Structure', IND1: 'Heavy Industrial', IND2: 'Light Industrial',
+  IND3: 'Food / Chemical Plant', IND4: 'Metal / Minerals Facility',
+  IND5: 'High-Tech Industrial', IND6: 'Construction Facility',
+  AGR1: 'Agricultural Building', REL1: 'Church / Place of Worship',
+  GOV1: 'Government Building', GOV2: 'Emergency Services',
+  EDU1: 'School', EDU2: 'College / University',
+};
+function friendlyBuildingType(code: string): string {
+  if (!code) return 'Unknown';
+  const prefix = code.replace(/[-_].*$/, '').toUpperCase();
+  return BUILDING_TYPES[prefix] || code;
+}
 const CAT_COLORS: Record<number, string> = {
   0: '#5eead4', 1: '#facc15', 2: '#fb923c', 3: '#ef4444', 4: '#dc2626', 5: '#7f1d1d',
 };
@@ -60,10 +84,12 @@ const CAT_COLORS: Record<number, string> = {
 // Storm Browser Sidebar
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function StormBrowser({ onSelectStorm, activeStormId, activating }: {
+function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClose }: {
   onSelectStorm: (id: string) => void;
   activeStormId: string | null;
   activating: boolean;
+  isOpen: boolean;
+  onClose: () => void;
 }) {
   const [seasons, setSeasons] = useState<Season[]>([]);
   const [historicStorms, setHistoricStorms] = useState<StormInfo[]>([]);
@@ -78,9 +104,9 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
 
   // Load sidebar data on mount
   useEffect(() => {
-    fetch('/api/seasons').then(r => r.json()).then(setSeasons).catch(() => {});
-    fetch('/api/storms/historic').then(r => r.json()).then(setHistoricStorms).catch(() => {});
-    fetch('/api/storms/active').then(r => r.json()).then(setActiveNHC).catch(() => {});
+    fetch('/surgedps/api/seasons').then(r => r.json()).then(setSeasons).catch(() => {});
+    fetch('/surgedps/api/storms/historic').then(r => r.json()).then(setHistoricStorms).catch(() => {});
+    fetch('/surgedps/api/storms/active').then(r => r.json()).then(setActiveNHC).catch(() => {});
   }, []);
 
   // Expand a season year
@@ -90,7 +116,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
       setYearStorms([]);
     } else {
       setExpandedYear(year);
-      fetch(`/api/season/${year}`).then(r => r.json()).then(setYearStorms).catch(() => setYearStorms([]));
+      fetch(`/surgedps/api/season/${year}`).then(r => r.json()).then(setYearStorms).catch(() => setYearStorms([]));
     }
   }, [expandedYear]);
 
@@ -101,7 +127,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
     if (!q.trim()) { setSearchResults(null); return; }
     setSearchLoading(true);
     searchTimeout.current = setTimeout(() => {
-      fetch(`/api/storms/search?q=${encodeURIComponent(q)}`)
+      fetch(`/surgedps/api/storms/search?q=${encodeURIComponent(q)}`)
         .then(r => r.json())
         .then(data => { setSearchResults(data); setSearchLoading(false); })
         .catch(() => { setSearchResults([]); setSearchLoading(false); });
@@ -130,7 +156,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
     const dot = dpsColor(s.dps_score || 0);
     return (
       <button
-        onClick={() => onSelectStorm(s.storm_id)}
+        onClick={() => { setSearchQuery(''); setSearchResults(null); onSelectStorm(s.storm_id); }}
         disabled={activating}
         className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors rounded-md text-sm ${
           isActive ? 'bg-indigo-500/20 text-white' : 'text-slate-300 hover:bg-slate-700/60 hover:text-white'
@@ -146,19 +172,26 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
   };
 
   return (
-    <div className="w-72 bg-slate-900 border-r border-slate-700/50 flex flex-col h-screen overflow-hidden">
+    <div className={`w-72 shrink-0 bg-slate-900 border-r border-slate-700/50 flex flex-col h-screen overflow-hidden absolute inset-y-0 left-0 z-30 lg:relative transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
       {/* Header */}
       <div className="px-4 py-4 border-b border-slate-700/50 shrink-0">
         <div className="flex items-center justify-between">
           <h1 className="text-base font-bold text-white tracking-tight">SurgeDPS</h1>
-          <a
-            href="https://stormdps.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
-          >
-            StormDPS →
-          </a>
+          <div className="flex items-center gap-2">
+            <a
+              href="https://stormdps.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
+            >
+              StormDPS →
+            </a>
+            <button
+              onClick={onClose}
+              className="lg:hidden text-slate-400 hover:text-white transition-colors p-1 rounded"
+              aria-label="Close sidebar"
+            >✕</button>
+          </div>
         </div>
         <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">Storm Surge Analysis</p>
       </div>
@@ -189,15 +222,13 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
         <div className="px-4 pt-4 pb-3 border-b border-slate-700/50">
           <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Storm Lookup</h2>
           <div className="mb-2">
-            <label className="text-xs text-slate-400 block mb-1">Storm Name</label>
             <input
               type="text"
-              placeholder="e.g. Katrina, Harvey, Ike"
+              placeholder="Search by name, e.g. Katrina, Harvey…"
               value={searchQuery}
               onChange={e => handleSearch(e.target.value)}
               className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
             />
-            <p className="text-[10px] text-slate-600 mt-1.5">Also accepts ATCF IDs (e.g. AL092008)</p>
           </div>
 
           {/* Search results dropdown */}
@@ -216,7 +247,8 @@ function StormBrowser({ onSelectStorm, activeStormId, activating }: {
 
         {/* ── STORM BROWSER ── */}
         <div className="px-4 pt-4 pb-3">
-          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Storm Browser</h2>
+          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Storm Browser</h2>
+          <p className="text-[10px] text-slate-600 mb-3">Sorted by Damage Potential Score (DPS) — higher = more destructive surge</p>
 
           {/* Historic Storms (curated) */}
           <div className="mb-1">
@@ -290,7 +322,7 @@ const ELI_STYLES: Record<string, { bg: string; text: string; border: string; lab
   unavailable: { bg: 'bg-gray-50', text: 'text-gray-400', border: 'border-gray-200', label: 'Pending' },
 };
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps, onOpenSidebar }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -298,11 +330,19 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   confidence: { level: string; count: number };
   eli: { value: number; tier: string };
   validatedDps: { value: number; adj: number; reason: string };
+  onOpenSidebar: () => void;
 }) {
   if (!storm) return null;
 
   return (
-    <div className="absolute top-4 left-[19.5rem] bg-white/95 backdrop-blur shadow-2xl rounded-lg p-4 w-72 border border-gray-100 z-10 flex flex-col max-h-[90vh] overflow-y-auto">
+    <div className="absolute top-4 left-4 bg-white/95 backdrop-blur shadow-2xl rounded-lg p-4 w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10 flex flex-col max-h-[90vh] overflow-y-auto">
+      {/* Mobile: open sidebar button */}
+      <button
+        onClick={onOpenSidebar}
+        className="lg:hidden absolute top-3 right-3 text-slate-400 hover:text-slate-700 transition-colors p-1 rounded text-base leading-none"
+        aria-label="Open storm browser"
+      >☰</button>
+
       {/* Storm info card */}
       <div className="rounded-xl p-3 mb-3 border shadow-sm"
         style={{ backgroundColor: `${CAT_COLORS[storm.category]}10`, borderColor: `${CAT_COLORS[storm.category]}40` }}
@@ -314,20 +354,27 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           >CAT {storm.category}</span>
         </div>
         <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-gray-600">
-          <span>Wind: <strong className="text-gray-800">{storm.max_wind_kt} kt</strong></span>
+          <span>Wind: <strong className="text-gray-800">{storm.max_wind_kt} kt ({Math.round(storm.max_wind_kt * 1.15078)} mph)</strong></span>
           <span>Pressure: <strong className="text-gray-800">{storm.min_pressure_mb} mb</strong></span>
           <span>Year: <strong className="text-gray-800">{storm.year}</strong></span>
-          <span>Status: <strong className="text-gray-800 capitalize">{storm.status}</strong></span>
+          <span>Record: <strong className="text-gray-800 capitalize">{storm.status === 'historical' ? 'Historical' : storm.status}</strong></span>
         </div>
       </div>
 
       {/* R5: Confidence badge */}
       {(() => {
         const cs = CONFIDENCE_STYLES[confidence.level] || CONFIDENCE_STYLES.unvalidated;
+        const tip = confidence.level === 'high' ? 'Validated against real damage reports'
+          : confidence.level === 'medium' ? 'Partially validated with survey data'
+          : confidence.level === 'low' ? 'Limited validation data available'
+          : 'Model estimate only — no ground-truth validation';
         return (
-          <div className={`${cs.bg} rounded-lg px-3 py-1.5 mb-3 flex items-center justify-between`}>
-            <span className={`text-xs font-bold ${cs.text}`}>{cs.label}</span>
-            <span className={`text-[10px] ${cs.text}`}>{confidence.count.toLocaleString()} buildings</span>
+          <div className={`${cs.bg} rounded-lg px-3 py-2 mb-3`}>
+            <div className="flex items-center justify-between">
+              <span className={`text-xs font-bold ${cs.text}`}>{cs.label}</span>
+              <span className={`text-[10px] ${cs.text}`}>{confidence.count.toLocaleString()} buildings</span>
+            </div>
+            <p className={`text-[10px] mt-0.5 ${cs.text} opacity-75`}>{tip}</p>
           </div>
         );
       })()}
@@ -356,7 +403,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
               {es.label} Damage Potential
             </div>
             <div className="text-[10px] text-gray-400 mt-1">
-              ELI = sqrt(DPS) × sqrt(buildings)
+              Storm intensity × scale of exposure
             </div>
           </div>
         );
@@ -365,7 +412,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       {/* Scoreboard */}
       {totals.buildings > 0 && (
         <div className="bg-gray-100/50 rounded-xl p-3 text-center border border-gray-200/60 shadow-sm mb-3">
-          <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-0.5">Total Modeled Deficit</div>
+          <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-0.5">Total Modeled Loss</div>
           <div className="text-2xl font-black text-red-600 tracking-tighter">
             ${totals.loss > 0 ? (totals.loss / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 }) + 'M' : '...'}
           </div>
@@ -380,34 +427,36 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         <div className="bg-amber-50 rounded-lg px-3 py-2 mb-3 border border-amber-300">
           <div className="text-[10px] text-amber-800 font-bold uppercase tracking-wider">Nuisance Flood Warning</div>
           <div className="text-xs text-amber-700 mt-0.5">
-            Low avg depth ({(totals.totalDepth / totals.buildings).toFixed(1)} ft) across {totals.buildings.toLocaleString()} buildings — aggregate damage may exceed DPS severity level.
+            Avg. depth of {(totals.totalDepth / totals.buildings).toFixed(1)} ft across {totals.buildings.toLocaleString()} buildings — widespread shallow flooding can cause significant aggregate damage even when individual losses appear modest.
           </div>
         </div>
       )}
 
       {/* Grid status */}
       <div className="bg-blue-50/50 rounded-lg p-2.5 mb-3 border border-blue-100">
-        <div className="text-[10px] text-blue-600 font-bold uppercase tracking-wider mb-0.5">Coverage</div>
+        <div className="text-[10px] text-blue-600 font-bold uppercase tracking-wider mb-0.5">Map Coverage</div>
         <div className="text-sm text-blue-800 font-semibold">
-          {loadedCells.size} cell{loadedCells.size !== 1 ? 's' : ''} loaded
+          {loadedCells.size} area{loadedCells.size !== 1 ? 's' : ''} analyzed
         </div>
         <div className="text-xs text-blue-500 mt-0.5">
           {loadingCells.size > 0
-            ? `Loading ${loadingCells.size}...`
-            : 'Click white borders to expand'}
+            ? `Fetching data for ${loadingCells.size} more area${loadingCells.size !== 1 ? 's' : ''}…`
+            : 'Click the dashed borders on the map to expand coverage'}
         </div>
       </div>
 
       {/* Legend */}
-      <div className="space-y-2">
+      <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Surge Depth</div>
+      <div className="space-y-1.5">
         {LEGEND_ITEMS.map((item, i) => (
           <div key={i} className="flex items-center gap-2">
-            <span className="w-4 h-4 rounded shadow-inner border border-gray-200" style={{ backgroundColor: item.color }}></span>
+            <span className="w-4 h-4 rounded shadow-inner border border-gray-200 shrink-0" style={{ backgroundColor: item.color }}></span>
             <span className="text-xs font-medium text-gray-600">{item.label}</span>
           </div>
         ))}
       </div>
       <hr className="my-3 border-gray-200" />
+      <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Building Damage</div>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#facc15] border border-gray-300"></span> Minor</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#fb923c] border border-gray-300"></span> Moderate</div>
@@ -425,6 +474,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
 function App() {
   const mapRef = useRef<MapRef>(null);
 
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeStorm, setActiveStorm] = useState<StormInfo | null>(null);
   const [activating, setActivating] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<any>(null);
@@ -438,6 +488,10 @@ function App() {
   const [eli, setEli] = useState<{ value: number; tier: string }>({ value: 0, tier: 'unavailable' });
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
 
+  // Reverse geocoding for building hover
+  const geocodeCache = useRef<Record<string, string>>({});
+  const [hoverAddress, setHoverAddress] = useState<string | null>(null);
+
   // Activate a storm
   const activateStorm = useCallback(async (stormId: string) => {
     if (activating) return;
@@ -450,7 +504,7 @@ function App() {
     setValidatedDps({ value: 0, adj: 0, reason: '' });
 
     try {
-      const resp = await fetch(`/api/storm/${stormId}/activate`);
+      const resp = await fetch(`/surgedps/api/storm/${stormId}/activate`);
       if (!resp.ok) throw new Error(`${resp.status}`);
       const data = await resp.json();
       const { storm, center_cell, grid_cells } = data;
@@ -527,7 +581,7 @@ function App() {
     if (loadedCells.has(key) || loadingCells.has(key)) return;
     setLoadingCells(prev => new Set([...prev, key]));
     try {
-      const resp = await fetch(`/api/cell?col=${col}&row=${row}`);
+      const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}`);
       if (!resp.ok) throw new Error(`${resp.status}`);
       const cellData = await resp.json();
       const { buildings, flood } = cellData;
@@ -546,6 +600,42 @@ function App() {
     } catch (err) { console.error(`Failed cell (${col},${row}):`, err); }
     finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
   }, [loadedCells, loadingCells]);
+
+  // Reverse-geocode building hover via Nominatim
+  useEffect(() => {
+    if (hoverInfo?.type !== 'damage') {
+      setHoverAddress(null);
+      return;
+    }
+    const { lng, lat } = hoverInfo;
+    const cacheKey = `${lng.toFixed(5)},${lat.toFixed(5)}`;
+    if (cacheKey in geocodeCache.current) {
+      setHoverAddress(geocodeCache.current[cacheKey] || null);
+      return;
+    }
+    // Pre-populate so we don't fire duplicate requests while waiting
+    geocodeCache.current[cacheKey] = '';
+    setHoverAddress(null);
+    const controller = new AbortController();
+    fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+      { signal: controller.signal, headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' } }
+    )
+      .then(r => r.json())
+      .then(data => {
+        const addr = data?.address || {};
+        const parts = [
+          addr.house_number,
+          addr.road,
+          addr.city || addr.town || addr.village || addr.hamlet,
+        ].filter(Boolean);
+        const label = parts.length > 1 ? parts.join(', ') : null;
+        geocodeCache.current[cacheKey] = label || '';
+        setHoverAddress(label);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [hoverInfo]);
 
   // Events
   const onHover = useCallback((event: any) => {
@@ -566,13 +656,23 @@ function App() {
   const showGrid = zoom < 13;
 
   return (
-    <div className="flex h-screen w-full">
+    <div className="flex h-screen w-full relative overflow-hidden">
       {/* Left Sidebar — Storm Browser */}
       <StormBrowser
         onSelectStorm={activateStorm}
         activeStormId={activeStorm?.storm_id || null}
         activating={activating}
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
+
+      {/* Backdrop — taps to close sidebar on mobile/tablet */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-20 bg-black/50 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
       {/* Map Area */}
       <div className="relative flex-1">
@@ -643,13 +743,17 @@ function App() {
                     <p className="flex justify-between text-sm"><span className="text-gray-500">Loss:</span> <span className="font-bold text-red-600">${hoverInfo.feature.properties.total_loss?.toLocaleString() || 0}</span></p>
                   </div></>
                 ) : hoverInfo.type === 'flood' ? (
-                  <><h3 className="font-semibold text-gray-800 text-sm mb-1">Inundation</h3>
-                  <p className="text-gray-600 text-xs">Depth: {(hoverInfo.feature.properties.depth_ft || hoverInfo.feature.properties.depth * 3.28084).toFixed(1)} ft</p></>
+                  <><h3 className="font-semibold text-gray-800 text-sm mb-1">Storm Surge Depth</h3>
+                  <p className="text-gray-800 font-bold text-base">{(hoverInfo.feature.properties.depth_ft || hoverInfo.feature.properties.depth * 3.28084).toFixed(1)} ft</p>
+                  <p className="text-gray-400 text-[10px] mt-0.5">Modeled inundation at this location</p></>
                 ) : (
                   <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property Damage</h3>
+                  {hoverAddress && (
+                    <p className="text-[11px] text-indigo-700 font-semibold mb-1.5 pb-1 border-b border-gray-100 truncate" title={hoverAddress}>{hoverAddress}</p>
+                  )}
                   <div className="text-xs space-y-1">
-                    <p className="flex justify-between"><span className="text-gray-500">Facility:</span> <span className="font-medium">{hoverInfo.feature.properties.building_type}</span></p>
-                    <p className="flex justify-between"><span className="text-gray-500">Category:</span> <span className="font-medium capitalize">{hoverInfo.feature.properties.damage_category}</span></p>
+                    <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(hoverInfo.feature.properties.building_type)}</span></p>
+                    <p className="flex justify-between"><span className="text-gray-500">Severity:</span> <span className="font-medium capitalize">{hoverInfo.feature.properties.damage_category === 'none' ? 'No Damage' : hoverInfo.feature.properties.damage_category}</span></p>
                     <p className="flex justify-between"><span className="text-gray-500">Damage:</span> <span className="font-medium">{hoverInfo.feature.properties.total_damage_pct}%</span></p>
                     <p className="flex justify-between text-sm"><span className="text-gray-500">Loss:</span> <span className="font-bold text-red-600">${hoverInfo.feature.properties.estimated_loss_usd?.toLocaleString()}</span></p>
                   </div></>
@@ -660,7 +764,22 @@ function App() {
         </Map>
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} />
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} onOpenSidebar={() => setSidebarOpen(true)} />
+
+        {/* Empty-state overlay — shown when no storm is active */}
+        {!activeStorm && !activating && (
+          <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+            <div className="bg-black/60 backdrop-blur-sm rounded-2xl px-8 py-6 text-center shadow-2xl max-w-sm pointer-events-auto">
+              <div className="text-4xl mb-3">🌀</div>
+              <p className="text-white font-bold text-lg">Select a storm to begin</p>
+              <p className="text-slate-300 text-sm mt-1">Choose a hurricane from the browser on the left to load surge data and damage estimates.</p>
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="lg:hidden mt-4 bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+              >☰ Browse Storms</button>
+            </div>
+          </div>
+        )}
 
         {/* Loading overlay */}
         {activating && (

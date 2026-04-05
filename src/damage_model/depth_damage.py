@@ -293,17 +293,29 @@ def estimate_building_damage(
     building_id: str = "",
     sqft: Optional[float] = None,
     first_floor_ht_ft: Optional[float] = None,
+    val_struct: Optional[float] = None,
+    val_cont: Optional[float] = None,
 ) -> BuildingDamage:
     """
     Estimate flood damage for a single building.
+
+    When val_struct / val_cont are provided (sourced from FEMA NSI), they are
+    used directly as the replacement values so the damage calculation is:
+        loss = struct_pct% × val_struct + content_pct% × val_cont
+
+    Without NSI data the model falls back to:
+        replacement = (sqft or type_default) × cost_per_sqft × id_multiplier
 
     Args:
         depth_m: Flood depth at the building location (meters, above ground)
         lon, lat: Building coordinates
         building_type: HAZUS occupancy code
         building_id: Unique building identifier
-        sqft: Building area in square feet (defaults per type)
-        first_floor_ht_ft: Height of first floor above grade (feet)
+        sqft: Building area in square feet (defaults per type if not provided)
+        first_floor_ht_ft: First-floor elevation above grade (ft); from NSI
+                           found_ht field or falls back to type default
+        val_struct: Structure replacement value in USD (from FEMA NSI)
+        val_cont:   Contents replacement value in USD (from FEMA NSI)
 
     Returns:
         BuildingDamage with loss estimates
@@ -311,25 +323,30 @@ def estimate_building_damage(
     depth_ft = depth_m * 3.28084
 
     # Adjust for first finished floor height
-    ffh = first_floor_ht_ft if first_floor_ht_ft is not None else DEFAULT_FFH_FT.get(building_type, 1.0)
+    # NSI found_ht is the elevation above grade — use it when available
+    ffh = (first_floor_ht_ft if first_floor_ht_ft is not None
+           else DEFAULT_FFH_FT.get(building_type, 1.0))
     depth_above_floor_ft = depth_ft - ffh
 
-    # Look up damage percentages
+    # Look up damage percentages from HAZUS depth-damage curves
     struct_pct = get_damage_pct(depth_above_floor_ft, building_type, "structure")
     content_pct = get_damage_pct(depth_above_floor_ft, building_type, "contents")
     total_pct = get_total_damage_pct(depth_above_floor_ft, building_type)
 
-    # Estimate dollar loss
-    area = sqft or DEFAULT_SQFT.get(building_type, 1400)
-    base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
-    # Apply per-building variation: same building always gets same multiplier
-    # (deterministic from its ID), but neighbours differ to reflect age,
-    # condition, finish quality, and local market value variation.
-    cost_per_sqft = base_cost * _cost_multiplier(building_id)
-    struct_value = area * cost_per_sqft
-    content_value = struct_value * CONTENTS_TO_STRUCTURE_RATIO
-    replacement = struct_value + content_value
+    # ── Replacement value ───────────────────────────────────────────
+    if val_struct is not None:
+        # NSI path: use actual tabulated replacement costs
+        struct_value = float(val_struct)
+        content_value = float(val_cont) if val_cont is not None else struct_value * CONTENTS_TO_STRUCTURE_RATIO
+    else:
+        # Fallback path: sqft × $/sqft with per-building cost variation
+        area = sqft or DEFAULT_SQFT.get(building_type, 1400)
+        base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
+        cost_per_sqft = base_cost * _cost_multiplier(building_id)
+        struct_value = area * cost_per_sqft
+        content_value = struct_value * CONTENTS_TO_STRUCTURE_RATIO
 
+    replacement = struct_value + content_value
     loss = (struct_pct / 100 * struct_value) + (content_pct / 100 * content_value)
 
     return BuildingDamage(
@@ -422,12 +439,18 @@ def estimate_damage_from_raster(
                 btype = building_type
 
             bid = props.get("id", props.get("building_id", str(i)))
-            sqft = props.get("area_sqft")
+            sqft      = props.get("area_sqft")
+            val_struct = props.get("val_struct")   # NSI: actual structure value
+            val_cont   = props.get("val_cont")     # NSI: actual contents value
+            found_ht   = props.get("found_ht")     # NSI: first-floor elevation
 
             damage = estimate_building_damage(
                 depth_m=depth_m, lon=lon, lat=lat,
                 building_type=btype, building_id=str(bid),
                 sqft=float(sqft) if sqft else None,
+                first_floor_ht_ft=float(found_ht) if found_ht is not None else None,
+                val_struct=float(val_struct) if val_struct is not None else None,
+                val_cont=float(val_cont) if val_cont is not None else None,
             )
             buildings.append(damage)
 
