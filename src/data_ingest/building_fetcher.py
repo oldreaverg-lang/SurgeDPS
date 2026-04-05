@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -127,8 +128,8 @@ def _build_query(bbox: Tuple[float, float, float, float]) -> str:
     Build an Overpass QL query for all buildings inside a bbox.
 
     bbox: (lat_min, lon_min, lat_max, lon_max)   — Overpass convention
-    Returns centroids (`out center`) so we get one point per building,
-    matching the pipeline's point-based damage model.
+    Uses `out center geom` so we get both the centroid and polygon vertices.
+    The polygon vertices let us compute actual building footprint area.
     """
     south, west, north, east = bbox
     return f"""
@@ -137,8 +138,39 @@ def _build_query(bbox: Tuple[float, float, float, float]) -> str:
   way["building"]({south},{west},{north},{east});
   relation["building"]({south},{west},{north},{east});
 );
-out center;
+out center geom;
 """.strip()
+
+
+def _polygon_area_sqft(geometry: List[Dict]) -> Optional[float]:
+    """
+    Compute polygon footprint area from Overpass geometry (list of {lat, lon}
+    dicts) using the Shoelace formula with a local degree-to-metres conversion.
+
+    Returns area in square feet, clamped to [200, 50 000], or None if the
+    geometry is too small to be a real building.
+    """
+    if not geometry or len(geometry) < 3:
+        return None
+
+    lat_mean = sum(p["lat"] for p in geometry) / len(geometry)
+    m_per_deg_lat = 111_320.0
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat_mean))
+
+    # Shoelace / surveyor's formula
+    n = len(geometry)
+    area_deg2 = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area_deg2 += geometry[i]["lon"] * geometry[j]["lat"]
+        area_deg2 -= geometry[j]["lon"] * geometry[i]["lat"]
+    area_m2 = abs(area_deg2) / 2.0 * m_per_deg_lat * m_per_deg_lon
+    area_sqft = area_m2 * 10.7639
+
+    # Guard against degenerate polygons (sheds < 200 sqft) and spurious giants
+    if area_sqft < 200:
+        return None
+    return min(area_sqft, 50_000.0)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -230,16 +262,25 @@ def fetch_buildings(
         tags = elem.get("tags", {})
         hazus_code = _classify_building(tags)
 
+        # Compute actual footprint area from polygon vertices when available.
+        # `out center geom` provides geometry for ways; relations may not.
+        geom_nodes = elem.get("geometry")  # list of {lat, lon} or None
+        area_sqft = _polygon_area_sqft(geom_nodes) if geom_nodes else None
+
+        props: Dict = {
+            "id": f"osm_{elem.get('id', len(features))}",
+            "type": hazus_code,
+            # Preserve useful OSM metadata for tooltip enrichment
+            "osm_name": tags.get("name", ""),
+            "osm_levels": tags.get("building:levels", ""),
+            "osm_building": tags.get("building", "yes"),
+        }
+        if area_sqft is not None:
+            props["area_sqft"] = round(area_sqft, 1)
+
         features.append({
             "type": "Feature",
-            "properties": {
-                "id": f"osm_{elem.get('id', len(features))}",
-                "type": hazus_code,
-                # Preserve useful OSM metadata for tooltip enrichment
-                "osm_name": tags.get("name", ""),
-                "osm_levels": tags.get("building:levels", ""),
-                "osm_building": tags.get("building", "yes"),
-            },
+            "properties": props,
             "geometry": {
                 "type": "Point",
                 "coordinates": [lon, lat],

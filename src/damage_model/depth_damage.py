@@ -23,6 +23,7 @@ Each curve has structure and contents variants.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -269,6 +270,21 @@ class DamageEstimate:
             return "severe"
 
 
+def _cost_multiplier(building_id: str) -> float:
+    """
+    Return a deterministic per-building replacement-cost multiplier in [0.60, 1.40].
+
+    Seeded by the building ID so the same building always gets the same value,
+    but neighbouring buildings with different IDs get meaningfully different
+    estimates — reflecting real-world variation in age, condition, finish level,
+    and local market value that OSM tags don't capture.
+    """
+    if not building_id:
+        return 1.0
+    digest = int(hashlib.md5(building_id.encode()).hexdigest()[:8], 16)
+    return 0.60 + (digest / 0xFFFF_FFFF) * 0.80   # uniform in [0.60, 1.40]
+
+
 def estimate_building_damage(
     depth_m: float,
     lon: float = 0.0,
@@ -305,7 +321,11 @@ def estimate_building_damage(
 
     # Estimate dollar loss
     area = sqft or DEFAULT_SQFT.get(building_type, 1400)
-    cost_per_sqft = DEFAULT_COST_PER_SQFT.get(building_type, 150)
+    base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
+    # Apply per-building variation: same building always gets same multiplier
+    # (deterministic from its ID), but neighbours differ to reflect age,
+    # condition, finish quality, and local market value variation.
+    cost_per_sqft = base_cost * _cost_multiplier(building_id)
     struct_value = area * cost_per_sqft
     content_value = struct_value * CONTENTS_TO_STRUCTURE_RATIO
     replacement = struct_value + content_value
