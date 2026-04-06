@@ -81,6 +81,47 @@ const CAT_COLORS: Record<number, string> = {
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Helpers (shared between components)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const shortName = (name: string) =>
+  name.replace(/^(Hurricane|Tropical Storm|Tropical Depression)\s+/i, '');
+const byDPS = (a: StormInfo, b: StormInfo) => (b.dps_score || 0) - (a.dps_score || 0);
+const dpsColor = (score: number): string => {
+  if (score >= 80) return '#ef4444';
+  if (score >= 60) return '#f97316';
+  if (score >= 40) return '#fbbf24';
+  if (score >= 20) return '#34d399';
+  if (score >= 10) return '#60a5fa';
+  return '#94a3b8';
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// StormRow (defined outside StormBrowser to avoid remount on every render)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function StormRow({ s, activeStormId, activating, onSelect }: {
+  s: StormInfo; activeStormId: string | null; activating: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const isActive = s.storm_id === activeStormId;
+  const dot = dpsColor(s.dps_score || 0);
+  return (
+    <button
+      onClick={() => onSelect(s.storm_id)}
+      disabled={activating}
+      className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors rounded-md text-sm ${
+        isActive ? 'bg-indigo-500/20 text-white' : 'text-slate-300 hover:bg-slate-700/60 hover:text-white'
+      }`}
+    >
+      <span style={{ background: dot, width: 8, height: 8, borderRadius: '50%', flexShrink: 0 }} />
+      <span className="truncate font-medium">{shortName(s.name)}</span>
+      <span className="ml-auto text-xs text-slate-500 shrink-0">
+        {s.dps_score ? <><span style={{ color: dot, fontWeight: 600 }}>{s.dps_score.toFixed(1)}</span>{' '}<span className="text-slate-600">DPS</span></> : '—'}
+      </span>
+    </button>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Storm Browser Sidebar
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -102,25 +143,17 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
   const [searchLoading, setSearchLoading] = useState(false);
   const searchTimeout = useRef<any>(null);
 
-  // Load sidebar data on mount
   useEffect(() => {
     fetch('/surgedps/api/seasons').then(r => r.json()).then(setSeasons).catch(() => {});
     fetch('/surgedps/api/storms/historic').then(r => r.json()).then(setHistoricStorms).catch(() => {});
     fetch('/surgedps/api/storms/active').then(r => r.json()).then(setActiveNHC).catch(() => {});
   }, []);
 
-  // Expand a season year
   const toggleYear = useCallback((year: number) => {
-    if (expandedYear === year) {
-      setExpandedYear(null);
-      setYearStorms([]);
-    } else {
-      setExpandedYear(year);
-      fetch(`/surgedps/api/season/${year}`).then(r => r.json()).then(setYearStorms).catch(() => setYearStorms([]));
-    }
+    if (expandedYear === year) { setExpandedYear(null); setYearStorms([]); }
+    else { setExpandedYear(year); fetch(`/surgedps/api/season/${year}`).then(r => r.json()).then(setYearStorms).catch(() => setYearStorms([])); }
   }, [expandedYear]);
 
-  // Live search
   const handleSearch = useCallback((q: string) => {
     setSearchQuery(q);
     if (searchTimeout.current) clearTimeout(searchTimeout.current);
@@ -134,42 +167,12 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
     }, 300);
   }, []);
 
-  /** Strip "Hurricane " / "Tropical Storm " / "Tropical Depression " prefixes */
-  const shortName = (name: string) =>
-    name.replace(/^(Hurricane|Tropical Storm|Tropical Depression)\s+/i, '');
-
-  /** Sort storms by DPS score, highest first */
-  const byDPS = (a: StormInfo, b: StormInfo) => (b.dps_score || 0) - (a.dps_score || 0);
-
-  /** DPS severity color matching StormDPS thresholds */
-  const dpsColor = (score: number): string => {
-    if (score >= 80) return '#ef4444'; // Red — Catastrophic
-    if (score >= 60) return '#f97316'; // Orange — Extreme
-    if (score >= 40) return '#fbbf24'; // Yellow — Severe
-    if (score >= 20) return '#34d399'; // Green — Moderate
-    if (score >= 10) return '#60a5fa'; // Blue — Minor
-    return '#94a3b8';                  // Gray — Below Minor
-  };
-
-  const StormRow = ({ s }: { s: StormInfo }) => {
-    const isActive = s.storm_id === activeStormId;
-    const dot = dpsColor(s.dps_score || 0);
-    return (
-      <button
-        onClick={() => { setSearchQuery(''); setSearchResults(null); onSelectStorm(s.storm_id); }}
-        disabled={activating}
-        className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors rounded-md text-sm ${
-          isActive ? 'bg-indigo-500/20 text-white' : 'text-slate-300 hover:bg-slate-700/60 hover:text-white'
-        }`}
-      >
-        <span style={{ background: dot, width: 8, height: 8, borderRadius: '50%', flexShrink: 0 }} />
-        <span className="truncate font-medium">{shortName(s.name)}</span>
-        <span className="ml-auto text-xs text-slate-500 shrink-0">
-          {s.dps_score ? <><span style={{ color: dot, fontWeight: 600 }}>{s.dps_score.toFixed(1)}</span>{' '}<span className="text-slate-600">DPS</span></> : '—'}
-        </span>
-      </button>
-    );
-  };
+  // Select storm AND auto-close sidebar (mobile)
+  const selectAndClose = useCallback((id: string) => {
+    setSearchQuery(''); setSearchResults(null);
+    onSelectStorm(id);
+    onClose(); // closes sidebar on mobile; no-op on desktop (sidebar is always visible via lg:relative)
+  }, [onSelectStorm, onClose]);
 
   return (
     <div className={`w-72 shrink-0 bg-slate-900 border-r border-slate-700/50 flex flex-col h-screen overflow-hidden absolute inset-y-0 left-0 z-30 lg:relative transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
@@ -202,18 +205,15 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
         <div className="px-4 pt-4 pb-3 border-b border-slate-700/50">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider">Active Storms</h2>
-            <span className="text-[10px] text-slate-500">
-              {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
           </div>
           {activeNHC.length === 0 ? (
             <p className="text-xs text-slate-500 leading-relaxed">
               No active tropical cyclones in any basin. During hurricane season (Jun–Nov Atlantic, May–Nov East Pacific),
-              active storms will appear here automatically with live DPS tracking.
+              active storms will appear here automatically.
             </p>
           ) : (
             <div className="space-y-1">
-              {[...activeNHC].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} />)}
+              {[...activeNHC].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)}
             </div>
           )}
         </div>
@@ -239,7 +239,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
               ) : searchResults.length === 0 ? (
                 <p className="text-xs text-slate-500 p-3 text-center">No storms found</p>
               ) : (
-                [...searchResults].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} />)
+                [...searchResults].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)
               )}
             </div>
           )}
@@ -264,7 +264,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
             </button>
             {historicOpen && (
               <div className="mt-1 ml-1 pl-2 border-l border-slate-700/50 space-y-0.5">
-                {[...historicStorms].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} />)}
+                {[...historicStorms].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)}
               </div>
             )}
           </div>
@@ -289,7 +289,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
                     {yearStorms.length === 0 ? (
                       <p className="text-xs text-slate-500 py-2 px-3">Loading...</p>
                     ) : (
-                      [...yearStorms].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} />)
+                      [...yearStorms].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)
                     )}
                   </div>
                 )}
@@ -322,7 +322,7 @@ const ELI_STYLES: Record<string, { bg: string; text: string; border: string; lab
   unavailable: { bg: 'bg-gray-50', text: 'text-gray-400', border: 'border-gray-200', label: 'Pending' },
 };
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps, onOpenSidebar }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps, onOpenSidebar, zoom, onClearStorm }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -331,43 +331,85 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   eli: { value: number; tier: string };
   validatedDps: { value: number; adj: number; reason: string };
   onOpenSidebar: () => void;
+  zoom: number;
+  onClearStorm: () => void;
 }) {
+  // Auto-expand on desktop, collapsed by default on mobile
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    setExpanded(mq.matches);
+    const handler = (e: MediaQueryListEvent) => setExpanded(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
   if (!storm) return null;
 
   return (
-    <div className="absolute top-4 left-4 bg-white/95 backdrop-blur shadow-2xl rounded-lg p-4 w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10 flex flex-col max-h-[90vh] overflow-y-auto">
-      {/* Mobile: open sidebar button */}
-      <button
-        onClick={onOpenSidebar}
-        className="lg:hidden absolute top-3 right-3 text-slate-400 hover:text-slate-700 transition-colors p-1 rounded text-base leading-none"
-        aria-label="Open storm browser"
-      >☰</button>
+    <div className="absolute top-4 left-4 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
+
+      {/* ── Always-visible compact header ── */}
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        {/* Sidebar toggle (mobile only) */}
+        <button
+          onClick={onOpenSidebar}
+          className="lg:hidden text-slate-400 hover:text-slate-700 transition-colors p-1 rounded text-base leading-none shrink-0"
+          aria-label="Open storm browser"
+        >☰</button>
+
+        {/* Storm name + category */}
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <span className="font-bold text-gray-800 text-sm truncate">{storm.name}</span>
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full text-white shrink-0"
+            style={{ backgroundColor: CAT_COLORS[storm.category] }}>CAT {storm.category}</span>
+        </div>
+
+        {/* Loss summary — visible only when collapsed */}
+        {!expanded && totals.loss > 0 && (
+          <span className="text-red-600 font-black text-sm shrink-0">
+            ${(totals.loss / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}M
+          </span>
+        )}
+
+        {/* Clear storm */}
+        <button
+          onClick={onClearStorm}
+          className="text-gray-300 hover:text-red-500 transition-colors shrink-0 text-xs px-0.5"
+          aria-label="Close storm"
+          title="Close storm"
+        >✕</button>
+
+        {/* Expand / collapse toggle */}
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="text-gray-400 hover:text-gray-600 transition-colors shrink-0 text-xs px-1"
+          aria-label={expanded ? 'Collapse panel' : 'Expand panel'}
+        >{expanded ? '▲' : '▼'}</button>
+      </div>
+
+      {/* ── Expandable detail content ── */}
+      {expanded && (
+      <div className="px-4 pb-4 overflow-y-auto max-h-[70vh] flex flex-col">
 
       {/* Storm info card */}
       <div className="rounded-xl p-3 mb-3 border shadow-sm"
         style={{ backgroundColor: `${CAT_COLORS[storm.category]}10`, borderColor: `${CAT_COLORS[storm.category]}40` }}
       >
-        <div className="flex items-center justify-between mb-1.5">
-          <h3 className="font-bold text-gray-800 text-sm">{storm.name}</h3>
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
-            style={{ backgroundColor: CAT_COLORS[storm.category] }}
-          >CAT {storm.category}</span>
-        </div>
         <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-gray-600">
-          <span>Wind: <strong className="text-gray-800">{storm.max_wind_kt} kt ({Math.round(storm.max_wind_kt * 1.15078)} mph)</strong></span>
+          <span>Wind: <strong className="text-gray-800">{Math.round(storm.max_wind_kt * 1.15078)} mph</strong></span>
           <span>Pressure: <strong className="text-gray-800">{storm.min_pressure_mb} mb</strong></span>
           <span>Year: <strong className="text-gray-800">{storm.year}</strong></span>
-          <span>Record: <strong className="text-gray-800 capitalize">{storm.status === 'historical' ? 'Historical' : storm.status}</strong></span>
         </div>
       </div>
 
       {/* R5: Confidence badge */}
       {(() => {
         const cs = CONFIDENCE_STYLES[confidence.level] || CONFIDENCE_STYLES.unvalidated;
-        const tip = confidence.level === 'high' ? 'Validated against real damage reports'
-          : confidence.level === 'medium' ? 'Partially validated with survey data'
-          : confidence.level === 'low' ? 'Limited validation data available'
-          : 'Model estimate only — no ground-truth validation';
+        const tip = confidence.level === 'high' ? 'Strong building data coverage in the affected area'
+          : confidence.level === 'medium' ? 'Moderate building data — some gaps possible'
+          : confidence.level === 'low' ? 'Limited building data — estimates may be incomplete'
+          : 'Model estimate only — building data not yet loaded';
         return (
           <div className={`${cs.bg} rounded-lg px-3 py-2 mb-3`}>
             <div className="flex items-center justify-between">
@@ -383,7 +425,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       {validatedDps.adj !== 0 && (
         <div className={`${validatedDps.adj > 0 ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'} rounded-lg px-3 py-1.5 mb-3 border`}>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-gray-600 uppercase">Validated DPS</span>
+            <span className="text-[10px] font-bold text-gray-600 uppercase">Adjusted Damage Score</span>
             <span className={`text-sm font-black ${validatedDps.adj > 0 ? 'text-orange-700' : 'text-blue-700'}`}>{validatedDps.value.toFixed(1)}</span>
           </div>
           <div className="text-[10px] text-gray-500 mt-0.5">{validatedDps.reason}</div>
@@ -441,6 +483,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         <div className="text-xs text-blue-500 mt-0.5">
           {loadingCells.size > 0
             ? `Fetching data for ${loadingCells.size} more area${loadingCells.size !== 1 ? 's' : ''}…`
+            : zoom >= 13 ? 'Zoom out to see grid borders and expand coverage'
             : 'Click the dashed borders on the map to expand coverage'}
         </div>
       </div>
@@ -450,7 +493,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       <div className="space-y-1.5">
         {LEGEND_ITEMS.map((item, i) => (
           <div key={i} className="flex items-center gap-2">
-            <span className="w-4 h-4 rounded shadow-inner border border-gray-200 shrink-0" style={{ backgroundColor: item.color }}></span>
+            <span className="w-4 h-4 rounded shadow-inner border border-gray-200 shrink-0" style={{ backgroundColor: item.color, opacity: 0.35 }}></span>
             <span className="text-xs font-medium text-gray-600">{item.label}</span>
           </div>
         ))}
@@ -458,11 +501,14 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       <hr className="my-3 border-gray-200" />
       <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Building Damage</div>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#4ade80] border border-gray-300"></span> No Damage</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#facc15] border border-gray-300"></span> Minor</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#fb923c] border border-gray-300"></span> Moderate</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#ef4444] border border-gray-300"></span> Major</div>
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#7f1d1d] border border-gray-300"></span> Severe</div>
       </div>
+      </div>
+      )}
     </div>
   );
 }
@@ -487,6 +533,10 @@ function App() {
   const [confidence, setConfidence] = useState<{ level: string; count: number }>({ level: 'unvalidated', count: 0 });
   const [eli, setEli] = useState<{ value: number; tier: string }>({ value: 0, tier: 'unavailable' });
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
+
+  // Cell load error toast
+  const [cellError, setCellError] = useState<string | null>(null);
+  useEffect(() => { if (cellError) { const t = setTimeout(() => setCellError(null), 5000); return () => clearTimeout(t); } }, [cellError]);
 
   // Reverse geocoding for building hover
   const geocodeCache = useRef<Record<string, string>>({});
@@ -597,7 +647,7 @@ function App() {
         totalDepth: p.totalDepth + cellFeats.reduce((s: number, f: any) => s + (f.properties.depth_ft || 0), 0),
       }));
       setLoadedCells(prev => new Set([...prev, key]));
-    } catch (err) { console.error(`Failed cell (${col},${row}):`, err); }
+    } catch (err) { console.error(`Failed cell (${col},${row}):`, err); setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.'); }
     finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
   }, [loadedCells, loadingCells]);
 
@@ -649,6 +699,18 @@ function App() {
   }, []);
 
   const onClick = useCallback((event: any) => {
+    // Cluster click → zoom in
+    const cluster = event.features?.find((f: any) => f.layer.id === 'damage-clusters');
+    if (cluster && mapRef.current) {
+      const src = mapRef.current.getSource('damage-data') as any;
+      if (src?.getClusterExpansionZoom) {
+        src.getClusterExpansionZoom(cluster.properties.cluster_id, (err: any, z: number) => {
+          if (!err) mapRef.current?.flyTo({ center: [event.lngLat.lng, event.lngLat.lat], zoom: z, duration: 500 });
+        });
+      }
+      return;
+    }
+    // Grid cell click → load data
     const f = event.features?.find((f: any) => f.layer.id === 'grid-available-fill');
     if (f) loadCell(f.properties.col, f.properties.row);
   }, [loadCell]);
@@ -681,12 +743,13 @@ function App() {
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
           mapStyle={MAP_STYLE}
           interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', ...(showGrid ? ['grid-available-fill'] : [])]}
+          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
           onZoom={e => setZoom(e.viewState.zoom)}
         >
           <NavigationControl position="top-right" />
 
-          {allFlood && <Source id="flood-data" type="geojson" data={allFlood}><Layer {...(floodLayerStyle as any)} /></Source>}
+          {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
           {allBuildings && (
             <Source id="damage-data" type="geojson" data={allBuildings}
@@ -700,9 +763,17 @@ function App() {
                   'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
                 }} />
               <Layer id="damage-clusters" type="circle" filter={['has', 'point_count']}
-                paint={{ 'circle-color': '#3b82f6', 'circle-radius': ['step', ['get', 'point_count'], 16, 5, 22, 10, 30], 'circle-stroke-width': 3, 'circle-stroke-color': '#fff' }} />
+                paint={{
+                  'circle-color': ['step', ['/', ['get', 'total_loss'], ['get', 'point_count']],
+                    '#4ade80', 5000, '#facc15', 25000, '#fb923c', 75000, '#ef4444', 200000, '#7f1d1d'],
+                  'circle-radius': ['step', ['get', 'point_count'], 16, 5, 22, 10, 30],
+                  'circle-stroke-width': 3, 'circle-stroke-color': '#fff',
+                }} />
               <Layer id="damage-cluster-count" type="symbol" filter={['has', 'point_count']}
-                layout={{ 'text-field': '{point_count_abbreviated}', 'text-size': 13 }}
+                layout={{
+                  'text-field': ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1000]]], 'K'],
+                  'text-size': 11,
+                }}
                 paint={{ 'text-color': '#fff' }} />
             </Source>
           )}
@@ -744,7 +815,7 @@ function App() {
                   </div></>
                 ) : hoverInfo.type === 'flood' ? (
                   <><h3 className="font-semibold text-gray-800 text-sm mb-1">Storm Surge Depth</h3>
-                  <p className="text-gray-800 font-bold text-base">{(hoverInfo.feature.properties.depth_ft || hoverInfo.feature.properties.depth * 3.28084).toFixed(1)} ft</p>
+                  <p className="text-gray-800 font-bold text-base">{(hoverInfo.feature.properties.depth_ft != null ? hoverInfo.feature.properties.depth_ft : hoverInfo.feature.properties.depth * 3.28084).toFixed(1)} ft</p>
                   <p className="text-gray-400 text-[10px] mt-0.5">Modeled inundation at this location</p></>
                 ) : (
                   <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property Damage</h3>
@@ -764,7 +835,20 @@ function App() {
         </Map>
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} onOpenSidebar={() => setSidebarOpen(true)} />
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} onClearStorm={() => {
+          setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
+          setLoadedCells(new Set()); setLoadingCells(new Set());
+          setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
+          setConfidence({ level: 'unvalidated', count: 0 }); setEli({ value: 0, tier: 'unavailable' });
+          setValidatedDps({ value: 0, adj: 0, reason: '' });
+        }} />
+
+        {/* Cell error toast */}
+        {cellError && (
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-sm text-center">
+            {cellError}
+          </div>
+        )}
 
         {/* Empty-state overlay — shown when no storm is active */}
         {!activeStorm && !activating && (
