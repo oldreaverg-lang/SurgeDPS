@@ -1,0 +1,5 @@
+# Python dependencies for HEC-RAS result extraction
+h5py>=3.9.0
+numpy>=1.24.0
+rasterio>=1.3.0
+boto3>=1.28.0

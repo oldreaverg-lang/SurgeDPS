@@ -258,16 +258,21 @@ class DamageEstimate:
 
     def damage_category(self, pct: float) -> str:
         """Classify damage percentage into FEMA categories."""
-        if pct <= 0:
-            return "none"
-        elif pct < 10:
-            return "minor"
-        elif pct < 30:
-            return "moderate"
-        elif pct < 50:
-            return "major"
-        else:
-            return "severe"
+        return _damage_category(pct)
+
+
+def _damage_category(pct: float) -> str:
+    """Classify damage percentage into FEMA categories (standalone version)."""
+    if pct <= 0:
+        return "none"
+    elif pct < 10:
+        return "minor"
+    elif pct < 30:
+        return "moderate"
+    elif pct < 50:
+        return "major"
+    else:
+        return "severe"
 
 
 def _cost_multiplier(building_id: str) -> float:
@@ -542,12 +547,7 @@ def _write_damage_geojson(
                 "contents_damage_pct": b.contents_damage_pct,
                 "total_damage_pct": b.total_damage_pct,
                 "estimated_loss_usd": b.estimated_loss_usd,
-                "damage_category": DamageEstimate(
-                    buildings_assessed=0, buildings_damaged=0,
-                    total_loss_usd=0, total_replacement_usd=0,
-                    avg_damage_pct=0, max_damage_pct=0,
-                    damage_by_category={}, buildings=[],
-                ).damage_category(b.total_damage_pct),
+                "damage_category": _damage_category(b.total_damage_pct),
             },
             "geometry": {
                 "type": "Point",

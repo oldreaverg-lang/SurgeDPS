@@ -567,36 +567,19 @@ function App() {
     setValidatedDps({ value: 0, adj: 0, reason: '' });
 
     try {
-      const resp = await fetch(`/surgedps/api/storm/${stormId}/activate`);
+      const ac = new AbortController();
+      const timeout = setTimeout(() => ac.abort(), 120_000); // 2 min timeout for activation
+      const resp = await fetch(`/surgedps/api/storm/${stormId}/activate`, { signal: ac.signal });
+      clearTimeout(timeout);
       if (!resp.ok) throw new Error(`${resp.status}`);
       const data = await resp.json();
-      const { storm, center_cell, grid_cells } = data;
+      const { storm, center_cell } = data;
       setActiveStorm(storm);
       if (storm.confidence) setConfidence({ level: storm.confidence, count: storm.building_count || 0 });
       if (storm.eli) setEli({ value: storm.eli, tier: storm.eli_tier || 'unavailable' });
       if (storm.validated_dps) setValidatedDps({ value: storm.validated_dps, adj: storm.dps_adjustment || 0, reason: storm.dps_adj_reason || '' });
 
-      // R6: If server returned a 3x3 grid, merge all cells
-      if (grid_cells) {
-        let mergedBuildings: any[] = [];
-        let mergedFlood: any[] = [];
-        const keys = new Set<string>();
-        let totalBldgs = 0, totalLoss = 0, totalDepth = 0;
-        for (const [k, cellData] of Object.entries(grid_cells) as [string, any][]) {
-          const [c, r] = k.split(',').map(Number);
-          keys.add(cellKey(c, r));
-          const feats = cellData.buildings?.features || [];
-          mergedBuildings.push(...feats);
-          mergedFlood.push(...(cellData.flood?.features || []));
-          totalBldgs += feats.length;
-          totalLoss += feats.reduce((s: number, f: any) => s + (f.properties.estimated_loss_usd || 0), 0);
-          totalDepth += feats.reduce((s: number, f: any) => s + (f.properties.depth_ft || 0), 0);
-        }
-        setAllBuildings({ type: 'FeatureCollection', features: mergedBuildings });
-        setAllFlood({ type: 'FeatureCollection', features: mergedFlood });
-        setLoadedCells(keys);
-        setImpactTotals({ buildings: totalBldgs, loss: totalLoss, totalDepth });
-      } else if (center_cell) {
+      if (center_cell) {
         setAllBuildings(center_cell.buildings);
         setAllFlood(center_cell.flood);
         setLoadedCells(new Set([cellKey(0, 0)]));
@@ -608,8 +591,12 @@ function App() {
       }
 
       mapRef.current?.flyTo({ center: [storm.landfall_lon, storm.landfall_lat], zoom: 10, pitch: 30, duration: 2500 });
+
+      // Server may return partial data with a cell_error flag
+      if (storm.cell_error) setCellError(storm.cell_error);
     } catch (err) {
       console.error('Failed to activate storm:', err);
+      setCellError('Failed to load storm data. The server may be warming up — try again in a moment.');
     } finally {
       setActivating(false);
       activatingRef.current = false;
@@ -639,26 +626,42 @@ function App() {
     return { type: 'FeatureCollection' as const, features };
   }, [activeStorm, loadedCells, loadingCells]);
 
-  // Track loading cells as a ref to avoid triggering gridGeoJson recomputes (#16)
+  // Refs to avoid stale closures in loadCell callback
   const loadingCellsRef = useRef(loadingCells);
   loadingCellsRef.current = loadingCells;
+  const loadedCellsRef = useRef(loadedCells);
+  loadedCellsRef.current = loadedCells;
+  const activeStormRef = useRef(activeStorm);
+  activeStormRef.current = activeStorm;
 
-  // Load cell
+  // Load cell — stable callback with no state dependencies (uses refs)
   const loadCell = useCallback(async (col: number, row: number) => {
     const key = cellKey(col, row);
-    if (loadedCells.has(key) || loadingCellsRef.current.has(key)) return;
+    if (loadedCellsRef.current.has(key) || loadingCellsRef.current.has(key)) return;
     setLoadingCells(prev => new Set([...prev, key]));
     try {
-      const stormId = activeStorm?.storm_id || '';
-      const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`);
+      const stormId = activeStormRef.current?.storm_id || '';
+      const ac = new AbortController();
+      const timeout = setTimeout(() => ac.abort(), 90_000); // 90s timeout for cell generation
+      const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`, { signal: ac.signal });
+      clearTimeout(timeout);
       if (!resp.ok) throw new Error(`${resp.status}`);
       const cellData = await resp.json();
       const { buildings, flood } = cellData;
       if (cellData.confidence) setConfidence({ level: cellData.confidence, count: cellData.building_count || 0 });
       if (cellData.eli) setEli({ value: cellData.eli, tier: cellData.eli_tier || 'unavailable' });
       if (cellData.validated_dps) setValidatedDps({ value: cellData.validated_dps, adj: cellData.dps_adjustment || 0, reason: cellData.dps_adj_reason || '' });
-      setAllBuildings((p: any) => p ? { type: 'FeatureCollection', features: [...p.features, ...buildings.features] } : buildings);
-      setAllFlood((p: any) => p ? { type: 'FeatureCollection', features: [...p.features, ...flood.features] } : flood);
+      // Append new features using concat (avoids O(n) spread on large arrays)
+      setAllBuildings((p: any) => {
+        if (!p) return buildings;
+        const merged = p.features.concat(buildings.features);
+        return { type: 'FeatureCollection', features: merged };
+      });
+      setAllFlood((p: any) => {
+        if (!p) return flood;
+        const merged = p.features.concat(flood.features);
+        return { type: 'FeatureCollection', features: merged };
+      });
       const cellFeats = buildings?.features || [];
       setImpactTotals(p => ({
         buildings: p.buildings + cellFeats.length,
@@ -668,9 +671,9 @@ function App() {
       setLoadedCells(prev => new Set([...prev, key]));
     } catch (err) { console.error(`Failed cell (${col},${row}):`, err); setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.'); }
     finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
-  }, [loadedCells, loadingCells]);
+  }, []); // stable — all state accessed via refs
 
-  // Reverse-geocode building hover via Nominatim
+  // Reverse-geocode building hover via Nominatim (debounced 300ms to avoid hammering the API)
   useEffect(() => {
     if (hoverInfo?.type !== 'damage') {
       setHoverAddress(null);
@@ -682,28 +685,30 @@ function App() {
       setHoverAddress(geocodeCache.current[cacheKey] || null);
       return;
     }
-    // Pre-populate so we don't fire duplicate requests while waiting
-    geocodeCache.current[cacheKey] = '';
     setHoverAddress(null);
     const controller = new AbortController();
-    fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
-      { signal: controller.signal, headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' } }
-    )
-      .then(r => r.json())
-      .then(data => {
-        const addr = data?.address || {};
-        const parts = [
-          addr.house_number,
-          addr.road,
-          addr.city || addr.town || addr.village || addr.hamlet,
-        ].filter(Boolean);
-        const label = parts.length > 1 ? parts.join(', ') : null;
-        geocodeCache.current[cacheKey] = label || '';
-        setHoverAddress(label);
-      })
-      .catch(() => {});
-    return () => controller.abort();
+    const timer = setTimeout(() => {
+      // Pre-populate so we don't fire duplicate requests
+      geocodeCache.current[cacheKey] = '';
+      fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+        { signal: controller.signal, headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' } }
+      )
+        .then(r => r.json())
+        .then(data => {
+          const addr = data?.address || {};
+          const parts = [
+            addr.house_number,
+            addr.road,
+            addr.city || addr.town || addr.village || addr.hamlet,
+          ].filter(Boolean);
+          const label = parts.length > 1 ? parts.join(', ') : null;
+          geocodeCache.current[cacheKey] = label || '';
+          setHoverAddress(label);
+        })
+        .catch(() => {});
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [hoverInfo]);
 
   // Events
@@ -764,7 +769,7 @@ function App() {
           interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', ...(showGrid ? ['grid-available-fill'] : [])]}
           cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
-          onZoom={e => setZoom(e.viewState.zoom)}
+          onZoomEnd={e => setZoom(e.viewState.zoom)}
         >
           <NavigationControl position="top-right" />
 

@@ -213,41 +213,54 @@ def fetch_buildings(
     if nsi_result:
         return nsi_result
 
-    print("  [buildings] NSI unavailable, falling back to OpenStreetMap")
+    logger.info("NSI unavailable, falling back to OpenStreetMap")
     # ── OSM fallback below ────────────────────────────────────────
     if cache and os.path.exists(output_path):
         with open(output_path) as f:
             data = json.load(f)
         n = len(data.get("features", []))
-        logger.info(f"Using cached buildings ({n} features): {output_path}")
-        print(f"  [cache hit] {n} buildings loaded from {output_path}")
+        logger.info("Using cached buildings (%d features): %s", n, output_path)
         return output_path
 
     # Overpass uses (south, west, north, east) ordering
     bbox = (lat_min, lon_min, lat_max, lon_max)
     query = _build_query(bbox)
 
-    print(f"  Querying Overpass API for buildings in "
-          f"[{lon_min:.2f},{lat_min:.2f} → {lon_max:.2f},{lat_max:.2f}] ...")
+    logger.info("Querying Overpass API for buildings in "
+                "[%.2f,%.2f → %.2f,%.2f]", lon_min, lat_min, lon_max, lat_max)
 
     raw = None
     last_err = None
     for endpoint in OVERPASS_ENDPOINTS:
-        try:
-            print(f"  Trying endpoint: {endpoint}")
-            resp = requests.post(
-                endpoint,
-                data={"data": query},
-                timeout=OVERPASS_TIMEOUT + 30,
-                headers={"User-Agent": "SurgeDPS/1.0 (flood-damage-model)"},
-            )
-            resp.raise_for_status()
-            raw = resp.json()
+        for attempt in range(3):  # Up to 3 retries per endpoint
+            try:
+                logger.debug("Trying endpoint: %s (attempt %d)", endpoint, attempt + 1)
+                resp = requests.post(
+                    endpoint,
+                    data={"data": query},
+                    timeout=OVERPASS_TIMEOUT + 30,
+                    headers={"User-Agent": "SurgeDPS/1.0 (flood-damage-model)"},
+                )
+                if resp.status_code == 429:
+                    wait = min(2 ** attempt * 5, 30)
+                    logger.warning("Overpass 429 rate-limited, retrying in %ds", wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                raw = resp.json()
+                break
+            except requests.Timeout as e:
+                last_err = e
+                wait = 2 ** attempt * 2
+                logger.warning("Overpass timeout (attempt %d), retrying in %ds", attempt + 1, wait)
+                time.sleep(wait)
+                continue
+            except (requests.RequestException, ValueError) as e:
+                last_err = e
+                logger.warning("Endpoint %s failed (%s), trying next", endpoint, e.__class__.__name__)
+                break  # Don't retry non-transient errors, move to next endpoint
+        if raw is not None:
             break
-        except (requests.RequestException, ValueError) as e:
-            last_err = e
-            print(f"  Endpoint failed ({e.__class__.__name__}), trying next...")
-            continue
 
     if raw is None:
         raise RuntimeError(
@@ -255,7 +268,7 @@ def fetch_buildings(
         )
 
     elements = raw.get("elements", [])
-    print(f"  Overpass returned {len(elements)} raw elements")
+    logger.info("Overpass returned %d raw elements", len(elements))
 
     # Convert to GeoJSON FeatureCollection
     features = []
@@ -315,7 +328,7 @@ def fetch_buildings(
         t = feat["properties"]["type"]
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    print(f"  Wrote {len(features)} buildings to {output_path}")
-    print(f"  HAZUS breakdown: {type_counts}")
+    logger.info("Wrote %d buildings to %s", len(features), output_path)
+    logger.debug("HAZUS breakdown: %s", type_counts)
 
     return output_path

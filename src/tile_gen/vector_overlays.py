@@ -22,6 +22,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from common.saffir_simpson import wind_to_category as _wind_to_cat_int
+
 logger = logging.getLogger(__name__)
 
 
@@ -252,21 +254,15 @@ def extract_track_points(shapefile_dir: str) -> List[dict]:
 
 
 def _wind_to_category(wind_kt: int) -> str:
-    """Convert max sustained wind (knots) to Saffir-Simpson category string."""
-    if wind_kt >= 137:
-        return "CAT5"
-    elif wind_kt >= 113:
-        return "CAT4"
-    elif wind_kt >= 96:
-        return "CAT3"
-    elif wind_kt >= 83:
-        return "CAT2"
-    elif wind_kt >= 64:
-        return "CAT1"
-    elif wind_kt >= 34:
-        return "TS"
-    else:
-        return "TD"
+    """Convert max sustained wind (knots) to Saffir-Simpson category string.
+
+    Uses the canonical wind_to_category() from common.saffir_simpson and
+    wraps the int result into the string label expected by the tile layer.
+    """
+    cat = _wind_to_cat_int(wind_kt)
+    if cat >= 1:
+        return f"CAT{cat}"
+    return "TS" if wind_kt >= 34 else "TD"
 
 
 def build_track_geojson(

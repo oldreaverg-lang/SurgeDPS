@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 NSI_ENDPOINT = "https://nsi.sec.usace.army.mil/nsiapi/structures"
 NSI_TIMEOUT = 30  # seconds
 
+# Reusable session for connection pooling (avoids per-request TCP handshake)
+_nsi_session = requests.Session()
+_nsi_session.headers.update({
+    "Accept": "application/json",
+    "User-Agent": "SurgeDPS/1.0 (flood-damage-model)",
+})
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # NSI occtype → full HAZUS code
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -113,8 +120,7 @@ def fetch_buildings_nsi(
         n = len(data.get("features", []))
         # Check it's an NSI file (has val_struct)
         if n > 0 and "val_struct" in (data["features"][0].get("properties") or {}):
-            logger.info(f"[NSI] Cache hit: {n} structures from {output_path}")
-            print(f"  [NSI cache hit] {n} structures loaded from {output_path}")
+            logger.info("[NSI] Cache hit: %d structures from %s", n, output_path)
             return output_path
 
     # NSI bbox = closed polygon of lon/lat pairs (counterclockwise rectangle)
@@ -126,31 +132,27 @@ def fetch_buildings_nsi(
         f"{lon_min},{lat_min}"
     )
 
-    print(f"  [NSI] Querying structures in "
-          f"[{lon_min:.3f},{lat_min:.3f} → {lon_max:.3f},{lat_max:.3f}] ...")
+    logger.info("[NSI] Querying structures in [%.3f,%.3f → %.3f,%.3f]",
+                lon_min, lat_min, lon_max, lat_max)
 
     try:
-        resp = requests.get(
+        resp = _nsi_session.get(
             NSI_ENDPOINT,
             params={"bbox": bbox},
             timeout=NSI_TIMEOUT,
-            headers={"Accept": "application/json",
-                     "User-Agent": "SurgeDPS/1.0 (flood-damage-model)"},
         )
         resp.raise_for_status()
         raw = resp.json()
     except Exception as exc:
-        logger.warning(f"[NSI] API request failed: {exc}")
-        print(f"  [NSI] Request failed ({exc.__class__.__name__}), will fall back to OSM")
+        logger.warning("[NSI] API request failed: %s", exc)
         return None
 
     nsi_features = raw.get("features", [])
     if not nsi_features:
         logger.info("[NSI] API returned 0 features for this bbox")
-        print("  [NSI] No structures returned for this area, will fall back to OSM")
         return None
 
-    print(f"  [NSI] {len(nsi_features)} structures received")
+    logger.info("[NSI] %d structures received", len(nsi_features))
 
     # Convert NSI features to our GeoJSON schema
     out_features = []
@@ -198,7 +200,7 @@ def fetch_buildings_nsi(
         })
 
     if not out_features:
-        print("  [NSI] No valid features after conversion, falling back to OSM")
+        logger.info("[NSI] No valid features after conversion, falling back to OSM")
         return None
 
     geojson = {"type": "FeatureCollection", "features": out_features}
@@ -210,10 +212,10 @@ def fetch_buildings_nsi(
     structs = [f["properties"].get("val_struct", 0) for f in out_features if f["properties"].get("val_struct")]
     if structs:
         avg = sum(structs) / len(structs)
-        print(f"  [NSI] Wrote {len(out_features)} structures; "
-              f"avg val_struct=${avg:,.0f} "
-              f"(min=${min(structs):,.0f} max=${max(structs):,.0f})")
+        logger.info("[NSI] Wrote %d structures; avg val_struct=$%,.0f "
+                    "(min=$%,.0f max=$%,.0f)",
+                    len(out_features), avg, min(structs), max(structs))
     else:
-        print(f"  [NSI] Wrote {len(out_features)} structures to {output_path}")
+        logger.info("[NSI] Wrote %d structures to %s", len(out_features), output_path)
 
     return output_path
