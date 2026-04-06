@@ -48,6 +48,7 @@ def handle_ingest(event: dict, context: Any) -> dict:
     storm_id = event["storm_id"]
     advisory_num = event["advisory_number"]
     center = event.get("center", {})
+    gis_data = event.get("gis_data", {})
 
     logger.info(f"INGEST stage: {storm_id} advisory {advisory_num}")
 

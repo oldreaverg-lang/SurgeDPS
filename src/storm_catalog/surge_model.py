@@ -89,6 +89,7 @@ def generate_surge_raster(
     speed_kt: float,
     rows: int = 200,
     cols: int = 200,
+    seed: int | None = None,
 ) -> str:
     """
     Generate a parametric surge depth GeoTIFF for a grid cell.
@@ -102,6 +103,7 @@ def generate_surge_raster(
         heading_deg: Storm heading (0=N, 90=E, etc.)
         speed_kt: Forward speed (knots)
         rows, cols: Raster dimensions
+        seed: Random seed for reproducible noise generation (optional)
 
     Returns:
         Path to the written GeoTIFF
@@ -171,8 +173,9 @@ def generate_surge_raster(
     surge_m = peak_surge_m * radial * asymmetry * inland_decay * speed_factor
 
     # Add realistic noise (wave setup variability)
-    noise = np.random.normal(0, peak_surge_m * 0.05, (rows, cols))
-    surge_m = surge_m + noise
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(0, peak_surge_m * 0.05, (rows, cols))
+    surge_m = np.maximum(surge_m + noise, 0)
 
     # Clamp to physical range
     surge_m = np.clip(surge_m, 0, peak_surge_m * 1.3).astype(np.float32)

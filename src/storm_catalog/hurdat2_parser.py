@@ -34,13 +34,7 @@ def _parse_latlon(s: str) -> float:
     return val
 
 
-def _saffir_simpson(wind_kt: int) -> int:
-    if wind_kt >= 137: return 5
-    if wind_kt >= 113: return 4
-    if wind_kt >= 96: return 3
-    if wind_kt >= 83: return 2
-    if wind_kt >= 64: return 1
-    return 0
+from common.saffir_simpson import wind_to_category as _saffir_simpson  # noqa: E402
 
 
 def parse_hurdat2(filepath: str) -> List[StormEntry]:

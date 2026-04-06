@@ -141,12 +141,15 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<StormInfo[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const searchTimeout = useRef<any>(null);
 
   useEffect(() => {
-    fetch('/surgedps/api/seasons').then(r => r.json()).then(setSeasons).catch(() => {});
-    fetch('/surgedps/api/storms/historic').then(r => r.json()).then(setHistoricStorms).catch(() => {});
-    fetch('/surgedps/api/storms/active').then(r => r.json()).then(setActiveNHC).catch(() => {});
+    let failed = 0;
+    const check = () => { failed++; if (failed >= 3) setLoadError(true); };
+    fetch('/surgedps/api/seasons').then(r => r.json()).then(setSeasons).catch(check);
+    fetch('/surgedps/api/storms/historic').then(r => r.json()).then(setHistoricStorms).catch(check);
+    fetch('/surgedps/api/storms/active').then(r => r.json()).then(setActiveNHC).catch(check);
   }, []);
 
   const toggleYear = useCallback((year: number) => {
@@ -166,6 +169,9 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
         .catch(() => { setSearchResults([]); setSearchLoading(false); });
     }, 300);
   }, []);
+
+  // Cleanup search timeout on unmount (#13)
+  useEffect(() => () => { if (searchTimeout.current) clearTimeout(searchTimeout.current); }, []);
 
   // Select storm AND auto-close sidebar (mobile)
   const selectAndClose = useCallback((id: string) => {
@@ -200,6 +206,11 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
       </div>
 
       <div className="flex-1 overflow-y-auto">
+        {loadError && (
+          <div className="mx-4 mt-3 px-3 py-2 bg-red-900/40 border border-red-700/50 rounded-lg">
+            <p className="text-xs text-red-300">Could not connect to the server. Check your connection and refresh the page.</p>
+          </div>
+        )}
 
         {/* ── ACTIVE STORMS ── */}
         <div className="px-4 pt-4 pb-3 border-b border-slate-700/50">
@@ -542,9 +553,11 @@ function App() {
   const geocodeCache = useRef<Record<string, string>>({});
   const [hoverAddress, setHoverAddress] = useState<string | null>(null);
 
-  // Activate a storm
+  // Activate a storm (use ref to avoid recreating callback on activating changes)
+  const activatingRef = useRef(false);
   const activateStorm = useCallback(async (stormId: string) => {
-    if (activating) return;
+    if (activatingRef.current) return;
+    activatingRef.current = true;
     setActivating(true);
     setAllBuildings(null); setAllFlood(null);
     setLoadedCells(new Set()); setLoadingCells(new Set());
@@ -599,8 +612,9 @@ function App() {
       console.error('Failed to activate storm:', err);
     } finally {
       setActivating(false);
+      activatingRef.current = false;
     }
-  }, [activating]);
+  }, []); // stable — no dependencies
 
   // Grid GeoJSON
   const gridGeoJson = useMemo(() => {
@@ -625,13 +639,18 @@ function App() {
     return { type: 'FeatureCollection' as const, features };
   }, [activeStorm, loadedCells, loadingCells]);
 
+  // Track loading cells as a ref to avoid triggering gridGeoJson recomputes (#16)
+  const loadingCellsRef = useRef(loadingCells);
+  loadingCellsRef.current = loadingCells;
+
   // Load cell
   const loadCell = useCallback(async (col: number, row: number) => {
     const key = cellKey(col, row);
-    if (loadedCells.has(key) || loadingCells.has(key)) return;
+    if (loadedCells.has(key) || loadingCellsRef.current.has(key)) return;
     setLoadingCells(prev => new Set([...prev, key]));
     try {
-      const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}`);
+      const stormId = activeStorm?.storm_id || '';
+      const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`);
       if (!resp.ok) throw new Error(`${resp.status}`);
       const cellData = await resp.json();
       const { buildings, flood } = cellData;

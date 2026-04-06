@@ -269,20 +269,7 @@ def _parse_int(text: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def _saffir_simpson(wind_kt: int) -> int:
-    """Convert max sustained wind (knots) to Saffir-Simpson category."""
-    if wind_kt >= 137:
-        return 5
-    elif wind_kt >= 113:
-        return 4
-    elif wind_kt >= 96:
-        return 3
-    elif wind_kt >= 83:
-        return 2
-    elif wind_kt >= 64:
-        return 1
-    else:
-        return 0  # Tropical Storm / Depression
+from common.saffir_simpson import wind_to_category as _saffir_simpson  # noqa: E402
 
 
 def fetch_active_storms() -> List[StormEntry]:
