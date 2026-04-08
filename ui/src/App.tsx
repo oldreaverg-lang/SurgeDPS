@@ -99,6 +99,79 @@ const CAT_COLORS: Record<number, string> = {
 const shortName = (name: string) =>
   name.replace(/^(Hurricane|Tropical Storm|Tropical Depression)\s+/i, '');
 const byDPS = (a: StormInfo, b: StormInfo) => (b.dps_score || 0) - (a.dps_score || 0);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Haversine distance (km) — used by comparable loss & wind model
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Parametric wind model — estimate sustained wind (mph) at a point
+// Uses modified Rankine vortex with category-scaled Rmax
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const RMAX_BY_CAT: Record<number, number> = { 0: 100, 1: 80, 2: 60, 3: 45, 4: 35, 5: 25 }; // km
+
+function estimateWindMph(distKm: number, maxWindKt: number, category: number): number {
+  const vMax = maxWindKt * 1.15078; // kt → mph
+  const rMax = RMAX_BY_CAT[category] ?? 50;
+  if (distKm <= 0.1) return vMax;
+  if (distKm <= rMax) return vMax * (distKm / rMax);
+  // Modified Rankine decay: V ∝ (Rmax/r)^0.5
+  return vMax * Math.pow(rMax / distKm, 0.5);
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Wind vs Water attribution model
+// Wind damage potential: 0 below 74 mph, ramps up via cubic curve
+// Water damage potential: proportional to interior flooding depth
+// Returns { windPct, waterPct } summing to 100
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function windWaterSplit(windMph: number, interiorFloodFt: number): { windPct: number; waterPct: number } {
+  // Wind damage potential: 0 at ≤74 mph, cubic ramp to 1.0 at 180 mph
+  const windNorm = Math.max(0, (windMph - 74) / (180 - 74));
+  const windPotential = Math.min(1, windNorm ** 1.5);
+  // Water damage potential: 0 at ≤0 ft, linear ramp to 1.0 at 8 ft interior flood
+  const waterPotential = Math.min(1, Math.max(0, interiorFloodFt / 8));
+  const total = windPotential + waterPotential;
+  if (total < 0.001) return { windPct: 50, waterPct: 50 }; // no damage signal — even split
+  return {
+    windPct: Math.round((windPotential / total) * 100),
+    waterPct: Math.round((waterPotential / total) * 100),
+  };
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Comparable loss evidence — find similar buildings within radius
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function findComparables(
+  features: any[], buildingType: string, lon: number, lat: number, radiusKm: number = 0.4
+): { count: number; avgLoss: number; minLoss: number; maxLoss: number } {
+  const comps: number[] = [];
+  const typePrefix = (buildingType || '').replace(/[-_].*$/, '').toUpperCase();
+  for (const f of features) {
+    const p = f.properties || {};
+    const fType = (p.building_type || '').replace(/[-_].*$/, '').toUpperCase();
+    if (fType !== typePrefix) continue;
+    const [bLon, bLat] = f.geometry?.coordinates || [0, 0];
+    const d = haversineKm(lat, lon, bLat, bLon);
+    if (d > radiusKm || d < 0.001) continue; // skip self (< 1m away)
+    if (p.estimated_loss_usd != null) comps.push(p.estimated_loss_usd);
+  }
+  if (comps.length === 0) return { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
+  const sum = comps.reduce((a, b) => a + b, 0);
+  return {
+    count: comps.length,
+    avgLoss: Math.round(sum / comps.length),
+    minLoss: Math.min(...comps),
+    maxLoss: Math.max(...comps),
+  };
+}
 const dpsColor = (score: number): string => {
   if (score >= 80) return '#ef4444';
   if (score >= 60) return '#f97316';
@@ -1011,6 +1084,22 @@ function App() {
                     const interiorFt = foundHt != null ? Math.max(0, p.depth_ft - foundHt) : null;
                     const structLoss = p.val_struct != null ? Math.round(p.val_struct * p.structure_damage_pct / 100) : null;
                     const contLoss = p.val_cont != null ? Math.round(p.val_cont * p.contents_damage_pct / 100) : null;
+
+                    // ── Comparable Loss Evidence ──
+                    const comps = allBuildings?.features
+                      ? findComparables(allBuildings.features, p.building_type, hoverInfo.lng, hoverInfo.lat)
+                      : { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
+
+                    // ── Wind vs Water Attribution ──
+                    let wwSplit: { windPct: number; waterPct: number } | null = null;
+                    let estWindMph: number | null = null;
+                    if (activeStorm) {
+                      const distKm = haversineKm(hoverInfo.lat, hoverInfo.lng, activeStorm.landfall_lat, activeStorm.landfall_lon);
+                      estWindMph = Math.round(estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category));
+                      const floodForWind = interiorFt != null ? interiorFt : Math.max(0, p.depth_ft - 1); // fallback: assume 1ft foundation
+                      wwSplit = windWaterSplit(estWindMph, floodForWind);
+                    }
+
                     return (
                     <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property Damage</h3>
                     {hoverAddress && (
@@ -1044,6 +1133,48 @@ function App() {
                           <div className={`${bg} ${text} text-[10px] font-bold rounded px-2 py-0.5 text-center mt-1`}>{label}</div>
                         );
                       })()}
+
+                      {/* ── Wind vs Water Attribution ── */}
+                      {wwSplit && estWindMph != null && (
+                        <>
+                        <hr className="border-gray-200 !my-1.5" />
+                        <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Peril Attribution</div>
+                        <p className="flex justify-between"><span className="text-gray-500">Est. wind:</span> <span className="font-medium">{estWindMph} mph</span></p>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <div className="flex-1 h-3 rounded-full overflow-hidden bg-gray-200 flex">
+                            <div className="h-full bg-sky-500 transition-all" style={{ width: `${wwSplit.windPct}%` }} />
+                            <div className="h-full bg-indigo-600 transition-all" style={{ width: `${wwSplit.waterPct}%` }} />
+                          </div>
+                        </div>
+                        <div className="flex justify-between text-[10px] mt-0.5">
+                          <span className="text-sky-600 font-bold">Wind {wwSplit.windPct}%</span>
+                          <span className="text-indigo-700 font-bold">Water {wwSplit.waterPct}%</span>
+                        </div>
+                        {p.estimated_loss_usd != null && (
+                          <div className="flex justify-between text-[10px] text-gray-500">
+                            <span>${Math.round(p.estimated_loss_usd * wwSplit.windPct / 100).toLocaleString()}</span>
+                            <span>${Math.round(p.estimated_loss_usd * wwSplit.waterPct / 100).toLocaleString()}</span>
+                          </div>
+                        )}
+                        </>
+                      )}
+
+                      {/* ── Comparable Loss Evidence ── */}
+                      {comps.count >= 2 && (
+                        <>
+                        <hr className="border-gray-200 !my-1.5" />
+                        <div className="bg-blue-50 rounded-lg px-2 py-1.5 border border-blue-200">
+                          <div className="text-[10px] font-bold text-blue-700 uppercase tracking-wider mb-0.5">Comparable Properties</div>
+                          <p className="text-[11px] text-blue-900">
+                            <strong>{comps.count}</strong> similar {friendlyBuildingType(p.building_type).toLowerCase()}s within 0.25 mi averaged{' '}
+                            <strong className="text-blue-700">${comps.avgLoss.toLocaleString()}</strong> in modeled losses
+                          </p>
+                          <p className="text-[10px] text-blue-500 mt-0.5">
+                            Range: ${comps.minLoss.toLocaleString()} – ${comps.maxLoss.toLocaleString()}
+                          </p>
+                        </div>
+                        </>
+                      )}
                     </div></>
                     );
                   })()
