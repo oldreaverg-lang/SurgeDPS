@@ -243,6 +243,9 @@ class BuildingDamage:
     total_damage_pct: float
     estimated_loss_usd: float
     replacement_value_usd: float
+    found_ht: Optional[float] = None      # foundation height (ft above grade)
+    val_struct: Optional[float] = None     # structure replacement value (USD)
+    val_cont: Optional[float] = None       # contents replacement value (USD)
 
 
 @dataclass
@@ -396,6 +399,9 @@ def estimate_building_damage(
         total_damage_pct=round(total_pct, 1),
         estimated_loss_usd=round(loss, 0),
         replacement_value_usd=round(replacement, 0),
+        found_ht=first_floor_ht_ft,
+        val_struct=round(val_struct, 0) if val_struct is not None else None,
+        val_cont=round(val_cont, 0) if val_cont is not None else None,
     )
 
 
@@ -578,6 +584,10 @@ def _write_damage_geojson(
                 "total_damage_pct": b.total_damage_pct,
                 "estimated_loss_usd": b.estimated_loss_usd,
                 "damage_category": _damage_category(b.total_damage_pct),
+                "replacement_value_usd": b.replacement_value_usd,
+                "found_ht": b.found_ht,
+                "val_struct": b.val_struct,
+                "val_cont": b.val_cont,
             },
             "geometry": {
                 "type": "Point",

@@ -291,10 +291,15 @@ def _fetch_microsoft_buildings(
             [{"lat": p[1], "lon": p[0]} for p in ring]
         )
 
+        # Data quality: MSFT baseline 0.1 (ML footprint, no attributes)
+        _dq = 0.1
+        if area_sqft: _dq += 0.1  # have area from polygon
+
         props: Dict = {
             "id": f"msft_{len(features)}",
             "type": "RES1-1SNB",   # conservative default — no type info
             "source": "MSFT",
+            "data_quality": round(min(_dq, 1.0), 2),
         }
         if area_sqft:
             props["area_sqft"] = round(area_sqft, 1)
@@ -434,10 +439,17 @@ def fetch_buildings(
         geom_nodes = elem.get("geometry")  # list of {lat, lon} or None
         area_sqft = _polygon_area_sqft(geom_nodes) if geom_nodes else None
 
+        # Data quality: OSM baseline 0.2 (geometry only, no valuations)
+        _dq = 0.2
+        if area_sqft is not None: _dq += 0.1   # have real footprint area
+        if tags.get("building:levels"): _dq += 0.1  # have story count
+        if tags.get("building", "yes") != "yes": _dq += 0.05  # specific type
+
         props: Dict = {
             "id": f"osm_{elem.get('id', len(features))}",
             "type": hazus_code,
             "source": "OSM",
+            "data_quality": round(min(_dq, 1.0), 2),
             # Preserve useful OSM metadata for tooltip enrichment
             "osm_name": tags.get("name", ""),
             "osm_levels": tags.get("building:levels", ""),

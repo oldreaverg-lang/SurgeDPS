@@ -50,6 +50,7 @@ def run_build(dry_run: bool) -> None:
         ["npm", "run", "build"],
         cwd=UI_DIR,
         check=True,
+        shell=True,  # Windows needs shell=True to find npm.cmd
     )
     if result.returncode != 0:
         print("ERROR: npm build failed", file=sys.stderr)

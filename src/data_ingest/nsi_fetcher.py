@@ -229,11 +229,24 @@ def fetch_buildings_nsi(
         occtype = str(props.get("occtype") or "RES1")
         hazus_code = _nsi_to_hazus(occtype, num_story, found_type)
 
+        # ── Data quality score (0.0–1.0) ─────────────────────────
+        # Based on attribute completeness.  Each key NSI field adds
+        # weight; more attributes = more reliable damage estimate.
+        # NSI baseline is 0.4 (having real val_struct alone is worth
+        # more than OSM/MSFT which start at 0.1–0.2).
+        _dq = 0.4  # base: we have an NSI record at all
+        if val_struct is not None: _dq += 0.2
+        if found_ht   is not None: _dq += 0.15
+        if med_yr_blt is not None: _dq += 0.1
+        if sqft       is not None: _dq += 0.1
+        if val_cont   is not None: _dq += 0.05
+
         out_props: Dict = {
             "id":       str(props.get("fd_id", f"nsi_{len(out_features)}")),
             "type":     hazus_code,
             "occtype":  occtype,
             "source":   "NSI",
+            "data_quality": round(min(_dq, 1.0), 2),
         }
         if sqft       is not None: out_props["area_sqft"]  = round(float(sqft), 1)
         if val_struct is not None: out_props["val_struct"]  = round(float(val_struct), 2)

@@ -224,6 +224,53 @@ class BuildingCache:
 
         return self._rows_to_features(rows)
 
+    def query_near_miss(
+        self,
+        wkt_polygon: str,
+        buffer_meters: float = 100.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return buildings within `buffer_meters` of a flood polygon boundary
+        that are NOT inside the polygon itself ("near miss" zone).
+
+        These are properties that would have flooded with slightly higher surge.
+        Uses ST_DWithin for the buffer and ST_Within to exclude already-flooded.
+
+        The buffer is approximate: converts meters to degrees using ~111,320 m/deg.
+        Accurate enough for display purposes at coastal latitudes.
+
+        Falls back to empty list if spatial extension is unavailable.
+        """
+        if not self._has_spatial:
+            logger.warning("[DuckDB] spatial extension unavailable — no near-miss query")
+            return []
+
+        # Approximate degrees for the buffer distance
+        buffer_deg = buffer_meters / 111_320.0
+
+        rows = self._conn.execute(
+            """
+            SELECT lon, lat, props_json
+            FROM buildings
+            WHERE ST_DWithin(
+                ST_Point(lon, lat),
+                ST_GeomFromText(?),
+                ?
+            )
+            AND NOT ST_Within(
+                ST_Point(lon, lat),
+                ST_GeomFromText(?)
+            )
+            """,
+            [wkt_polygon, buffer_deg, wkt_polygon],
+        ).fetchall()
+
+        # Tag each feature as near-miss
+        features = self._rows_to_features(rows)
+        for feat in features:
+            feat["properties"]["near_miss"] = True
+        return features
+
     # ── Aggregation (Spatial SQL GROUP BY) ─────────────────────────────────
 
     def aggregate(
