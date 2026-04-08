@@ -52,20 +52,35 @@ interface Season { year: number; count: number; }
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Styles
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+// ── Basemap styles ──
+const BASEMAPS: Record<string, any> = {
+  dark: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+  satellite: {
+    version: 8, name: 'Satellite', sources: {
+      'esri-sat': { type: 'raster', tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, attribution: 'Esri World Imagery' },
+    }, layers: [{ id: 'esri-sat', type: 'raster', source: 'esri-sat' }],
+  },
+  street: {
+    version: 8, name: 'Street', sources: {
+      'osm': { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, attribution: '© OpenStreetMap' },
+    }, layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+  },
+};
+const BASEMAP_LABELS: Record<string, string> = { dark: 'Dark', satellite: 'Satellite', street: 'Street' };
+
 const floodLayerStyle = {
   id: 'flood-depth-layer', type: 'fill',
   paint: {
-    'fill-color': ['step', ['get', 'depth'], '#40E0D0', 0.11, '#6495ED', 0.45, '#4169E1', 1.0, '#8A2BE2', 1.7, '#FF00FF'],
-    'fill-opacity': 0.25,
+    'fill-color': ['interpolate', ['linear'], ['get', 'depth'], 0.05, '#ffffb2', 0.3, '#fecc5c', 0.9, '#fd8d3c', 1.8, '#f03b20', 3.0, '#bd0026'],
+    'fill-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.35, 13, 0.3, 15, 0.15, 17, 0.08],
   },
 };
 const LEGEND_ITEMS = [
-  { color: '#40E0D0', label: '< 0.5 ft' },
-  { color: '#6495ED', label: '0.5 – 1.5 ft' },
-  { color: '#4169E1', label: '1.5 – 3.5 ft' },
-  { color: '#8A2BE2', label: '3.5 – 6 ft' },
-  { color: '#FF00FF', label: '> 6 ft' },
+  { color: '#ffffb2', label: '< 1 ft' },
+  { color: '#fecc5c', label: '1 – 3 ft' },
+  { color: '#fd8d3c', label: '3 – 6 ft' },
+  { color: '#f03b20', label: '6 – 10 ft' },
+  { color: '#bd0026', label: '> 10 ft' },
 ];
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -84,6 +99,16 @@ const BUILDING_TYPES: Record<string, string> = {
   GOV1: 'Government Building', GOV2: 'Emergency Services',
   EDU1: 'School', EDU2: 'College / University',
 };
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Critical Facilities (for emergency management)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const CRITICAL_ICONS: Record<string, string> = {
+  EDU1: '🏫', EDU2: '🏫',
+  COM6: '➕', COM7: '➕',
+  GOV1: '⭐', GOV2: '⭐',
+  RES6: '🛏️',
+};
 function friendlyBuildingType(code: string): string {
   if (!code) return 'Unknown';
   const prefix = code.replace(/[-_].*$/, '').toUpperCase();
@@ -99,6 +124,7 @@ const CAT_COLORS: Record<number, string> = {
 const shortName = (name: string) =>
   name.replace(/^(Hurricane|Tropical Storm|Tropical Depression)\s+/i, '');
 const byDPS = (a: StormInfo, b: StormInfo) => (b.dps_score || 0) - (a.dps_score || 0);
+const csvField = (v: any) => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s; };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Haversine distance (km) — used by comparable loss & wind model
@@ -140,17 +166,16 @@ function windWaterSplit(windMph: number, interiorFloodFt: number): { windPct: nu
   const waterPotential = Math.min(1, Math.max(0, interiorFloodFt / 8));
   const total = windPotential + waterPotential;
   if (total < 0.001) return { windPct: 50, waterPct: 50 }; // no damage signal — even split
-  return {
-    windPct: Math.round((windPotential / total) * 100),
-    waterPct: Math.round((waterPotential / total) * 100),
-  };
+  const windPct = Math.round((windPotential / total) * 100);
+  return { windPct, waterPct: 100 - windPct };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Comparable loss evidence — find similar buildings within radius
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const COMP_RADIUS_KM = 0.4; // ~0.25 mi — used in findComparables and UI label
 function findComparables(
-  features: any[], buildingType: string, lon: number, lat: number, radiusKm: number = 0.4
+  features: any[], buildingType: string, lon: number, lat: number, radiusKm: number = COMP_RADIUS_KM
 ): { count: number; avgLoss: number; minLoss: number; maxLoss: number } {
   const comps: number[] = [];
   const typePrefix = (buildingType || '').replace(/[-_].*$/, '').toUpperCase();
@@ -164,13 +189,9 @@ function findComparables(
     if (p.estimated_loss_usd != null) comps.push(p.estimated_loss_usd);
   }
   if (comps.length === 0) return { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
-  const sum = comps.reduce((a, b) => a + b, 0);
-  return {
-    count: comps.length,
-    avgLoss: Math.round(sum / comps.length),
-    minLoss: Math.min(...comps),
-    maxLoss: Math.max(...comps),
-  };
+  let sum = 0, lo = comps[0], hi = comps[0];
+  for (const v of comps) { sum += v; if (v < lo) lo = v; if (v > hi) hi = v; }
+  return { count: comps.length, avgLoss: Math.round(sum / comps.length), minLoss: lo, maxLoss: hi };
 }
 const dpsColor = (score: number): string => {
   if (score >= 80) return '#ef4444';
@@ -422,7 +443,7 @@ const ELI_STYLES: Record<string, { bg: string; text: string; border: string; lab
   unavailable: { bg: 'bg-gray-50', text: 'text-gray-400', border: 'border-gray-200', label: 'Pending' },
 };
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps, onOpenSidebar, zoom, onClearStorm }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -433,6 +454,12 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   onOpenSidebar: () => void;
   zoom: number;
   onClearStorm: () => void;
+  estimatedPop: number;
+  severityCounts: Record<string, number>;
+  criticalCount: number;
+  criticalBreakdown: Array<{ icon: string; label: string; count: number }>;
+  hotspots: Array<{ rank: number; loss: number; count: number; lat: number; lon: number; avgLoss: number }>;
+  onFlyTo?: (lon: number, lat: number) => void;
 }) {
   // Auto-expand on desktop, collapsed by default on mobile
   const [expanded, setExpanded] = useState(false);
@@ -447,7 +474,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   if (!storm) return null;
 
   return (
-    <div className="absolute top-4 left-4 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
+    <div className="absolute top-4 right-14 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
 
       {/* ── Always-visible compact header ── */}
       <div className="flex items-center gap-2 px-3 py-2.5">
@@ -501,6 +528,9 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <span>Pressure: <strong className="text-gray-800">{storm.min_pressure_mb} mb</strong></span>
           <span>Year: <strong className="text-gray-800">{storm.year}</strong></span>
         </div>
+        <div className="mt-1.5 pt-1.5 border-t border-gray-200/50 text-[10px] text-gray-500">
+          <span className="font-semibold">Surge note:</span> Modeled depths reflect SLOSH maximum-of-maximums (worst-case tidal alignment). Actual depths may have been lower if landfall did not coincide with local high tide.
+        </div>
       </div>
 
       {/* R5: Confidence badge */}
@@ -520,6 +550,22 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           </div>
         );
       })()}
+
+      {/* Critical Facilities in Surge Zone */}
+      {criticalCount > 0 && (
+        <div className="bg-orange-50 rounded-lg px-3 py-2 mb-3 border border-orange-200">
+          <div className="text-[10px] text-orange-800 font-bold uppercase tracking-wider">Critical Facilities in Surge Zone</div>
+          <div className="text-xs text-orange-900 mt-1 space-y-0.5">
+            {criticalBreakdown.map(({ icon, label, count }: any) => count > 0 && (
+              <div key={label} className="flex items-center gap-1.5">
+                <span>{icon}</span>
+                <span className="flex-1">{label}</span>
+                <span className="font-bold">{count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* R11: Validated DPS adjustment */}
       {validatedDps.adj !== 0 && (
@@ -561,15 +607,74 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <div className="text-xs text-gray-500 mt-0.5">
             Across {totals.buildings.toLocaleString()} properties
           </div>
+          {estimatedPop > 0 && (
+            <div className="text-[10px] text-gray-400 mt-0.5">~{estimatedPop.toLocaleString()} estimated residents</div>
+          )}
+        </div>
+      )}
+
+      {/* Damage Severity Breakdown */}
+      {totals.buildings > 0 && (
+        <div className="bg-gray-50 rounded-lg p-2.5 mb-3 border border-gray-200">
+          <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1.5">Damage Breakdown</div>
+          <div className="space-y-1">
+            {[
+              { key: 'severe', color: '#7f1d1d', label: 'Severe' },
+              { key: 'major', color: '#ef4444', label: 'Major' },
+              { key: 'moderate', color: '#fb923c', label: 'Moderate' },
+              { key: 'minor', color: '#facc15', label: 'Minor' },
+              { key: 'none', color: '#4ade80', label: 'No Damage' },
+            ].map(({ key, color, label }) => {
+              const count = severityCounts[key] || 0;
+              const pct = totals.buildings > 0 ? (count / totals.buildings * 100) : 0;
+              return (
+                <div key={key} className="flex items-center gap-2 text-xs">
+                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                  <span className="text-gray-600 flex-1">{label}</span>
+                  <span className="font-bold text-gray-800">{count.toLocaleString()}</span>
+                  <span className="text-gray-400 w-10 text-right">{pct.toFixed(0)}%</span>
+                </div>
+              );
+            })}
+          </div>
+          {(severityCounts.major + severityCounts.severe) > 0 && (
+            <div className="mt-2 bg-red-50 rounded px-2 py-1 border border-red-200">
+              <span className="text-[10px] font-bold text-red-700">
+                {(severityCounts.major + severityCounts.severe).toLocaleString()} potentially uninhabitable
+              </span>
+            </div>
+          )}
         </div>
       )}
 
       {/* R9: Nuisance Flood Flag */}
-      {totals.buildings > 2000 && totals.buildings > 0 && (totals.totalDepth / totals.buildings) < 1.5 && (
+      {totals.buildings > 2000 && totals.totalDepth > 0 && (totals.totalDepth / totals.buildings) < 1.5 && (
         <div className="bg-amber-50 rounded-lg px-3 py-2 mb-3 border border-amber-300">
           <div className="text-[10px] text-amber-800 font-bold uppercase tracking-wider">Nuisance Flood Warning</div>
           <div className="text-xs text-amber-700 mt-0.5">
             Avg. depth of {(totals.totalDepth / totals.buildings).toFixed(1)} ft across {totals.buildings.toLocaleString()} buildings — widespread shallow flooding can cause significant aggregate damage even when individual losses appear modest.
+          </div>
+        </div>
+      )}
+
+      {/* Hardest-Hit Areas */}
+      {hotspots.length > 0 && (
+        <div className="bg-red-50/50 rounded-lg p-2.5 mb-3 border border-red-100">
+          <div className="text-[10px] text-red-600 font-bold uppercase tracking-wider mb-1.5">Hardest-Hit Areas</div>
+          <div className="space-y-1.5">
+            {hotspots.map((h: any) => (
+              <button
+                key={h.rank}
+                onClick={() => onFlyTo?.(h.lon, h.lat)}
+                className="w-full flex items-center gap-2 text-left hover:bg-red-100/50 rounded px-1 py-0.5 transition-colors"
+              >
+                <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-bold text-red-700">${(h.loss / 1e6 >= 1 ? (h.loss / 1e6).toFixed(1) + 'M' : (h.loss / 1e3).toFixed(0) + 'K')}</div>
+                  <div className="text-[10px] text-red-400">{h.count} bldgs · avg ${h.avgLoss.toLocaleString()}</div>
+                </div>
+              </button>
+            ))}
           </div>
         </div>
       )}
@@ -613,6 +718,11 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   );
 }
 
+// Average persons per residential unit (HAZUS defaults)
+const POP_PER_UNIT: Record<string, number> = {
+  RES1: 2.5, RES2: 2.0, RES3: 6.0, RES4: 2.0, RES5: 2.0, RES6: 30.0,
+};
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // App
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -624,42 +734,79 @@ function App() {
   const [activeStorm, setActiveStorm] = useState<StormInfo | null>(null);
   const [activating, setActivating] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<any>(null);
+  const [pinnedInfo, setPinnedInfo] = useState<any>(null);
   const [impactTotals, setImpactTotals] = useState({ buildings: 0, loss: 0, totalDepth: 0 });
   const [loadedCells, setLoadedCells] = useState<Set<string>>(new Set());
   const [loadingCells, setLoadingCells] = useState<Set<string>>(new Set());
   const [allBuildings, setAllBuildings] = useState<any>(null);
   const [allFlood, setAllFlood] = useState<any>(null);
   const [zoom, setZoom] = useState(10);
+  const [basemap, setBasemap] = useState<string>('dark');
+  const [showCounties, setShowCounties] = useState(false);
+  const [showFloodZones, setShowFloodZones] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  // Building flags — keyed by "lon,lat" for uniqueness. Values: 'confirmed_destroyed' | 'shelter_in_place' | 'inspected' | 'inaccessible' | ''
+  const [buildingFlags, setBuildingFlags] = useState<Record<string, string>>({});
+  const [nuisanceDismissed, setNuisanceDismissed] = useState(false);
+  const [gridHintDismissed, setGridHintDismissed] = useState(false);
+  const gridHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activateAbortRef = useRef<AbortController | null>(null);
+  const batchAbortRef = useRef(false);
+  const handleResetView = useCallback(() => {
+    if (activeStorm && mapRef.current) {
+      mapRef.current.flyTo({ center: [activeStorm.landfall_lon, activeStorm.landfall_lat], zoom: 10, pitch: 30, duration: 2000 });
+    }
+  }, [activeStorm]);
   const [confidence, setConfidence] = useState<{ level: string; count: number }>({ level: 'unvalidated', count: 0 });
   const [eli, setEli] = useState<{ value: number; tier: string }>({ value: 0, tier: 'unavailable' });
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
   const [manifest, setManifest] = useState<Record<string, any>>({});
 
-  // Cell load error toast
+  // Toast notifications (error = red, success = green)
   const [cellError, setCellError] = useState<string | null>(null);
+  const [toastSuccess, setToastSuccess] = useState<string | null>(null);
   useEffect(() => { if (cellError) { const t = setTimeout(() => setCellError(null), 5000); return () => clearTimeout(t); } }, [cellError]);
+  useEffect(() => { if (toastSuccess) { const t = setTimeout(() => setToastSuccess(null), 3000); return () => clearTimeout(t); } }, [toastSuccess]);
 
   // ── Address search (geocoding via Nominatim) ──
   const [addressQuery, setAddressQuery] = useState('');
   const [addressSearching, setAddressSearching] = useState(false);
   const [addressError, setAddressError] = useState('');
+  const flyToPopupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; } }, []);
   const handleAddressSearch = useCallback(() => {
     const q = addressQuery.trim();
     if (!q || !mapRef.current) return;
     setAddressSearching(true);
     setAddressError('');
+    if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; }
     fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`, {
       headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' },
     })
       .then(r => r.json())
       .then((results: any[]) => {
         if (results.length === 0) { setAddressError('Address not found'); return; }
-        const { lon, lat } = results[0];
-        mapRef.current?.flyTo({ center: [parseFloat(lon), parseFloat(lat)], zoom: 16, duration: 2000 });
+        const gLon = parseFloat(results[0].lon), gLat = parseFloat(results[0].lat);
+        // Find nearest building within 200m and auto-select it
+        let nearest: any = null, minDist = Infinity;
+        if (allBuildings?.features?.length) {
+          for (const f of allBuildings.features) {
+            const [bLon, bLat] = f.geometry?.coordinates || [0, 0];
+            const d = haversineKm(gLat, gLon, bLat, bLon);
+            if (d < minDist) { minDist = d; nearest = f; }
+          }
+        }
+        if (nearest && minDist < 0.2) {
+          const [nLon, nLat] = nearest.geometry.coordinates;
+          mapRef.current?.flyTo({ center: [nLon, nLat], zoom: 17, duration: 2000 });
+          flyToPopupTimer.current = setTimeout(() => { flyToPopupTimer.current = null; setPinnedInfo({ lng: nLon, lat: nLat, type: 'damage', feature: { properties: nearest.properties, geometry: nearest.geometry } }); }, 2200);
+        } else {
+          mapRef.current?.flyTo({ center: [gLon, gLat], zoom: 16, duration: 2000 });
+        }
       })
       .catch(() => setAddressError('Search failed — try again'))
       .finally(() => setAddressSearching(false));
-  }, [addressQuery]);
+  }, [addressQuery, allBuildings]);
 
   // ── Batch address lookup ──
   const [batchOpen, setBatchOpen] = useState(false);
@@ -670,8 +817,12 @@ function App() {
     const lines = batchInput.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0 || !allBuildings?.features?.length) return;
     setBatchLoading(true);
+    setBatchResults([]);
+    batchAbortRef.current = false;
     const results: any[] = [];
-    for (const addr of lines) {
+    for (let idx = 0; idx < lines.length; idx++) {
+      if (batchAbortRef.current) break;
+      const addr = lines[idx];
       try {
         const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
           headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' },
@@ -679,23 +830,22 @@ function App() {
         const data = await r.json();
         if (!data.length) { results.push({ address: addr, status: 'not found' }); continue; }
         const lon = parseFloat(data[0].lon), lat = parseFloat(data[0].lat);
-        // Find nearest building within ~200m
+        // Find nearest building within ~200m (haversine)
         let nearest: any = null, minDist = Infinity;
         for (const f of allBuildings.features) {
           const [bLon, bLat] = f.geometry?.coordinates || [0, 0];
-          const d = Math.sqrt((bLon - lon) ** 2 + (bLat - lat) ** 2);
+          const d = haversineKm(lat, lon, bLat, bLon);
           if (d < minDist) { minDist = d; nearest = f; }
         }
-        const distM = minDist * 111_000; // rough degrees→meters
-        if (nearest && distM < 200) {
+        if (nearest && minDist < 0.2) {
           const p = nearest.properties;
-          results.push({ address: addr, status: 'matched', distance_m: Math.round(distM), ...p });
+          results.push({ address: addr, status: 'matched', distance_m: Math.round(minDist * 1000), ...p });
         } else {
           results.push({ address: addr, status: 'no building nearby', lat, lon });
         }
       } catch { results.push({ address: addr, status: 'geocode error' }); }
       // Nominatim rate limit: 1 req/sec
-      if (lines.indexOf(addr) < lines.length - 1) await new Promise(r => setTimeout(r, 1100));
+      if (idx < lines.length - 1) await new Promise(r => setTimeout(r, 1100));
     }
     setBatchResults(results);
     setBatchLoading(false);
@@ -705,10 +855,12 @@ function App() {
     if (!batchResults.length) return;
     const header = 'address,status,surge_depth_ft,found_ht,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,damage_category,deductible_flag';
     const rows = batchResults.map(r => {
-      if (r.status !== 'matched') return `"${r.address}",${r.status},,,,,,,,, `;
-      const interior = r.found_ht != null ? Math.max(0, r.depth_ft - r.found_ht) : '';
-      const dedFlag = r.estimated_loss_usd < 1250 ? 'below_min' : r.estimated_loss_usd < 10000 ? 'below_typical' : 'above';
-      return `"${r.address}",${r.status},${r.depth_ft ?? ''},${r.found_ht ?? ''},${interior},${r.structure_damage_pct ?? ''},${r.contents_damage_pct ?? ''},${r.total_damage_pct ?? ''},${r.estimated_loss_usd ?? ''},${r.damage_category ?? ''},${dedFlag}`;
+      if (r.status !== 'matched') return `${csvField(r.address)},${r.status},,,,,,,,,`;
+      const depthFt = r.depth_ft ?? 0;
+      const interior = r.found_ht != null ? Math.max(0, depthFt - r.found_ht) : '';
+      const lossVal = r.estimated_loss_usd ?? 0;
+      const dedFlag = lossVal < 1250 ? 'below_min' : lossVal < 10000 ? 'below_typical' : 'above';
+      return `${csvField(r.address)},${r.status},${depthFt},${r.found_ht ?? ''},${interior},${r.structure_damage_pct ?? ''},${r.contents_damage_pct ?? ''},${r.total_damage_pct ?? ''},${r.estimated_loss_usd ?? ''},${csvField(r.damage_category ?? '')},${dedFlag}`;
     });
     const csv = [header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -718,6 +870,70 @@ function App() {
     URL.revokeObjectURL(url);
   }, [batchResults, activeStorm]);
 
+  // ── PDA (Preliminary Damage Assessment) export ──
+  const handleExportPDA = useCallback(() => {
+    if (!allBuildings?.features?.length || !activeStorm) return;
+    // FEMA PDA categories: Affected (minor), Minor Damage, Major Damage, Destroyed
+    // Map our categories: none→skip, minor→Affected, moderate→Minor, major→Major, severe→Destroyed
+    const PDA_MAP: Record<string, string> = { minor: 'Affected', moderate: 'Minor Damage', major: 'Major Damage', severe: 'Destroyed' };
+    const counts: Record<string, { affected: number; minor: number; major: number; destroyed: number; totalLoss: number }> = {};
+    const overall = { affected: 0, minor: 0, major: 0, destroyed: 0, totalLoss: 0, totalBuildings: 0 };
+    for (const f of allBuildings.features) {
+      const p = f.properties || {};
+      const cat = p.damage_category || 'none';
+      if (cat === 'none') continue;
+      const pdaCat = PDA_MAP[cat];
+      if (!pdaCat) continue;
+      // Use "Surge Area" as default jurisdiction since we don't have county-level assignment
+      const jurisdiction = 'Surge Area';
+      if (!counts[jurisdiction]) counts[jurisdiction] = { affected: 0, minor: 0, major: 0, destroyed: 0, totalLoss: 0 };
+      if (cat === 'minor') { counts[jurisdiction].affected++; overall.affected++; }
+      else if (cat === 'moderate') { counts[jurisdiction].minor++; overall.minor++; }
+      else if (cat === 'major') { counts[jurisdiction].major++; overall.major++; }
+      else if (cat === 'severe') { counts[jurisdiction].destroyed++; overall.destroyed++; }
+      counts[jurisdiction].totalLoss += p.estimated_loss_usd || 0;
+      overall.totalLoss += p.estimated_loss_usd || 0;
+      overall.totalBuildings++;
+    }
+    const lines = [
+      `PRELIMINARY DAMAGE ASSESSMENT SUMMARY`,
+      `Storm: ${activeStorm.name} (${activeStorm.year}) — Category ${activeStorm.category}`,
+      `Generated: ${new Date().toISOString()}`,
+      `Source: SurgeDPS (stormdps.com/surgedps) — MODELED ESTIMATE, NOT FIELD VERIFIED`,
+      ``,
+      `Max Wind: ${Math.round(activeStorm.max_wind_kt * 1.15078)} mph | Min Pressure: ${activeStorm.min_pressure_mb} mb`,
+      `Total Structures Assessed: ${allBuildings.features.length.toLocaleString()}`,
+      `Total Structures Damaged: ${overall.totalBuildings.toLocaleString()}`,
+      `Total Modeled Loss: $${(overall.totalLoss / 1e6).toFixed(1)}M`,
+      ``,
+      `DAMAGE CATEGORY SUMMARY (FEMA PDA FORMAT)`,
+      `Jurisdiction,Affected,Minor Damage,Major Damage,Destroyed,Total Damaged,Estimated Loss`,
+    ];
+    for (const [juris, c] of Object.entries(counts)) {
+      const total = c.affected + c.minor + c.major + c.destroyed;
+      lines.push(`${juris},${c.affected},${c.minor},${c.major},${c.destroyed},${total},$${Math.round(c.totalLoss).toLocaleString()}`);
+    }
+    const totalDamaged = overall.affected + overall.minor + overall.major + overall.destroyed;
+    lines.push(`TOTAL,${overall.affected},${overall.minor},${overall.major},${overall.destroyed},${totalDamaged},$${Math.round(overall.totalLoss).toLocaleString()}`);
+    lines.push('');
+    lines.push('NOTES:');
+    lines.push('- "Affected" = minor cosmetic damage (HAZUS minor category)');
+    lines.push('- "Minor Damage" = repairable structural/content damage (HAZUS moderate)');
+    lines.push('- "Major Damage" = significant structural damage, likely uninhabitable (HAZUS major)');
+    lines.push('- "Destroyed" = total or near-total loss (HAZUS severe)');
+    lines.push('- Surge depths reflect SLOSH MOM (worst-case tidal alignment)');
+    lines.push('- Loss estimates use FEMA HAZUS depth-damage functions applied to NSI building inventory');
+
+    const csv = lines.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `surgedps_PDA_${activeStorm.storm_id}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [allBuildings, activeStorm]);
+
   // ── Print / Share ──
   const handlePrint = useCallback(() => { window.print(); }, []);
   const handleShareLink = useCallback(() => {
@@ -725,7 +941,7 @@ function App() {
     const c = mapRef.current.getCenter();
     const z = mapRef.current.getZoom().toFixed(1);
     const url = `${window.location.origin}/surgedps?storm=${activeStorm.storm_id}&lat=${c.lat.toFixed(5)}&lng=${c.lng.toFixed(5)}&z=${z}`;
-    navigator.clipboard.writeText(url).then(() => setCellError('Link copied to clipboard'));
+    navigator.clipboard.writeText(url).then(() => setToastSuccess('Link copied to clipboard')).catch(() => setCellError('Could not copy link — try again'));
   }, [activeStorm]);
 
   // ── Methodology panel ──
@@ -734,18 +950,29 @@ function App() {
   // ── CSV export of visible buildings ──
   const handleExportCSV = useCallback(() => {
     if (!allBuildings?.features?.length) return;
+    const totalLoss = allBuildings.features.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
+    const summaryLines = [
+      `# SurgeDPS Export — ${activeStorm?.name || 'Unknown'} (${activeStorm?.year || ''})`,
+      `# Category ${activeStorm?.category || '?'} | Max wind ${activeStorm ? Math.round(activeStorm.max_wind_kt * 1.15078) : '?'} mph | ${activeStorm?.min_pressure_mb || '?'} mb`,
+      `# Buildings: ${allBuildings.features.length.toLocaleString()} | Total modeled loss: $${(totalLoss / 1e6).toFixed(1)}M`,
+      `# Exported: ${new Date().toISOString()} | Source: stormdps.com/surgedps`,
+      `# Note: Depths are SLOSH MOM (worst-case tidal). Losses use FEMA HAZUS depth-damage curves.`,
+    ];
     const rows = allBuildings.features.map((f: any) => {
       const p = f.properties || {};
       const [lon, lat] = f.geometry?.coordinates || [0, 0];
+      const flagKey = `${lon.toFixed(5)},${lat.toFixed(5)}`;
+      const flag = buildingFlags[flagKey] || '';
       return [
-        lat, lon, p.building_type || '', p.depth_ft ?? '', p.found_ht ?? '',
+        lat, lon, csvField(p.building_type || ''), p.depth_ft ?? '', p.found_ht ?? '',
         p.structure_damage_pct ?? '', p.contents_damage_pct ?? '', p.total_damage_pct ?? '',
         p.estimated_loss_usd ?? '', p.val_struct ?? '', p.val_cont ?? '',
-        p.damage_category || '', p.replacement_value_usd ?? '',
+        csvField(p.damage_category || ''), p.replacement_value_usd ?? '',
+        csvField(flag),
       ].join(',');
     });
-    const header = 'lat,lon,building_type,surge_depth_ft,foundation_ht_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,val_struct,val_cont,damage_category,replacement_value_usd';
-    const csv = [header, ...rows].join('\n');
+    const header = 'lat,lon,building_type,surge_depth_ft,foundation_ht_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,val_struct,val_cont,damage_category,replacement_value_usd,field_flag';
+    const csv = [...summaryLines, header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -753,7 +980,7 @@ function App() {
     a.download = `surgedps_${activeStorm?.storm_id || 'export'}_buildings.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [allBuildings, activeStorm]);
+  }, [allBuildings, activeStorm, buildingFlags]);
 
   // Reverse geocoding for building hover
   const geocodeCache = useRef<Record<string, string>>({});
@@ -768,14 +995,22 @@ function App() {
     setAllBuildings(null); setAllFlood(null);
     setLoadedCells(new Set()); setLoadingCells(new Set());
     setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
+    setPinnedInfo(null);
     setConfidence({ level: 'unvalidated', count: 0 });
     setEli({ value: 0, tier: 'unavailable' });
     setValidatedDps({ value: 0, adj: 0, reason: '' });
     setManifest({});
+    setNuisanceDismissed(false);
+    setGridHintDismissed(false);
+    setBatchOpen(false); setBatchResults([]); setBatchInput('');
+    setAddressQuery(''); setAddressError('');
+    setMethodologyOpen(false); setMoreMenuOpen(false);
 
+    let timedOut = false;
     try {
       const ac = new AbortController();
-      const timeout = setTimeout(() => ac.abort(), 120_000); // 2 min timeout for activation
+      activateAbortRef.current = ac;
+      const timeout = setTimeout(() => { timedOut = true; ac.abort(); }, 120_000); // 2 min timeout
       const resp = await fetch(`/surgedps/api/storm/${stormId}/activate`, { signal: ac.signal });
       clearTimeout(timeout);
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -787,10 +1022,11 @@ function App() {
       if (storm.validated_dps) setValidatedDps({ value: storm.validated_dps, adj: storm.dps_adjustment || 0, reason: storm.dps_adj_reason || '' });
 
       // Fetch pre-computed cell manifest (non-blocking — shades grid cells as "ready")
+      const manifestStormId = stormId;
       fetch(`/surgedps/api/manifest?storm_id=${stormId}`)
         .then(r => r.ok ? r.json() : {})
-        .then((m: any) => setManifest(m?.cells || {}))
-        .catch(() => setManifest({}));
+        .then((m: any) => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest(m?.cells || {}); })
+        .catch(() => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest({}); });
 
       if (center_cell) {
         setAllBuildings(center_cell.buildings);
@@ -807,14 +1043,39 @@ function App() {
 
       // Server may return partial data with a cell_error flag
       if (storm.cell_error) setCellError(storm.cell_error);
-    } catch (err) {
-      console.error('Failed to activate storm:', err);
-      setCellError('Failed to load storm data. The server may be warming up — try again in a moment.');
+    } catch (err: any) {
+      if (err?.name === 'AbortError' && !timedOut) {
+        console.log('Storm activation cancelled by user');
+      } else if (err?.name === 'AbortError' && timedOut) {
+        console.warn('Storm activation timed out after 2 minutes');
+        setCellError('Storm data is still being generated on the server. Please wait a moment and try again — the data will be cached for next time.');
+      } else {
+        console.error('Failed to activate storm:', err);
+        setCellError('Failed to load storm data. The server may be warming up — try again in a moment.');
+      }
     } finally {
       setActivating(false);
       activatingRef.current = false;
     }
   }, []); // stable — no dependencies
+
+  // ── Restore shared-link params on mount ──
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const stormId = params.get('storm');
+    if (stormId) {
+      activateStorm(stormId).then(() => {
+        const lat = parseFloat(params.get('lat') || '');
+        const lng = parseFloat(params.get('lng') || '');
+        const z = parseFloat(params.get('z') || '');
+        if (!isNaN(lat) && !isNaN(lng) && mapRef.current) {
+          setTimeout(() => mapRef.current?.flyTo({ center: [lng, lat], zoom: isNaN(z) ? 12 : z, duration: 1500 }), 3000);
+        }
+        // Clean URL only after successful activation
+        window.history.replaceState({}, '', window.location.pathname);
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Grid GeoJSON — includes "ready" status for pre-computed cells from manifest
   const gridGeoJson = useMemo(() => {
@@ -844,6 +1105,96 @@ function App() {
     return { type: 'FeatureCollection' as const, features };
   }, [activeStorm, loadedCells, loadingCells, manifest]);
 
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Emergency Management Metrics
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // Estimated population
+  const estimatedPop = useMemo(() => {
+    if (!allBuildings?.features?.length) return 0;
+    let pop = 0;
+    for (const f of allBuildings.features) {
+      const bt = (f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase();
+      pop += POP_PER_UNIT[bt] || 0;
+    }
+    return Math.round(pop);
+  }, [allBuildings]);
+
+  // Damage severity breakdown
+  const severityCounts = useMemo(() => {
+    const counts: Record<string, number> = { none: 0, minor: 0, moderate: 0, major: 0, severe: 0 };
+    if (!allBuildings?.features?.length) return counts;
+    for (const f of allBuildings.features) {
+      const cat = f.properties?.damage_category || 'none';
+      if (cat in counts) counts[cat]++;
+    }
+    return counts;
+  }, [allBuildings]);
+
+  // Critical facilities breakdown
+  const criticalBreakdown = useMemo(() => {
+    if (!allBuildings?.features?.length) return [];
+    const counts: Record<string, number> = {};
+    for (const f of allBuildings.features) {
+      const bt = (f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase();
+      if (bt in CRITICAL_ICONS) counts[bt] = (counts[bt] || 0) + 1;
+    }
+    return [
+      { icon: '➕', label: 'Hospitals / Clinics', count: (counts.COM6 || 0) + (counts.COM7 || 0) },
+      { icon: '🏫', label: 'Schools / Universities', count: (counts.EDU1 || 0) + (counts.EDU2 || 0) },
+      { icon: '⭐', label: 'Government / Emergency', count: (counts.GOV1 || 0) + (counts.GOV2 || 0) },
+      { icon: '🛏️', label: 'Nursing Homes', count: counts.RES6 || 0 },
+    ];
+  }, [allBuildings]);
+
+  const criticalCount = criticalBreakdown.reduce((s: number, b: any) => s + b.count, 0);
+
+  // Critical facilities GeoJSON
+  const criticalFacilities = useMemo(() => {
+    if (!allBuildings?.features?.length) return null;
+    const critical = allBuildings.features
+      .filter((f: any) => {
+        const bt = (f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase();
+        return bt in CRITICAL_ICONS;
+      })
+      .map((f: any) => ({
+        ...f,
+        properties: {
+          ...f.properties,
+          critical_icon: CRITICAL_ICONS[(f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase()],
+        },
+      }));
+    if (critical.length === 0) return null;
+    return { type: 'FeatureCollection' as const, features: critical };
+  }, [allBuildings]);
+
+  // Hotspots ranking
+  const hotspots = useMemo(() => {
+    if (!allBuildings?.features?.length) return [];
+    const BIN = 0.005; // ~0.5km grid
+    const bins: Record<string, { loss: number; count: number; lat: number; lon: number }> = {};
+    for (const f of allBuildings.features) {
+      const [lon, lat] = f.geometry?.coordinates || [0, 0];
+      const p = f.properties || {};
+      const bLon = Math.floor(lon / BIN) * BIN;
+      const bLat = Math.floor(lat / BIN) * BIN;
+      const key = `${bLon.toFixed(4)},${bLat.toFixed(4)}`;
+      if (!bins[key]) bins[key] = { loss: 0, count: 0, lat: bLat + BIN / 2, lon: bLon + BIN / 2 };
+      bins[key].loss += p.estimated_loss_usd || 0;
+      bins[key].count += 1;
+    }
+    return Object.values(bins)
+      .filter(b => b.count >= 5 && b.loss > 0)
+      .sort((a, b) => b.loss - a.loss)
+      .slice(0, 5)
+      .map((b, i) => ({ rank: i + 1, ...b, avgLoss: Math.round(b.loss / b.count) }));
+  }, [allBuildings]);
+
+  // Callback to fly to hotspot
+  const handleFlyToHotspot = useCallback((lon: number, lat: number) => {
+    mapRef.current?.flyTo({ center: [lon, lat], zoom: 16, duration: 2000 });
+  }, []);
+
   // Refs to avoid stale closures in loadCell callback
   const loadingCellsRef = useRef(loadingCells);
   loadingCellsRef.current = loadingCells;
@@ -856,13 +1207,16 @@ function App() {
   const loadCell = useCallback(async (col: number, row: number) => {
     const key = cellKey(col, row);
     if (loadedCellsRef.current.has(key) || loadingCellsRef.current.has(key)) return;
+    const stormId = activeStormRef.current?.storm_id || '';
+    if (!stormId) return; // no active storm
     setLoadingCells(prev => new Set([...prev, key]));
     try {
-      const stormId = activeStormRef.current?.storm_id || '';
       const ac = new AbortController();
       const timeout = setTimeout(() => ac.abort(), 90_000); // 90s timeout for cell generation
       const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`, { signal: ac.signal });
       clearTimeout(timeout);
+      // Guard: if user switched storms while waiting, discard stale response
+      if (activeStormRef.current?.storm_id !== stormId) return;
       if (!resp.ok) throw new Error(`${resp.status}`);
       const cellData = await resp.json();
       const { buildings, flood } = cellData;
@@ -879,6 +1233,8 @@ function App() {
 
       // ── Buildings deferred: push to next tick so flood paints first ──
       setTimeout(() => {
+        // Guard: discard if user switched storms during the deferred tick
+        if (activeStormRef.current?.storm_id !== stormId) return;
         setAllBuildings((p: any) => {
           if (!p) return buildings;
           return { type: 'FeatureCollection', features: p.features.concat(buildings.features) };
@@ -891,16 +1247,18 @@ function App() {
         }));
       }, 0);
     } catch (err) { console.error(`Failed cell (${col},${row}):`, err); setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.'); }
-    finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
+    finally { if (activeStormRef.current?.storm_id === stormId) setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
   }, []); // stable — all state accessed via refs
 
-  // Reverse-geocode building hover via Nominatim (debounced 300ms to avoid hammering the API)
+  // Reverse-geocode building popup via Nominatim (debounced 300ms to avoid hammering the API)
+  // Uses pinnedInfo if set (click-to-pin), otherwise hoverInfo
+  const displayedPopup = pinnedInfo ?? hoverInfo;
   useEffect(() => {
-    if (hoverInfo?.type !== 'damage') {
+    if (displayedPopup?.type !== 'damage') {
       setHoverAddress(null);
       return;
     }
-    const { lng, lat } = hoverInfo;
+    const { lng, lat } = displayedPopup;
     const cacheKey = `${lng.toFixed(5)},${lat.toFixed(5)}`;
     if (cacheKey in geocodeCache.current) {
       setHoverAddress(geocodeCache.current[cacheKey] || null);
@@ -927,10 +1285,10 @@ function App() {
           geocodeCache.current[cacheKey] = label || '';
           setHoverAddress(label);
         })
-        .catch(() => {});
+        .catch(() => { delete geocodeCache.current[cacheKey]; });
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [hoverInfo]);
+  }, [displayedPopup]);
 
   // Events
   const onHover = useCallback((event: any) => {
@@ -955,12 +1313,29 @@ function App() {
       }
       return;
     }
+    // Damage point click → pin popup
+    const damagePoint = event.features?.find((f: any) => f.layer.id === 'damage-points');
+    if (damagePoint) {
+      setPinnedInfo({ lng: event.lngLat.lng, lat: event.lngLat.lat, type: 'damage', feature: damagePoint });
+      return;
+    }
     // Grid cell click → load data (available or pre-computed "ready" cells)
     const f = event.features?.find((f: any) => f.layer.id === 'grid-available-fill' || f.layer.id === 'grid-ready-fill');
     if (f) loadCell(f.properties.col, f.properties.row);
+    else setPinnedInfo(null); // Click on empty space → clear pinned popup
   }, [loadCell]);
 
   const showGrid = zoom < 13;
+
+  // Grid hint auto-dismiss after 8 seconds
+  useEffect(() => {
+    if (showGrid && activeStorm && !gridHintDismissed && loadedCells.size > 0) {
+      if (gridHintTimerRef.current) clearTimeout(gridHintTimerRef.current);
+      const timer = setTimeout(() => setGridHintDismissed(true), 8000);
+      gridHintTimerRef.current = timer;
+      return () => { clearTimeout(timer); gridHintTimerRef.current = null; };
+    }
+  }, [showGrid, activeStorm, gridHintDismissed, loadedCells.size]);
 
   return (
     <div className="flex h-screen w-full relative overflow-hidden">
@@ -986,13 +1361,31 @@ function App() {
         <Map
           ref={mapRef}
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
-          mapStyle={MAP_STYLE}
+          mapStyle={BASEMAPS[basemap]}
           interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
           cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
-          onZoomEnd={e => setZoom(e.viewState.zoom)}
+          onMoveEnd={e => setZoom(e.viewState.zoom)}
         >
           <NavigationControl position="top-right" />
+
+          {showCounties && (
+            <Source id="county-boundaries" type="raster"
+              tiles={['https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&layers=show:1,2&f=image']}
+              tileSize={256}
+            >
+              <Layer id="county-layer" type="raster" paint={{ 'raster-opacity': 0.5 }} />
+            </Source>
+          )}
+
+          {showFloodZones && (
+            <Source id="fema-flood-zones" type="raster"
+              tiles={['https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image']}
+              tileSize={256}
+            >
+              <Layer id="fema-zones-layer" type="raster" paint={{ 'raster-opacity': 0.35 }} />
+            </Source>
+          )}
 
           {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
@@ -1003,9 +1396,9 @@ function App() {
             >
               <Layer id="damage-points" type="circle" filter={['!', ['has', 'point_count']]}
                 paint={{
-                  'circle-radius': 10,
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 4, 14, 10, 16, 14, 18, 20],
                   'circle-color': ['match', ['get', 'damage_category'], 'none', '#4ade80', 'minor', '#facc15', 'moderate', '#fb923c', 'major', '#ef4444', 'severe', '#7f1d1d', '#9ca3af'],
-                  'circle-opacity': ['coalesce', ['get', 'data_quality'], 0.7],
+                  'circle-opacity': 0.85,
                   'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
                 }} />
               <Layer id="damage-clusters" type="circle" filter={['has', 'point_count']}
@@ -1020,7 +1413,25 @@ function App() {
                   'text-field': ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1000]]], 'K'],
                   'text-size': 11,
                 }}
-                paint={{ 'text-color': '#fff' }} />
+                paint={{ 'text-color': '#fff', 'text-halo-color': 'rgba(0,0,0,0.8)', 'text-halo-width': 1.5 }} />
+            </Source>
+          )}
+
+          {criticalFacilities && (
+            <Source id="critical-facilities" type="geojson" data={criticalFacilities}>
+              <Layer id="critical-icons" type="symbol"
+                layout={{
+                  'text-field': ['get', 'critical_icon'],
+                  'text-size': ['interpolate', ['linear'], ['zoom'], 12, 16, 16, 24, 18, 32],
+                  'text-allow-overlap': true,
+                  'text-ignore-placement': false,
+                  'symbol-sort-key': ['case', ['==', ['get', 'critical_icon'], '➕'], 0, ['==', ['get', 'critical_icon'], '🏫'], 1, 2],
+                }}
+                paint={{
+                  'text-halo-color': '#fff',
+                  'text-halo-width': 2,
+                }}
+              />
             </Source>
           )}
 
@@ -1053,50 +1464,67 @@ function App() {
             </Source>
           )}
 
-          {hoverInfo && (
-            <Popup longitude={hoverInfo.lng} latitude={hoverInfo.lat} closeButton={false} closeOnClick={false} anchor="bottom" className="z-50">
+          {(pinnedInfo || hoverInfo) && (
+            <Popup longitude={pinnedInfo?.lng ?? hoverInfo?.lng} latitude={pinnedInfo?.lat ?? hoverInfo?.lat} closeButton={pinnedInfo ? true : false} closeOnClick={false} anchor="bottom" className="z-50" onClose={() => pinnedInfo && setPinnedInfo(null)}>
               <div className="p-2 min-w-[200px]">
-                {hoverInfo.type === 'grid' ? (
+                {(pinnedInfo ?? hoverInfo).type === 'grid' ? (
                   <div className="text-center">
                     <p className="text-sm font-semibold text-gray-800">
-                      {hoverInfo.feature?.properties?.status === 'ready' ? 'Pre-computed Region' : 'Unexplored Region'}
+                      {(pinnedInfo ?? hoverInfo).feature?.properties?.status === 'ready' ? 'Pre-computed Region' : 'Unexplored Region'}
                     </p>
                     <p className="text-xs text-gray-500 mt-1">
-                      {hoverInfo.feature?.properties?.status === 'ready'
+                      {(pinnedInfo ?? hoverInfo).feature?.properties?.status === 'ready'
                         ? 'Click to load instantly from cache'
                         : 'Click to load buildings & damage data'}
                     </p>
                   </div>
-                ) : hoverInfo.type === 'cluster' ? (
+                ) : (pinnedInfo ?? hoverInfo).type === 'cluster' ? (
                   <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Neighborhood Impact</h3>
                   <div className="text-xs space-y-1">
-                    <p className="flex justify-between"><span className="text-gray-500">Properties:</span> <span className="font-medium">{hoverInfo.feature.properties.point_count}</span></p>
-                    <p className="flex justify-between text-sm"><span className="text-gray-500">Loss:</span> <span className="font-bold text-red-600">${hoverInfo.feature.properties.total_loss?.toLocaleString() || 0}</span></p>
+                    <p className="flex justify-between"><span className="text-gray-500">Properties:</span> <span className="font-medium">{(pinnedInfo ?? hoverInfo).feature.properties.point_count}</span></p>
+                    <p className="flex justify-between text-sm"><span className="text-gray-500">Loss:</span> <span className="font-bold text-red-600">${(pinnedInfo ?? hoverInfo).feature.properties.total_loss?.toLocaleString() || 0}</span></p>
+                    {(() => {
+                      const mPerPx = 156543.03 * Math.cos((pinnedInfo ?? hoverInfo).lat * Math.PI / 180) / Math.pow(2, zoom);
+                      const radiusM = 50 * mPerPx;
+                      const areaSqMi = Math.PI * radiusM * radiusM / (1609.34 * 1609.34);
+                      const density = areaSqMi > 0 ? Math.round((pinnedInfo ?? hoverInfo).feature.properties.point_count / areaSqMi) : 0;
+                      const avgLoss = Math.round((pinnedInfo ?? hoverInfo).feature.properties.total_loss / (pinnedInfo ?? hoverInfo).feature.properties.point_count);
+                      return (
+                        <>
+                          <p className="flex justify-between"><span className="text-gray-500">Avg loss:</span> <span className="font-medium">${avgLoss.toLocaleString()}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Density:</span> <span className="font-medium">~{density.toLocaleString()} bldgs/sq mi</span></p>
+                        </>
+                      );
+                    })()}
                   </div></>
-                ) : hoverInfo.type === 'flood' ? (
+                ) : (pinnedInfo ?? hoverInfo).type === 'flood' ? (
                   <><h3 className="font-semibold text-gray-800 text-sm mb-1">Storm Surge Depth</h3>
-                  <p className="text-gray-800 font-bold text-base">{(hoverInfo.feature.properties.depth_ft != null ? hoverInfo.feature.properties.depth_ft : hoverInfo.feature.properties.depth * 3.28084).toFixed(1)} ft</p>
+                  <p className="text-gray-800 font-bold text-base">{((pinnedInfo ?? hoverInfo).feature.properties.depth_ft != null ? (pinnedInfo ?? hoverInfo).feature.properties.depth_ft : ((pinnedInfo ?? hoverInfo).feature.properties.depth != null ? (pinnedInfo ?? hoverInfo).feature.properties.depth * 3.28084 : 0)).toFixed(1)} ft</p>
                   <p className="text-gray-400 text-[10px] mt-0.5">Modeled inundation at this location</p></>
                 ) : (
                   (() => {
-                    const p = hoverInfo.feature.properties;
+                    const p = (pinnedInfo ?? hoverInfo).feature.properties;
                     const foundHt = p.found_ht != null ? p.found_ht : null;
-                    const interiorFt = foundHt != null ? Math.max(0, p.depth_ft - foundHt) : null;
-                    const structLoss = p.val_struct != null ? Math.round(p.val_struct * p.structure_damage_pct / 100) : null;
-                    const contLoss = p.val_cont != null ? Math.round(p.val_cont * p.contents_damage_pct / 100) : null;
+                    const depthFt = p.depth_ft != null ? Number(p.depth_ft) : null;
+                    const interiorFt = foundHt != null && depthFt != null ? Math.max(0, depthFt - foundHt) : null;
+                    const structPct = p.structure_damage_pct ?? 0;
+                    const contPct = p.contents_damage_pct ?? 0;
+                    const structLoss = p.val_struct != null && p.structure_damage_pct != null ? Math.round(p.val_struct * structPct / 100) : null;
+                    const contLoss = p.val_cont != null && p.contents_damage_pct != null ? Math.round(p.val_cont * contPct / 100) : null;
 
                     // ── Comparable Loss Evidence ──
+                    const popupInfo = pinnedInfo ?? hoverInfo;
                     const comps = allBuildings?.features
-                      ? findComparables(allBuildings.features, p.building_type, hoverInfo.lng, hoverInfo.lat)
+                      ? findComparables(allBuildings.features, p.building_type, popupInfo.lng, popupInfo.lat)
                       : { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
 
                     // ── Wind vs Water Attribution ──
                     let wwSplit: { windPct: number; waterPct: number } | null = null;
                     let estWindMph: number | null = null;
                     if (activeStorm) {
-                      const distKm = haversineKm(hoverInfo.lat, hoverInfo.lng, activeStorm.landfall_lat, activeStorm.landfall_lon);
+                      const distKm = haversineKm(popupInfo.lat, popupInfo.lng, activeStorm.landfall_lat, activeStorm.landfall_lon);
                       estWindMph = Math.round(estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category));
-                      const floodForWind = interiorFt != null ? interiorFt : Math.max(0, p.depth_ft - 1); // fallback: assume 1ft foundation
+                      const floodForWind = interiorFt != null ? interiorFt : (depthFt != null ? Math.max(0, depthFt - 1) : 0); // fallback: assume 1ft foundation
                       wwSplit = windWaterSplit(estWindMph, floodForWind);
                     }
 
@@ -1107,9 +1535,9 @@ function App() {
                     )}
                     <div className="text-xs space-y-1">
                       <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(p.building_type)}</span></p>
-                      <p className="flex justify-between"><span className="text-gray-500">Severity:</span> <span className="font-medium capitalize">{p.damage_category === 'none' ? 'No Damage' : p.damage_category}</span></p>
+                      <p className="flex justify-between"><span className="text-gray-500">Severity:</span> <span className="font-medium capitalize">{!p.damage_category || p.damage_category === 'none' ? 'No Damage' : p.damage_category}</span></p>
                       {/* Surge depth + interior flooding */}
-                      <p className="flex justify-between"><span className="text-gray-500">Surge depth:</span> <span className="font-medium">{p.depth_ft} ft</span></p>
+                      <p className="flex justify-between"><span className="text-gray-500">Surge depth:</span> <span className="font-medium">{p.depth_ft != null ? Number(p.depth_ft).toFixed(1) : '—'} ft</span></p>
                       {foundHt != null && (
                         <p className="flex justify-between"><span className="text-gray-500">Foundation:</span> <span className="font-medium">{foundHt.toFixed(1)} ft above grade</span></p>
                       )}
@@ -1118,9 +1546,10 @@ function App() {
                       )}
                       {/* Structure vs Contents breakdown */}
                       <hr className="border-gray-200 !my-1.5" />
-                      <p className="flex justify-between"><span className="text-gray-500">Structure:</span> <span className="font-medium">{p.structure_damage_pct}%{structLoss != null ? ` ($${structLoss.toLocaleString()})` : ''}</span></p>
-                      <p className="flex justify-between"><span className="text-gray-500">Contents:</span> <span className="font-medium">{p.contents_damage_pct}%{contLoss != null ? ` ($${contLoss.toLocaleString()})` : ''}</span></p>
-                      <p className="flex justify-between text-sm"><span className="text-gray-500">Total loss:</span> <span className="font-bold text-red-600">${p.estimated_loss_usd?.toLocaleString()}</span></p>
+                      <p className="flex justify-between"><span className="text-gray-500">Structure:</span> <span className="font-medium">{structPct}%{structLoss != null ? ` ($${structLoss.toLocaleString()})` : ''}</span></p>
+                      <p className="flex justify-between"><span className="text-gray-500">Contents:</span> <span className="font-medium">{contPct}%{contLoss != null ? ` ($${contLoss.toLocaleString()})` : ''}</span></p>
+                      <p className="flex justify-between text-sm"><span className="text-gray-500">Total loss:</span> <span className="font-bold text-red-600">${(p.estimated_loss_usd ?? 0).toLocaleString()}</span></p>
+                      <p className="text-[10px] text-gray-400 mt-0.5">Modeled repair cost (FEMA HAZUS depth-damage curves)</p>
                       {/* Deductible threshold flag */}
                       {p.estimated_loss_usd != null && (() => {
                         const loss = p.estimated_loss_usd;
@@ -1166,7 +1595,7 @@ function App() {
                         <div className="bg-blue-50 rounded-lg px-2 py-1.5 border border-blue-200">
                           <div className="text-[10px] font-bold text-blue-700 uppercase tracking-wider mb-0.5">Comparable Properties</div>
                           <p className="text-[11px] text-blue-900">
-                            <strong>{comps.count}</strong> similar {friendlyBuildingType(p.building_type).toLowerCase()}s within 0.25 mi averaged{' '}
+                            <strong>{comps.count}</strong> similar {friendlyBuildingType(p.building_type).toLowerCase()}s within {(COMP_RADIUS_KM / 1.609).toFixed(2)} mi averaged{' '}
                             <strong className="text-blue-700">${comps.avgLoss.toLocaleString()}</strong> in modeled losses
                           </p>
                           <p className="text-[10px] text-blue-500 mt-0.5">
@@ -1175,6 +1604,40 @@ function App() {
                         </div>
                         </>
                       )}
+
+                      {/* ── Building Flag / Annotation ── */}
+                      {pinnedInfo && (() => {
+                        const flagKey = `${popupInfo.lng.toFixed(5)},${popupInfo.lat.toFixed(5)}`;
+                        const currentFlag = buildingFlags[flagKey] || '';
+                        const FLAG_OPTIONS = [
+                          { value: '', label: 'No flag', color: 'bg-gray-100 text-gray-600' },
+                          { value: 'confirmed_destroyed', label: 'Confirmed Destroyed', color: 'bg-red-100 text-red-700' },
+                          { value: 'major_damage', label: 'Major Damage', color: 'bg-orange-100 text-orange-700' },
+                          { value: 'shelter_in_place', label: 'Shelter-in-Place', color: 'bg-yellow-100 text-yellow-700' },
+                          { value: 'inspected_ok', label: 'Inspected OK', color: 'bg-green-100 text-green-700' },
+                          { value: 'inaccessible', label: 'Inaccessible', color: 'bg-purple-100 text-purple-700' },
+                        ];
+                        return (
+                          <>
+                          <hr className="border-gray-200 !my-1.5" />
+                          <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1">Field Assessment Flag</div>
+                          <div className="flex flex-wrap gap-1">
+                            {FLAG_OPTIONS.map(opt => (
+                              <button
+                                key={opt.value}
+                                onClick={() => setBuildingFlags(prev => {
+                                  const next = { ...prev };
+                                  if (opt.value === '') delete next[flagKey];
+                                  else next[flagKey] = opt.value;
+                                  return next;
+                                })}
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded transition-colors ${currentFlag === opt.value ? opt.color + ' ring-2 ring-offset-1 ring-indigo-400' : 'bg-gray-50 text-gray-400 hover:bg-gray-100'}`}
+                              >{opt.label}</button>
+                            ))}
+                          </div>
+                          </>
+                        );
+                      })()}
                     </div></>
                     );
                   })()
@@ -1184,71 +1647,123 @@ function App() {
           )}
         </Map>
 
-        {/* ── Address search bar (top-center of map) ── */}
-        {activeStorm && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
-            <div className="flex bg-white/95 backdrop-blur shadow-lg rounded-lg overflow-hidden border border-gray-200">
-              <input
-                type="text"
-                placeholder="Search address, e.g. 412 N Austin St, Rockport TX"
-                value={addressQuery}
-                onChange={e => { setAddressQuery(e.target.value); setAddressError(''); }}
-                onKeyDown={e => e.key === 'Enter' && handleAddressSearch()}
-                className="px-3 py-2 text-sm text-gray-800 placeholder-gray-400 w-72 outline-none"
-              />
+        {/* ── Address search bar (top-center of map) — always visible ── */}
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
+          <div className="flex bg-white/95 backdrop-blur shadow-lg rounded-lg overflow-hidden border border-gray-200">
+            <input
+              type="text"
+              placeholder={activeStorm ? "Search address, e.g. 412 N Austin St, Rockport TX" : "Load a storm to search addresses"}
+              value={addressQuery}
+              onChange={e => { setAddressQuery(e.target.value); setAddressError(''); }}
+              onKeyDown={e => e.key === 'Enter' && activeStorm && handleAddressSearch()}
+              disabled={!activeStorm || addressSearching}
+              className="px-3 py-2 text-sm text-gray-800 placeholder-gray-400 w-72 outline-none disabled:bg-gray-100 disabled:text-gray-400"
+            />
+            <button
+              onClick={handleAddressSearch}
+              disabled={!activeStorm || addressSearching}
+              className="px-3 py-2 bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:bg-gray-300"
+            >{addressSearching ? '...' : 'Go'}</button>
+          </div>
+          {addressError && <span className="text-xs text-red-500 bg-white/90 px-2 py-1 rounded shadow">{addressError}</span>}
+          {/* Action buttons */}
+          {activeStorm && allBuildings?.features?.length > 0 && (
+            <>
               <button
-                onClick={handleAddressSearch}
-                disabled={addressSearching}
-                className="px-3 py-2 bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-medium transition-colors disabled:opacity-50"
-              >{addressSearching ? '...' : 'Go'}</button>
-            </div>
-            {addressError && <span className="text-xs text-red-500 bg-white/90 px-2 py-1 rounded shadow">{addressError}</span>}
-            {/* Action buttons */}
-            {allBuildings?.features?.length > 0 && (
-              <>
+                onClick={handleExportCSV}
+                className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
+                title="Download all loaded buildings as CSV"
+              >Export CSV</button>
+              <button
+                onClick={() => setBatchOpen(true)}
+                className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
+                title="Look up multiple addresses at once"
+              >Batch Lookup</button>
+              {/* Flag count indicator */}
+              {Object.keys(buildingFlags).length > 0 && (
+                <span className="bg-purple-100 text-purple-700 text-xs font-bold px-2 py-2 rounded-lg shadow-lg border border-purple-200">
+                  {Object.keys(buildingFlags).length} flagged
+                </span>
+              )}
+              {/* More dropdown menu */}
+              <div className="relative">
                 <button
-                  onClick={handleExportCSV}
+                  onClick={() => setMoreMenuOpen(!moreMenuOpen)}
                   className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
-                  title="Download all loaded buildings as CSV"
-                >Export CSV</button>
-                <button
-                  onClick={() => setBatchOpen(true)}
-                  className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
-                  title="Look up multiple addresses at once"
-                >Batch Lookup</button>
-                <button
-                  onClick={handlePrint}
-                  className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-2.5 py-2 text-sm text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
-                  title="Print current map view"
-                >🖨</button>
-                <button
-                  onClick={handleShareLink}
-                  className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-2.5 py-2 text-sm text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
-                  title="Copy share link to clipboard"
-                >🔗</button>
-                <button
-                  onClick={() => setMethodologyOpen(m => !m)}
-                  className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-2.5 py-2 text-sm text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
-                  title="View methodology and data sources"
-                >ℹ️</button>
-              </>
-            )}
+                  title="More actions"
+                >More</button>
+                {moreMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setMoreMenuOpen(false)} />
+                    <div className="absolute right-0 mt-1 bg-white/95 backdrop-blur shadow-lg rounded-lg border border-gray-200 overflow-hidden z-40 w-40">
+                      <button
+                        onClick={() => { handlePrint(); setMoreMenuOpen(false); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
+                        title="Print current map view"
+                      >🖨 Print</button>
+                      <button
+                        onClick={() => { handleShareLink(); setMoreMenuOpen(false); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
+                        title="Copy share link to clipboard"
+                      >🔗 Share</button>
+                      <button
+                        onClick={() => { setMethodologyOpen(m => !m); setMoreMenuOpen(false); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
+                        title="View methodology and data sources"
+                      >ℹ️ Methodology</button>
+                      <button
+                        onClick={() => { handleExportPDA(); setMoreMenuOpen(false); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
+                        title="Export FEMA Preliminary Damage Assessment summary"
+                      >📋 PDA Export</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Nuisance flood warning banner */}
+        {activeStorm && impactTotals.buildings > 2000 && impactTotals.totalDepth > 0 && (impactTotals.totalDepth / impactTotals.buildings) < 1.5 && !nuisanceDismissed && (
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-10 bg-amber-100 border border-amber-300 rounded-lg px-4 py-2.5 text-sm text-amber-900 shadow-lg flex items-center justify-between max-w-sm gap-3">
+            <span className="flex-1"><strong>Nuisance Flood Warning:</strong> Many minor tidal inundations with very shallow depths.</span>
+            <button
+              onClick={() => setNuisanceDismissed(true)}
+              className="text-amber-700 hover:text-amber-900 font-bold text-lg shrink-0"
+            >✕</button>
           </div>
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
+          setPinnedInfo(null);
           setConfidence({ level: 'unvalidated', count: 0 }); setEli({ value: 0, tier: 'unavailable' });
           setValidatedDps({ value: 0, adj: 0, reason: '' }); setManifest({});
+          setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
+          setShowCounties(false); setShowFloodZones(false); setBuildingFlags({});
         }} />
+
+        {/* Cell loading progress indicator */}
+        {loadingCells.size > 0 && (
+          <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-30 bg-indigo-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-sm text-center animate-pulse">
+            Loading {loadingCells.size} area(s)... {loadedCells.size} loaded
+          </div>
+        )}
 
         {/* Cell error toast */}
         {cellError && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-sm text-center">
             {cellError}
+          </div>
+        )}
+        {/* Success toast */}
+        {toastSuccess && (
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-green-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-sm text-center">
+            {toastSuccess}
           </div>
         )}
 
@@ -1259,10 +1774,17 @@ function App() {
               <div className="text-4xl mb-3">🌀</div>
               <p className="text-white font-bold text-lg">Select a storm to begin</p>
               <p className="text-slate-300 text-sm mt-1">Choose a hurricane from the browser on the left to load surge data and damage estimates.</p>
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className="lg:hidden mt-4 bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-              >☰ Browse Storms</button>
+              <p className="text-slate-400 text-xs mt-2 italic">DPS = Damage Potential Score — higher means more destructive surge</p>
+              <div className="flex flex-col gap-2 mt-4">
+                <button
+                  onClick={() => activateStorm('harvey_2017')}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                >Try Hurricane Harvey</button>
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  className="lg:hidden bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                >☰ Browse Storms</button>
+              </div>
             </div>
           </div>
         )}
@@ -1274,6 +1796,10 @@ function App() {
               <div className="animate-spin w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full mx-auto mb-3"></div>
               <p className="font-semibold text-gray-800">Analyzing storm...</p>
               <p className="text-xs text-gray-500 mt-1">Fetching buildings & running damage model</p>
+              <button
+                onClick={() => activateAbortRef.current?.abort()}
+                className="mt-4 text-xs text-gray-500 hover:text-gray-700 transition-colors font-medium"
+              >Cancel</button>
             </div>
           </div>
         )}
@@ -1303,6 +1829,12 @@ function App() {
                     disabled={batchLoading || !batchInput.trim()}
                     className="bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
                   >{batchLoading ? 'Looking up...' : 'Look Up Addresses'}</button>
+                  {batchLoading && (
+                    <button
+                      onClick={() => { batchAbortRef.current = true; }}
+                      className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+                    >Cancel</button>
+                  )}
                   {batchResults.length > 0 && (
                     <button
                       onClick={handleBatchExport}
@@ -1341,7 +1873,7 @@ function App() {
                               <td className="px-3 py-1.5">
                                 <span className={`font-medium ${r.status === 'matched' ? 'text-green-600' : 'text-gray-400'}`}>{r.status}</span>
                               </td>
-                              <td className="px-3 py-1.5 text-right font-medium">{r.status === 'matched' ? r.depth_ft?.toFixed(1) : '—'}</td>
+                              <td className="px-3 py-1.5 text-right font-medium">{r.status === 'matched' ? (r.depth_ft != null ? r.depth_ft.toFixed(1) : '—') : '—'}</td>
                               <td className="px-3 py-1.5 text-right font-bold text-red-600">{r.status === 'matched' ? `$${loss.toLocaleString()}` : '—'}</td>
                               <td className={`px-3 py-1.5 text-center font-bold text-[10px] ${dedColor}`}>{dedFlag}</td>
                             </tr>
@@ -1387,6 +1919,47 @@ function App() {
               <div className="text-[10px] text-gray-400 pt-2 border-t border-gray-200">
                 SurgeDPS v1.0 — stormdps.com/surgedps
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Grid onboarding hint */}
+        {showGrid && activeStorm && !gridHintDismissed && loadedCells.size > 0 && (
+          <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur shadow-lg rounded-lg px-4 py-3 border border-gray-200 max-w-xs text-center animate-bounce"
+          >
+            <p className="text-sm text-gray-800 font-medium">Expand coverage by clicking the dashed borders around the loaded area</p>
+            <button
+              onClick={() => setGridHintDismissed(true)}
+              className="mt-2 text-xs font-semibold text-indigo-600 hover:text-indigo-700 transition-colors"
+            >Got it</button>
+          </div>
+        )}
+
+        {/* ── Basemap toggle + Reset View (bottom-right of map) ── */}
+        {activeStorm && (
+          <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
+            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+              {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setBasemap(key)}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${basemap === key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                >{label}</button>
+              ))}
+            </div>
+            <button
+              onClick={handleResetView}
+              className="bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors text-center"
+            >↺ Reset View</button>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => setShowCounties(c => !c)}
+                className={`rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium transition-colors ${showCounties ? 'bg-blue-600 text-white' : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100'}`}
+              >Counties</button>
+              <button
+                onClick={() => setShowFloodZones(f => !f)}
+                className={`rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium transition-colors ${showFloodZones ? 'bg-blue-600 text-white' : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100'}`}
+              >FEMA Zones</button>
             </div>
           </div>
         )}

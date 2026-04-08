@@ -24,9 +24,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy source code and data files (hurdat2.txt, dps_scores.json)
 COPY scripts/ ./scripts/
 COPY src/ ./src/
+COPY data/ ./data/
 
 # Copy built React frontend from stage 1
 COPY --from=frontend-builder /app/ui/dist/ ./ui/dist/
@@ -38,4 +39,4 @@ RUN mkdir -p tmp_integration/cells
 ENV SURGE_API_PORT=8000
 EXPOSE 8000
 
-CMD ["python", "scripts/api_server.py"]
+CMD ["sh", "-c", "python scripts/warm_cache.py && python scripts/api_server.py"]

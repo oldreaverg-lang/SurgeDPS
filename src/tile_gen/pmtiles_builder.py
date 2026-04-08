@@ -64,81 +64,102 @@ def raster_to_geojson(
     depth_property: str = "depth",
     min_depth: float = 0.05,
     simplify_tolerance: float = 0.0001,
+    downsample: int = 2,
 ) -> str:
     """
-    Convert a flood depth raster to GeoJSON polygons.
+    Convert a flood depth raster to a continuous grid of GeoJSON polygons.
 
-    Each contiguous flooded region becomes a polygon feature
-    with the average depth as a property.
+    Each raster pixel (optionally downsampled) becomes a small rectangular
+    polygon with its actual depth value.  This eliminates the gaps produced
+    by the old classify-then-union-then-simplify pipeline.
 
-    Uses rasterio.features.shapes for vectorization.
+    Args:
+        raster_path: Input GeoTIFF with depth values in meters.
+        output_path: Output GeoJSON file path.
+        depth_property: Name of the depth property in output features.
+        min_depth: Minimum depth (meters) to include.  Pixels below this
+                   are treated as dry and omitted.
+        simplify_tolerance: (unused, kept for API compat)
+        downsample: Factor to reduce pixel count.  2 = half resolution
+                    in each axis (4× fewer features).  Set to 1 for full
+                    resolution.
     """
     import rasterio
-    from rasterio.features import shapes
-    from shapely.geometry import shape, mapping
-    from shapely.ops import unary_union
 
-    logger.info(f"Vectorizing {raster_path} -> {output_path}")
+    logger.info(f"Rasterizing {raster_path} -> {output_path}")
 
     with rasterio.open(raster_path) as src:
         data = src.read(1)
         nodata = src.nodata or -9999
         transform = src.transform
 
-    # Classify depth into bins for cleaner polygons
-    bins = [0.3, 0.9, 1.8, 3.0, 5.0, 10.0]  # meters
-    classified = np.zeros_like(data, dtype=np.int16)
-    valid = (data != nodata) & (data > min_depth)
-    for i, threshold in enumerate(bins):
-        classified[valid & (data > threshold)] = i + 1
+    rows, cols = data.shape
 
-    # No flooding → skip
-    if not np.any(classified > 0):
-        # Write empty GeoJSON
-        with open(output_path, "w") as f:
-            json.dump({"type": "FeatureCollection", "features": []}, f)
-        return output_path
+    # Optional downsample — average non-nodata pixels in each block
+    if downsample > 1:
+        ds = downsample
+        new_rows = rows // ds
+        new_cols = cols // ds
+        downsampled = np.full((new_rows, new_cols), nodata, dtype=np.float64)
+        for r in range(new_rows):
+            for c in range(new_cols):
+                block = data[r * ds:(r + 1) * ds, c * ds:(c + 1) * ds]
+                valid = block[(block != nodata) & (block > min_depth)]
+                if valid.size > 0:
+                    downsampled[r, c] = valid.mean()
+        data = downsampled
+        # Adjust affine transform for larger pixels
+        transform = rasterio.Affine(
+            transform.a * ds, transform.b, transform.c,
+            transform.d, transform.e * ds, transform.f,
+        )
+        rows, cols = new_rows, new_cols
 
-    # Vectorize — collect all shapes per depth class, then union them
-    depth_ranges = [
-        (0.3, 0.3), (0.3, 0.9), (0.9, 1.8),
-        (1.8, 3.0), (3.0, 5.0), (5.0, 10.0), (10.0, 20.0)
-    ]
-    class_polys: dict = {}
-    for geom, value in shapes(
-        classified, mask=(classified > 0), transform=transform
-    ):
-        if value == 0:
-            continue
-        cls = int(value)
-        class_polys.setdefault(cls, []).append(shape(geom))
+    # Pixel dimensions in geographic coordinates
+    dx = transform.a   # positive (east)
+    dy = transform.e   # negative (south)
 
     features = []
-    for cls, polys in class_polys.items():
-        # Merge all pixels of the same depth class into one smooth polygon
-        merged = unary_union(polys)
-        merged = merged.simplify(0.002, preserve_topology=True)
-        if merged.is_empty or not merged.is_valid:
-            continue
+    for r in range(rows):
+        for c in range(cols):
+            v = data[r, c]
+            if v == nodata or v <= min_depth:
+                continue
 
-        if cls < len(depth_ranges):
-            lo, hi = depth_ranges[cls]
-            avg_depth = (lo + hi) / 2
-        else:
-            avg_depth = 12.0
+            # Top-left corner of this pixel
+            x0 = transform.c + c * dx
+            y0 = transform.f + r * dy
 
-        depth_ft = avg_depth * 3.28084
+            # Bottom-right corner
+            x1 = x0 + dx
+            y1 = y0 + dy
 
-        features.append({
-            "type": "Feature",
-            "properties": {
-                depth_property: round(avg_depth, 2),
-                "depth_ft": round(depth_ft, 1),
-                "class": cls,
-            },
-            "geometry": mapping(merged),
-        })
+            # Ensure correct winding (SW, SE, NE, NW, SW)
+            west, east = min(x0, x1), max(x0, x1)
+            south, north = min(y0, y1), max(y0, y1)
 
+            depth_m = round(float(v), 3)
+            depth_ft = round(depth_m * 3.28084, 1)
+
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    depth_property: depth_m,
+                    "depth_ft": depth_ft,
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [round(west, 6), round(south, 6)],
+                        [round(east, 6), round(south, 6)],
+                        [round(east, 6), round(north, 6)],
+                        [round(west, 6), round(north, 6)],
+                        [round(west, 6), round(south, 6)],
+                    ]],
+                },
+            })
+
+    # No flooding → empty collection
     geojson = {
         "type": "FeatureCollection",
         "features": features,
@@ -148,7 +169,7 @@ def raster_to_geojson(
         json.dump(geojson, f)
 
     logger.info(
-        f"Vectorized: {len(features)} polygons, "
+        f"Grid output: {len(features)} cells, "
         f"{os.path.getsize(output_path) / 1024:.0f} KB"
     )
     return output_path
