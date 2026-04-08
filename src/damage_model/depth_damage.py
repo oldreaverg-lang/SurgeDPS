@@ -28,6 +28,8 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from damage_model.building_adjuster import adjust_damage_pct
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -300,6 +302,10 @@ def estimate_building_damage(
     first_floor_ht_ft: Optional[float] = None,
     val_struct: Optional[float] = None,
     val_cont: Optional[float] = None,
+    med_yr_blt: Optional[int] = None,
+    num_story: Optional[int] = None,
+    occtype: Optional[str] = None,
+    use_nsi_adjustments: bool = True,
 ) -> BuildingDamage:
     """
     Estimate flood damage for a single building.
@@ -311,16 +317,25 @@ def estimate_building_damage(
     Without NSI data the model falls back to:
         replacement = (sqft or type_default) × cost_per_sqft × id_multiplier
 
+    When use_nsi_adjustments=True (default), per-building NSI attributes are
+    used to refine the HAZUS base damage percentages:
+        - Foundation height (found_ht): elevated buildings sustain less damage
+        - Construction era (med_yr_blt): pre-1970 buildings are more vulnerable
+        - Multi-story (num_story): upper-floor contents survive partial flooding
+
     Args:
         depth_m: Flood depth at the building location (meters, above ground)
         lon, lat: Building coordinates
         building_type: HAZUS occupancy code
         building_id: Unique building identifier
         sqft: Building area in square feet (defaults per type if not provided)
-        first_floor_ht_ft: First-floor elevation above grade (ft); from NSI
-                           found_ht field or falls back to type default
+        first_floor_ht_ft: First-floor elevation above grade (ft); from NSI found_ht
         val_struct: Structure replacement value in USD (from FEMA NSI)
         val_cont:   Contents replacement value in USD (from FEMA NSI)
+        med_yr_blt: Median year built (from FEMA NSI)
+        num_story:  Number of stories (from FEMA NSI)
+        occtype:    NSI occupancy type code (e.g. "RES1")
+        use_nsi_adjustments: Apply per-building refinements (default True)
 
     Returns:
         BuildingDamage with loss estimates
@@ -336,7 +351,22 @@ def estimate_building_damage(
     # Look up damage percentages from HAZUS depth-damage curves
     struct_pct = get_damage_pct(depth_above_floor_ft, building_type, "structure")
     content_pct = get_damage_pct(depth_above_floor_ft, building_type, "contents")
-    total_pct = get_total_damage_pct(depth_above_floor_ft, building_type)
+
+    # Apply NSI-based per-building adjustments when attributes are available
+    if use_nsi_adjustments and any(v is not None for v in (first_floor_ht_ft, med_yr_blt, num_story)):
+        struct_pct, content_pct = adjust_damage_pct(
+            structure_pct=struct_pct,
+            contents_pct=content_pct,
+            found_ht=first_floor_ht_ft,
+            med_yr_blt=med_yr_blt,
+            num_story=num_story,
+            occtype=occtype,
+            depth_above_grade_ft=depth_ft,
+        )
+
+    # Recompute weighted total from (possibly adjusted) struct/content pcts
+    r = CONTENTS_TO_STRUCTURE_RATIO
+    total_pct = (struct_pct + r * content_pct) / (1 + r)
 
     # ── Replacement value ───────────────────────────────────────────
     if val_struct is not None:

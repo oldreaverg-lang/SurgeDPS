@@ -32,6 +32,11 @@ import logging
 import os
 from typing import Dict, Optional, Tuple
 
+try:
+    from data_ingest.duckdb_cache import building_cache as _building_cache
+except ImportError:
+    _building_cache = None  # graceful no-op if cache not available
+
 import requests
 
 logger = logging.getLogger(__name__)
@@ -154,8 +159,11 @@ def fetch_buildings_nsi(
 
     logger.info("[NSI] %d structures received", len(nsi_features))
 
-    # Convert NSI features to our GeoJSON schema
+    # Convert NSI features to our GeoJSON schema with validation
     out_features = []
+    _skipped_invalid = 0
+    _validation_notes: list = []
+
     for feat in nsi_features:
         props = feat.get("properties", {})
         geom = feat.get("geometry", {})
@@ -167,14 +175,21 @@ def fetch_buildings_nsi(
             lon = props.get("x")
             lat = props.get("y")
             if lon is None or lat is None:
+                _skipped_invalid += 1
                 continue
         else:
             lon, lat = coords[0], coords[1]
 
-        num_story = int(props.get("num_story") or 1)
-        found_type = str(props.get("found_type") or "")
-        occtype = str(props.get("occtype") or "RES1")
-        hazus_code = _nsi_to_hazus(occtype, num_story, found_type)
+        # ── Input validation ────────────────────────────────────────
+        # Reject records with clearly invalid data before they reach
+        # the damage model and produce garbage outputs.
+
+        # Coords outside the requested bbox (+ small tolerance for edge cases)
+        tol = 0.05
+        if not (lon_min - tol <= lon <= lon_max + tol and
+                lat_min - tol <= lat <= lat_max + tol):
+            _skipped_invalid += 1
+            continue
 
         val_struct = props.get("val_struct")
         val_cont   = props.get("val_cont")
@@ -182,10 +197,43 @@ def fetch_buildings_nsi(
         found_ht   = props.get("found_ht")
         med_yr_blt = props.get("med_yr_blt")
 
+        # val_struct = 0 or negative is a data entry error
+        if val_struct is not None and float(val_struct) <= 0:
+            _skipped_invalid += 1
+            _validation_notes.append(f"val_struct<=0: {props.get('fd_id')}")
+            continue
+
+        # Negative sqft is nonsensical
+        if sqft is not None and float(sqft) <= 0:
+            _skipped_invalid += 1
+            continue
+
+        # found_ht > 30 ft is likely a sensor error (stilted V-zone buildings
+        # rarely exceed 15 ft, most coastal properties are 1-4 ft)
+        if found_ht is not None and float(found_ht) > 30:
+            _validation_notes.append(
+                f"found_ht={found_ht}ft (capped to 30): {props.get('fd_id')}"
+            )
+            found_ht = 30.0  # cap rather than skip — building is still real
+
+        # med_yr_blt in the future or < 1700 is noise
+        if med_yr_blt is not None:
+            yr = int(med_yr_blt)
+            if yr < 1700 or yr > 2030:
+                med_yr_blt = None  # drop bad year rather than skip the building
+
+        # ── End validation ──────────────────────────────────────────
+
+        num_story = int(props.get("num_story") or 1)
+        found_type = str(props.get("found_type") or "")
+        occtype = str(props.get("occtype") or "RES1")
+        hazus_code = _nsi_to_hazus(occtype, num_story, found_type)
+
         out_props: Dict = {
             "id":       str(props.get("fd_id", f"nsi_{len(out_features)}")),
             "type":     hazus_code,
             "occtype":  occtype,
+            "source":   "NSI",
         }
         if sqft       is not None: out_props["area_sqft"]  = round(float(sqft), 1)
         if val_struct is not None: out_props["val_struct"]  = round(float(val_struct), 2)
@@ -199,9 +247,20 @@ def fetch_buildings_nsi(
             "geometry": {"type": "Point", "coordinates": [lon, lat]},
         })
 
+    if _skipped_invalid:
+        logger.warning("[NSI] Skipped %d invalid records (of %d received)",
+                       _skipped_invalid, len(nsi_features))
+    if _validation_notes:
+        logger.info("[NSI] Validation notes: %s", "; ".join(_validation_notes[:10]))
+
     if not out_features:
         logger.info("[NSI] No valid features after conversion, falling back to OSM")
         return None
+
+    # Cache in DuckDB for fast in-session lookups (cell_key passed by caller via output_path)
+    if _building_cache is not None:
+        cell_key = os.path.splitext(os.path.basename(output_path))[0]  # e.g. "ian_2_3_buildings"
+        _building_cache.store(cell_key, out_features)
 
     geojson = {"type": "FeatureCollection", "features": out_features}
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
