@@ -246,6 +246,15 @@ class BuildingDamage:
     found_ht: Optional[float] = None      # foundation height (ft above grade)
     val_struct: Optional[float] = None     # structure replacement value (USD)
     val_cont: Optional[float] = None       # contents replacement value (USD)
+    # ── Pass-through metadata from building source (NSI/OSM) ──
+    # These fields survive the damage pipeline so the frontend CSV export
+    # can include them for insurance adjusters and emergency managers.
+    source: Optional[str] = None           # "NSI" | "OSM" | "MSFT"
+    data_quality: Optional[float] = None   # 0.0–1.0 reliability score
+    occtype: Optional[str] = None          # raw NSI occupancy code (e.g. "RES1", "COM3")
+    med_yr_blt: Optional[int] = None       # median year built
+    num_story: Optional[int] = None        # number of stories
+    area_sqft: Optional[float] = None      # building footprint in sqft
 
 
 @dataclass
@@ -507,6 +516,13 @@ def estimate_damage_from_raster(
                 val_struct=float(val_struct) if val_struct is not None else None,
                 val_cont=float(val_cont) if val_cont is not None else None,
             )
+            # Carry source metadata through so the frontend CSV export can use it
+            damage.source       = props.get("source")
+            damage.data_quality = props.get("data_quality")
+            damage.occtype      = props.get("occtype")
+            damage.med_yr_blt   = props.get("med_yr_blt")
+            damage.num_story    = props.get("num_story")
+            damage.area_sqft    = props.get("area_sqft")
             buildings.append(damage)
 
     # Aggregate
@@ -602,6 +618,12 @@ def _write_damage_geojson(
                 "found_ht": b.found_ht,
                 "val_struct": b.val_struct,
                 "val_cont": b.val_cont,
+                "source": b.source,
+                "data_quality": b.data_quality,
+                "occtype": b.occtype,
+                "med_yr_blt": b.med_yr_blt,
+                "num_story": b.num_story,
+                "area_sqft": b.area_sqft,
             },
             "geometry": {
                 "type": "Point",
