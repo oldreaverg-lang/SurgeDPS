@@ -46,6 +46,7 @@ interface StormInfo {
   dps_score: number;
   confidence?: string;
   building_count?: number;
+  population?: { county_name?: string; state_code?: string; population?: number; pop_label?: string; vintage?: number };
 }
 interface Season { year: number; count: number; }
 
@@ -528,6 +529,13 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <span>Pressure: <strong className="text-gray-800">{storm.min_pressure_mb} mb</strong></span>
           <span>Year: <strong className="text-gray-800">{storm.year}</strong></span>
         </div>
+        {storm.population?.pop_label && (
+          <div className="mt-1.5 pt-1.5 border-t border-gray-200/50 flex items-center gap-1.5 text-xs text-gray-600">
+            <span className="text-sm">👥</span>
+            <span><strong className="text-gray-800">{storm.population.pop_label}</strong> in {storm.population.county_name}, {storm.population.state_code}</span>
+            {storm.population.vintage && <span className="text-[10px] text-gray-400">({storm.population.vintage})</span>}
+          </div>
+        )}
         <div className="mt-1.5 pt-1.5 border-t border-gray-200/50 text-[10px] text-gray-500">
           <span className="font-semibold">Surge note:</span> Modeled depths reflect SLOSH maximum-of-maximums (worst-case tidal alignment). Actual depths may have been lower if landfall did not coincide with local high tide.
         </div>
@@ -607,8 +615,12 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <div className="text-xs text-gray-500 mt-0.5">
             Across {totals.buildings.toLocaleString()} properties
           </div>
-          {estimatedPop > 0 && (
-            <div className="text-[10px] text-gray-400 mt-0.5">~{estimatedPop.toLocaleString()} estimated residents</div>
+          {(estimatedPop > 0 || storm.population?.population) && (
+            <div className="text-[10px] text-gray-400 mt-0.5">
+              {storm.population?.population
+                ? `${storm.population.county_name} county pop: ${storm.population.population.toLocaleString()} · ~${estimatedPop.toLocaleString()} in surge zone`
+                : `~${estimatedPop.toLocaleString()} estimated residents in surge zone`}
+            </div>
           )}
         </div>
       )}

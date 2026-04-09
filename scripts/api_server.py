@@ -45,6 +45,7 @@ from storm_catalog.hurdat2_parser import (
 # Season accordion cutoff — only show 2015+ in the year-by-year browser
 SEASON_MIN_YEAR = 2015
 from storm_catalog.surge_model import generate_surge_raster
+from data_ingest.census_fetcher import get_population_context
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'cells')
@@ -478,6 +479,15 @@ class CellHandler(BaseHTTPRequestHandler):
             storm_data['dps_adj_reason'] = vdps['dps_adj_reason']
             adj_note = f"  Validated DPS: {vdps['validated_dps']:.1f} ({vdps['dps_adj_reason']})" if vdps['dps_adjustment'] != 0 else ""
             print(f"  Confidence: {conf['confidence']} ({conf['building_count']} buildings)  ELI: {eli['eli']:.1f} ({eli['eli_tier']}){adj_note}")
+
+            # Population context (Census Bureau)
+            try:
+                pop_ctx = get_population_context(storm.landfall_lat, storm.landfall_lon)
+                if pop_ctx:
+                    storm_data['population'] = pop_ctx
+                    print(f"  Population: {pop_ctx.get('pop_label', '?')} in {pop_ctx.get('county_name', '?')}, {pop_ctx.get('state_code', '?')}")
+            except Exception as e:
+                print(f"  [warn] Census population lookup failed: {e}")
 
             response_data = {
                 "storm": storm_data,
