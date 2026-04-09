@@ -31,8 +31,12 @@ cp "$SURGE_UI/dist/assets/"* "$DEPLOY_DIR/assets/"
 cp "$SURGE_UI/dist/index.html" "$DEPLOY_DIR/index.html"
 echo "Copied new build output."
 
-# 4. Fix Vite's default <title>
-sed -i "s|<title>ui</title>|<title>$TITLE</title>|" "$DEPLOY_DIR/index.html"
+# 4. Fix Vite's default <title> (portable: works on both macOS and Linux)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  sed -i '' "s|<title>ui</title>|<title>$TITLE</title>|" "$DEPLOY_DIR/index.html"
+else
+  sed -i "s|<title>ui</title>|<title>$TITLE</title>|" "$DEPLOY_DIR/index.html"
+fi
 echo "Fixed page title."
 
 # 5. Stage in StormDPS with git-index auto-recovery

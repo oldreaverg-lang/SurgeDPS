@@ -74,6 +74,26 @@ def _cached_cells(storm: StormEntry) -> set[tuple[int, int]]:
     return cached
 
 
+def _update_building_index(storm_id: str, col: int, row: int, count: int):
+    """
+    Write per-cell building count to a lightweight JSON index file.
+    The index lives at <storm_cache_dir>/building_index.json and maps
+    "col,row" → building_count.  _compute_confidence reads this instead
+    of scanning/parsing every damage GeoJSON on each request.
+    """
+    index_path = os.path.join(CACHE_DIR, storm_id, 'building_index.json')
+    index = {}
+    if os.path.exists(index_path):
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            index = {}
+    index[f'{col},{row}'] = count
+    with open(index_path, 'w') as f:
+        json.dump(index, f)
+
+
 def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
     """Generate data for a single cell of a storm. Returns True on success."""
     sdir = _storm_cache_dir(storm)
@@ -121,7 +141,12 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
             with open(damage_path, 'w') as f:
                 json.dump({"type": "FeatureCollection", "features": []}, f)
 
-        # 5. Clean up intermediate files to save volume space.
+        # 5. Record building count in lightweight index so _compute_confidence
+        #    can do an O(1) lookup instead of re-reading multi-MB GeoJSON files.
+        n_buildings = len(buildings_data.get('features', []))
+        _update_building_index(storm.storm_id, col, row, n_buildings)
+
+        # 6. Clean up intermediate files to save volume space.
         #    The API only needs damage.geojson + flood.geojson for cache hits.
         #    depth.tif and buildings.json can be regenerated on-demand if needed.
         for tmp in (raster_path, buildings_path):
@@ -157,7 +182,7 @@ def collect_sidebar_storms() -> list[StormEntry]:
     # Season accordion (2015+) — only pre-warm Category 1+ hurricanes.
     # Tropical storms produce minimal surge and aren't worth the volume space.
     try:
-        seasons = get_seasons(min_year=SEASON_MIN_YEAR)
+        seasons = [s for s in get_seasons() if s['year'] >= SEASON_MIN_YEAR]
         for season in seasons:
             year = season['year']
             year_storms = get_storms_for_year(year)
@@ -203,7 +228,7 @@ def main():
             continue
 
         missing = [c for c in target if c not in already]
-        grid_label = '5×5' if storm.storm_id in _HISTORIC_IDS else '3×3'
+        grid_label = '3×3'
         print(f"  {tag} — {grid_label}: generating {len(missing)} cell(s) ({len(already)} cached)...")
         t1 = time.time()
 

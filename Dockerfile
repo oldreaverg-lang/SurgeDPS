@@ -12,7 +12,7 @@ RUN npm run build
 
 # ─── Stage 2: Python runtime ──────────────────────────────────────────────────
 # rasterio wheels bundle GDAL but still need libexpat1 from the system.
-FROM python:3.11-slim-bookworm
+FROM python:3.12-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libexpat1 \
@@ -43,8 +43,8 @@ COPY --from=frontend-builder /app/ui/dist/ ./ui/dist/
 RUN mkdir -p tmp_integration/cells tmp_integration/validation \
     tmp_integration/census tmp_integration/forecasts tmp_integration/geocode
 
-# Railway sets PORT; default to 8000
-ENV SURGE_API_PORT=8000
+# Railway injects PORT at runtime; default to 8000 for local dev
+ENV PORT=8000
 EXPOSE 8000
 
 # Start background processes, then the API server (foreground):

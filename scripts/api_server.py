@@ -20,6 +20,7 @@ import mimetypes
 import os
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 
 # Built React frontend lives at <repo_root>/ui/dist/
@@ -68,25 +69,53 @@ def _compute_confidence(storm_id: str) -> dict:
     """
     R5: Compute validation confidence based on cached building count.
     Returns {'confidence': 'high'|'medium'|'low'|'unvalidated', 'building_count': int}
+
+    Fast path: reads building_index.json (tiny file written during cell
+    generation by both warm_cache.py and load_cell()).
+    Fallback: scans *_damage.geojson for cells generated before the index
+    existed — and backfills the index so subsequent lookups are instant.
     """
     sdir = os.path.join(CACHE_DIR, storm_id)
     if not os.path.isdir(sdir):
         return {'confidence': 'unvalidated', 'building_count': 0}
+
+    # Fast path: read the lightweight index
+    index_path = os.path.join(sdir, 'building_index.json')
+    if os.path.exists(index_path):
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+            total = sum(index.values())
+            level = 'high' if total > 500 else ('medium' if total >= 50 else 'low')
+            return {'confidence': level, 'building_count': total}
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Fallback: scan damage GeoJSONs and backfill the index
     total = 0
+    index = {}
     for fname in os.listdir(sdir):
-        if fname.endswith('_buildings.json'):
+        if fname.endswith('_damage.geojson'):
             try:
                 with open(os.path.join(sdir, fname)) as f:
                     data = json.load(f)
-                total += len(data.get('features', []))
+                count = len(data.get('features', []))
+                total += count
+                # Extract col,row from filename like "cell_0_-1_damage.geojson"
+                parts = fname.replace('_damage.geojson', '').replace('cell_', '').split('_')
+                if len(parts) == 2:
+                    index[f'{parts[0]},{parts[1]}'] = count
             except Exception:
                 pass
-    if total > 500:
-        level = 'high'
-    elif total >= 50:
-        level = 'medium'
-    else:
-        level = 'low'
+    # Backfill the index for future instant lookups
+    if index:
+        try:
+            with open(index_path, 'w') as f:
+                json.dump(index, f)
+        except IOError:
+            pass
+
+    level = 'high' if total > 500 else ('medium' if total >= 50 else 'low')
     return {'confidence': level, 'building_count': total}
 
 
@@ -238,6 +267,8 @@ def _inject_dps(storm_dict: dict) -> dict:
 # Active Storm State
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+import threading as _threading
+_active_storm_lock = _threading.Lock()
 _active_storm: StormEntry | None = None
 _active_exposure_region: str = ''  # R11: cached for cell-load lookups
 
@@ -250,6 +281,26 @@ def _storm_cache_dir(storm: StormEntry) -> str:
     d = os.path.join(CACHE_DIR, storm.storm_id)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _update_building_index(storm_id: str, col: int, row: int, count: int):
+    """
+    Write per-cell building count to a lightweight JSON index file.
+    The index lives at <storm_cache_dir>/building_index.json and maps
+    "col,row" → building_count.  _compute_confidence reads this instead
+    of scanning/parsing every damage GeoJSON on each request.
+    """
+    index_path = os.path.join(CACHE_DIR, storm_id, 'building_index.json')
+    index = {}
+    if os.path.exists(index_path):
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            index = {}
+    index[f'{col},{row}'] = count
+    with open(index_path, 'w') as f:
+        json.dump(index, f)
 
 
 def cell_bbox(col: int, row: int):
@@ -323,10 +374,13 @@ def load_cell(col: int, row: int) -> dict:
 
     with open(buildings_path) as f:
         buildings_data = json.load(f)
-    if not buildings_data.get("features"):
+    n_buildings = len(buildings_data.get("features", []))
+
+    if not n_buildings:
         empty = _empty_fc()
         with open(damage_path, 'w') as f:
             json.dump(empty, f)
+        _update_building_index(storm.storm_id, col, row, 0)
         _progress.update(step='Complete', step_num=4)
         return {"buildings": empty, "flood": flood_data}
 
@@ -336,6 +390,18 @@ def load_cell(col: int, row: int) -> dict:
 
     with open(damage_path) as f:
         damage_data = json.load(f)
+
+    # 5. Record building count in lightweight index (instant confidence lookups).
+    _update_building_index(storm.storm_id, col, row, n_buildings)
+
+    # 6. Clean up intermediate files to save volume space (matches warm_cache.py).
+    #    The API only needs damage.geojson + flood.geojson for cache hits.
+    for tmp in (raster_path, buildings_path):
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
 
     return {"buildings": damage_data, "flood": flood_data}
 
@@ -439,7 +505,8 @@ class CellHandler(BaseHTTPRequestHandler):
                 return
 
             global _active_storm, _active_exposure_region
-            _active_storm = storm
+            with _active_storm_lock:
+                _active_storm = storm
             print(f"\n{'='*60}")
             print(f"ACTIVATED: {storm.name} ({storm.year}) — Cat {storm.category}")
             print(f"  Landfall: ({storm.landfall_lon}, {storm.landfall_lat})")
@@ -447,12 +514,11 @@ class CellHandler(BaseHTTPRequestHandler):
             print(f"  Grid origin: ({storm.grid_origin_lon}, {storm.grid_origin_lat})")
             print(f"{'='*60}\n")
 
-            # Load all pre-cached cells around landfall.  Historic storms
-            # get a 5×5 grid; others get 3×3.  Cached cells return instantly;
-            # uncached ones are generated on the fly (and cached for next time).
-            _is_historic = storm.storm_id in {s.storm_id for s in HISTORICAL_STORMS}
-            _ACTIVATE_CELLS = [(c, r) for r in range(-2, 3) for c in range(-2, 3)] if _is_historic \
-                else [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
+            # Load all pre-cached cells around landfall (3×3 for all storms
+            # to stay within Railway 5 GB volume limit).  Cached cells return
+            # instantly; uncached ones are generated on the fly.  Users can
+            # expand coverage on-demand by clicking grid borders.
+            _ACTIVATE_CELLS = [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
             total_act = len(_ACTIVATE_CELLS) * 4  # 4 steps per cell
             _progress.update(step='Initializing', step_num=0, total_steps=total_act,
                              started_at=_time.time(), storm_id=storm.storm_id)
@@ -809,11 +875,14 @@ class CellHandler(BaseHTTPRequestHandler):
             mime = mime or 'application/octet-stream'
             with open(file_path, 'rb') as fh:
                 body = fh.read()
-            self.send_response(200)
-            self.send_header('Content-Type', mime)
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
         else:
             self._send_error(404, 'Not found')
 
@@ -826,19 +895,25 @@ class CellHandler(BaseHTTPRequestHandler):
 
     def _send_raw(self, code, body: bytes):
         # Gzip compress large responses (>1 KB) if client supports it
-        accept_enc = self.headers.get('Accept-Encoding', '')
-        if len(body) > 1024 and 'gzip' in accept_enc:
-            import gzip as _gzip
-            body = _gzip.compress(body, compresslevel=6)
-            self.send_response(code)
-            self.send_header('Content-Encoding', 'gzip')
-        else:
-            self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            accept_enc = self.headers.get('Accept-Encoding', '')
+            if len(body) > 1024 and 'gzip' in accept_enc:
+                import gzip as _gzip
+                body = _gzip.compress(body, compresslevel=6)
+                self.send_response(code)
+                self.send_header('Content-Encoding', 'gzip')
+            else:
+                self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            # Client disconnected before we finished writing (e.g., browser
+            # timed out during a long cell activation).  Safe to ignore —
+            # the data was cached, so the next request will be fast.
+            pass
 
     def _send_json(self, code, data):
         self._send_raw(code, json.dumps(data).encode())
@@ -850,9 +925,15 @@ class CellHandler(BaseHTTPRequestHandler):
         pass
 
 
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle each request in a new thread so long cell loads don't block health checks."""
+    daemon_threads = True
+
+
 def main():
-    port = int(os.environ.get('PORT', os.environ.get('SURGE_API_PORT', 8000)))
-    server = HTTPServer(('0.0.0.0', port), CellHandler)
+    # Railway injects PORT at runtime; SURGE_API_PORT is a local-dev override.
+    port = int(os.environ.get('PORT', 8000))
+    server = ThreadingHTTPServer(('0.0.0.0', port), CellHandler)
     print(f"SurgeDPS Cell API running on http://localhost:{port}")
     print(f"Cell size: {CELL_WIDTH}° x {CELL_HEIGHT}°")
     print(f"Cache dir: {CACHE_DIR}")
