@@ -736,6 +736,8 @@ function App() {
   const [allFlood, setAllFlood] = useState<any>(null);
   const [zoom, setZoom] = useState(10);
   const [basemap, setBasemap] = useState<string>('dark');
+  const [imageryDate, setImageryDate] = useState<string | null>(null);
+  const imageryFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showCounties, setShowCounties] = useState(false);
   const [showFloodZones, setShowFloodZones] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -751,6 +753,48 @@ function App() {
       mapRef.current.flyTo({ center: [activeStorm.landfall_lon, activeStorm.landfall_lat], zoom: 10, pitch: 30, duration: 2000 });
     }
   }, [activeStorm]);
+
+  // ── ESRI World Imagery date lookup ──
+  // Queries the ESRI identify endpoint for the acquisition date of the satellite
+  // tile at the current map center. Debounced 800 ms so it only fires after the
+  // user stops panning. Clears when switching away from satellite basemap.
+  const fetchImageryMeta = useCallback((lat: number, lon: number) => {
+    if (imageryFetchTimer.current) clearTimeout(imageryFetchTimer.current);
+    imageryFetchTimer.current = setTimeout(async () => {
+      try {
+        const m = 0.05;
+        const params = new URLSearchParams({
+          geometry: `${lon},${lat}`,
+          geometryType: 'esriGeometryPoint',
+          sr: '4326',
+          layers: 'all',
+          returnGeometry: 'false',
+          tolerance: '2',
+          mapExtent: `${lon-m},${lat-m},${lon+m},${lat+m}`,
+          imageDisplay: '800,600,96',
+          f: 'json',
+        });
+        const res = await fetch(
+          `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/identify?${params}`
+        );
+        const data = await res.json();
+        const attrs = data.results?.[0]?.attributes;
+        if (attrs) {
+          const ts = attrs.SRC_DATE ?? attrs.SRC_DATE2 ?? attrs.SAMP_DATE;
+          if (ts) {
+            const d = new Date(parseInt(ts));
+            if (!isNaN(d.getTime())) {
+              setImageryDate(d.toLocaleDateString('en-US', { year: 'numeric', month: 'short' }));
+              return;
+            }
+          }
+        }
+        setImageryDate(null);
+      } catch {
+        setImageryDate(null);
+      }
+    }, 800);
+  }, []);
   const [confidence, setConfidence] = useState<{ level: string; count: number }>({ level: 'unvalidated', count: 0 });
   const [eli, setEli] = useState<{ value: number; tier: string }>({ value: 0, tier: 'unavailable' });
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
@@ -769,6 +813,17 @@ function App() {
   const [retryStormId, setRetryStormId] = useState<string | null>(null);
   useEffect(() => { if (cellError) { const t = setTimeout(() => { setCellError(null); setRetryStormId(null); }, 8000); return () => clearTimeout(t); } }, [cellError]);
   useEffect(() => { if (toastSuccess) { const t = setTimeout(() => setToastSuccess(null), 3000); return () => clearTimeout(t); } }, [toastSuccess]);
+
+  // Fetch imagery acquisition date when switching to satellite, clear when switching away
+  useEffect(() => {
+    if (basemap === 'satellite' && mapRef.current) {
+      const c = mapRef.current.getCenter();
+      fetchImageryMeta(c.lat, c.lng);
+    } else {
+      if (imageryFetchTimer.current) clearTimeout(imageryFetchTimer.current);
+      setImageryDate(null);
+    }
+  }, [basemap, fetchImageryMeta]);
 
   // Progress tracking for loading overlay
   const [loadProgress, setLoadProgress] = useState<{ step: string; step_num: number; total_steps: number; elapsed: number }>({ step: '', step_num: 0, total_steps: 4, elapsed: 0 });
@@ -1440,7 +1495,10 @@ function App() {
           interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
           cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
-          onMoveEnd={e => setZoom(e.viewState.zoom)}
+          onMoveEnd={e => {
+            setZoom(e.viewState.zoom);
+            if (basemap === 'satellite') fetchImageryMeta(e.viewState.latitude, e.viewState.longitude);
+          }}
         >
           <NavigationControl position="top-right" />
 
@@ -2164,6 +2222,12 @@ function App() {
                 <h4 className="font-bold text-gray-800 mb-1">Limitations</h4>
                 <p>This is a modeled estimate, not a field assessment. Actual damage depends on construction quality, mitigation measures, debris impact, and other factors not captured in the model. Loss figures should be treated as order-of-magnitude guidance, not precise valuations.</p>
               </div>
+              {basemap === 'satellite' && (
+                <div>
+                  <h4 className="font-bold text-gray-800 mb-1">Satellite Imagery</h4>
+                  <p>Basemap tiles are sourced from <strong>ESRI World Imagery</strong> (Maxar/DigitalGlobe). Acquisition date for the current view: <strong>{imageryDate ?? 'loading…'}</strong>. Date updates as you pan the map. Imagery age matters — post-storm captures will show debris and damage visible from above.</p>
+                </div>
+              )}
               <div className="text-[10px] text-gray-400 pt-2 border-t border-gray-200">
                 SurgeDPS v1.0 — stormdps.com/surgedps
               </div>
@@ -2181,6 +2245,16 @@ function App() {
               onClick={() => setGridHintDismissed(true)}
               className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
             >Got it ✓</button>
+          </div>
+        )}
+
+        {/* ── Satellite imagery date badge (bottom-right, above MapLibre attribution) ── */}
+        {basemap === 'satellite' && (
+          <div className="absolute bottom-7 right-2 z-20 pointer-events-none">
+            <div className="bg-black/55 backdrop-blur-sm text-white/80 text-[10px] px-1.5 py-0.5 rounded-sm flex items-center gap-1">
+              <span>📅</span>
+              <span>{imageryDate ?? '…'}</span>
+            </div>
           </div>
         )}
 
