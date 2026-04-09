@@ -35,9 +35,13 @@ COPY data/ ./data/
 # Copy built React frontend from stage 1
 COPY --from=frontend-builder /app/ui/dist/ ./ui/dist/
 
-# Cache dir for cell data — mount a Railway volume here for persistence
-# Railway volume mount point: /app/tmp_integration/cells
-RUN mkdir -p tmp_integration/cells
+# Persistent data — mount a Railway volume at /app/tmp_integration
+# Contains: cells/ (surge grid cache), validation/ (run ledger),
+# census/ (population cache), forecasts/ (NHC track cache),
+# geocode/ (reverse geocoding cache), monitor_state.json
+# Railway volume mount point: /app/tmp_integration
+RUN mkdir -p tmp_integration/cells tmp_integration/validation \
+    tmp_integration/census tmp_integration/forecasts tmp_integration/geocode
 
 # Railway sets PORT; default to 8000
 ENV SURGE_API_PORT=8000
