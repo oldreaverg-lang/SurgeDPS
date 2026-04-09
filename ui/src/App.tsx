@@ -1648,9 +1648,16 @@ function App() {
 
                     return (
                     <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property Damage</h3>
-                    {hoverAddress && (
-                      <p className="text-[11px] text-indigo-700 font-semibold mb-1.5 pb-1 border-b border-gray-100 truncate" title={hoverAddress}>{hoverAddress}</p>
-                    )}
+                    <a
+                      href={`https://maps.google.com/maps?q=&layer=c&cbll=${popupInfo.lat},${popupInfo.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open in Google Street View"
+                      className="flex items-center gap-1 text-[11px] text-indigo-700 font-semibold mb-1.5 pb-1 border-b border-gray-100 hover:text-indigo-500 transition-colors group"
+                    >
+                      <span className="truncate">{hoverAddress ?? `${popupInfo.lat.toFixed(5)}, ${popupInfo.lng.toFixed(5)}`}</span>
+                      <span className="shrink-0 opacity-60 group-hover:opacity-100 transition-opacity" title="Street View">↗</span>
+                    </a>
                     <div className="text-xs space-y-1">
                       <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(p.building_type)}</span></p>
                       <p className="flex justify-between"><span className="text-gray-500">Severity:</span> <span className="font-medium capitalize">{!p.damage_category || p.damage_category === 'none' ? 'No Damage' : p.damage_category}</span></p>
