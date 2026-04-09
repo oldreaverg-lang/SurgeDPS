@@ -1957,7 +1957,7 @@ function App() {
         {!activeStorm && !activating && (
           <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
             <div className="bg-black/60 backdrop-blur-sm rounded-2xl px-8 py-6 text-center shadow-2xl max-w-sm pointer-events-auto">
-              <div className="text-4xl mb-3">🌀</div>
+              <img src="/surgedps/logo-180.png" alt="SurgeDPS" className="w-16 h-16 mx-auto mb-3 rounded-2xl" style={{ boxShadow: '0 4px 20px rgba(99,102,241,0.3)', filter: 'brightness(1.15)' }} />
               <p className="text-white font-bold text-lg">Select a storm to begin</p>
               <p className="text-slate-300 text-sm mt-1">Choose a hurricane from the browser on the left to load surge data and damage estimates.</p>
               <p className="text-slate-400 text-xs mt-2 italic">DPS = Damage Potential Score — higher means more destructive surge</p>
