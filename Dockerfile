@@ -20,9 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Python dependencies
+# Python dependencies — install heavy packages individually to limit peak RAM
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir numpy>=1.24 \
+ && pip install --no-cache-dir rasterio>=1.3 \
+ && pip install --no-cache-dir duckdb>=1.1 \
+ && pip install --no-cache-dir -r requirements.txt
 
 # Copy source code and data files (hurdat2.txt, dps_scores.json)
 COPY scripts/ ./scripts/
