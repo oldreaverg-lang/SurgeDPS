@@ -575,35 +575,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         </div>
       )}
 
-      {/* R11: Validated DPS adjustment */}
-      {validatedDps.adj !== 0 && (
-        <div className={`${validatedDps.adj > 0 ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'} rounded-lg px-3 py-1.5 mb-3 border`}>
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-gray-600 uppercase">Adjusted Damage Score</span>
-            <span className={`text-sm font-black ${validatedDps.adj > 0 ? 'text-orange-700' : 'text-blue-700'}`}>{validatedDps.value.toFixed(1)}</span>
-          </div>
-          <div className="text-[10px] text-gray-500 mt-0.5">{validatedDps.reason}</div>
-        </div>
-      )}
 
-      {/* R8: Expected Loss Index */}
-      {eli.value > 0 && (() => {
-        const es = ELI_STYLES[eli.tier] || ELI_STYLES.unavailable;
-        return (
-          <div className={`${es.bg} rounded-xl p-3 text-center border ${es.border} shadow-sm mb-3`}>
-            <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-0.5">Expected Loss Index</div>
-            <div className={`text-2xl font-black ${es.text} tracking-tighter`}>
-              {eli.value.toFixed(0)}
-            </div>
-            <div className={`text-xs ${es.text} mt-0.5 font-semibold`}>
-              {es.label} Damage Potential
-            </div>
-            <div className="text-[10px] text-gray-400 mt-1">
-              Storm intensity × scale of exposure
-            </div>
-          </div>
-        );
-      })()}
 
       {/* Scoreboard */}
       {totals.buildings > 0 && (
