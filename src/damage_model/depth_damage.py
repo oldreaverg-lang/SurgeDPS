@@ -504,8 +504,9 @@ def estimate_damage_from_raster(
             depth_ft = depth_m * 3.28084
             ffh = (float(found_ht) if found_ht is not None
                    else DEFAULT_FFH_FT.get(btype, 1.0))
-            if depth_ft <= ffh:
+            if depth_ft < ffh - 0.1:
                 # Surge doesn't reach the first floor — building is not flooded.
+                # Allow 0.1 ft buffer: water at floor level causes moisture/mold damage.
                 continue
 
             damage = estimate_building_damage(
@@ -515,6 +516,9 @@ def estimate_damage_from_raster(
                 first_floor_ht_ft=float(found_ht) if found_ht is not None else None,
                 val_struct=float(val_struct) if val_struct is not None else None,
                 val_cont=float(val_cont) if val_cont is not None else None,
+                med_yr_blt=int(props["med_yr_blt"]) if props.get("med_yr_blt") is not None else None,
+                num_story=int(props["num_story"]) if props.get("num_story") is not None else None,
+                occtype=str(props["occtype"]) if props.get("occtype") else None,
             )
             # Carry source metadata through so the frontend CSV export can use it
             damage.source       = props.get("source")
