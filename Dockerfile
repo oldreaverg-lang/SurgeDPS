@@ -40,7 +40,8 @@ RUN mkdir -p tmp_integration/cells
 ENV SURGE_API_PORT=8000
 EXPOSE 8000
 
-# Start warm_cache in background so the server is available immediately.
-# On a fresh volume it generates ~94 storms over 15-30 min; on subsequent
-# deploys it finishes in seconds (skips already-cached storms).
-CMD ["sh", "-c", "python scripts/warm_cache.py &\npython scripts/api_server.py"]
+# Start background processes, then the API server (foreground):
+#   1. warm_cache.py — pre-generates cell data for sidebar storms
+#   2. storm_monitor.py — polls NHC every 30 min, auto-runs pipeline
+#   3. api_server.py — HTTP server (foreground, keeps container alive)
+CMD ["sh", "-c", "python scripts/warm_cache.py &\npython scripts/storm_monitor.py &\npython scripts/api_server.py"]
