@@ -1,15 +1,16 @@
 """
-Pre-warm center cell cache for all storms visible in the sidebar.
+Pre-warm 3×3 grid cache for all storms visible in the sidebar.
 
 Generates the surge raster, flood GeoJSON, building data, and damage
-model output for cell (0,0) of each storm so the first user activation
-is instant instead of a 2+ minute cold-start.
+model output for the full 3×3 grid (9 cells) around each storm's
+landfall so the initial view is fully loaded on first activation.
 
-Run at deploy time before starting the API server:
-    python scripts/warm_cache.py && python scripts/api_server.py
+Run at deploy time (background process alongside the API server):
+    python scripts/warm_cache.py &
+    python scripts/api_server.py
 
-The script is idempotent — if a storm's cache already exists it is
-skipped, so re-deploys only generate new/missing storms.
+The script is idempotent — already-cached cells are skipped, so
+re-deploys only generate new/missing data.
 """
 
 import json
@@ -45,29 +46,39 @@ def _storm_cache_dir(storm: StormEntry) -> str:
     return d
 
 
-def _is_cached(storm: StormEntry) -> bool:
-    """Check if center cell already has both damage and flood GeoJSON."""
+# 3×3 grid: all cells visible on the default zoom level
+WARM_CELLS = [
+    (col, row)
+    for row in range(-1, 2)
+    for col in range(-1, 2)
+]
+
+
+def _cached_cells(storm: StormEntry) -> set[tuple[int, int]]:
+    """Return which of the 3×3 cells are already cached."""
     sdir = _storm_cache_dir(storm)
-    return (
-        os.path.exists(os.path.join(sdir, 'cell_0_0_damage.geojson')) and
-        os.path.exists(os.path.join(sdir, 'cell_0_0_flood.geojson'))
-    )
+    cached = set()
+    for col, row in WARM_CELLS:
+        if (os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')) and
+                os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_flood.geojson'))):
+            cached.add((col, row))
+    return cached
 
 
-def warm_storm(storm: StormEntry) -> bool:
-    """Generate center cell data for a single storm. Returns True on success."""
+def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
+    """Generate data for a single cell of a storm. Returns True on success."""
     sdir = _storm_cache_dir(storm)
 
     origin_lon = storm.grid_origin_lon
     origin_lat = storm.grid_origin_lat
-    lon_min = origin_lon
-    lat_min = origin_lat
-    lon_max = origin_lon + CELL_WIDTH
-    lat_max = origin_lat + CELL_HEIGHT
+    lon_min = origin_lon + col * CELL_WIDTH
+    lat_min = origin_lat + row * CELL_HEIGHT
+    lon_max = lon_min + CELL_WIDTH
+    lat_max = lat_min + CELL_HEIGHT
 
     try:
         # 1. Surge raster
-        raster_path = os.path.join(sdir, 'cell_0_0_depth.tif')
+        raster_path = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
         if not os.path.exists(raster_path):
             generate_surge_raster(
                 lon_min=lon_min, lat_min=lat_min,
@@ -82,19 +93,19 @@ def warm_storm(storm: StormEntry) -> bool:
             )
 
         # 2. Flood polygons
-        flood_path = os.path.join(sdir, 'cell_0_0_flood.geojson')
+        flood_path = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
         if not os.path.exists(flood_path):
             raster_to_geojson(raster_path, flood_path)
 
         # 3. OSM buildings
-        buildings_path = os.path.join(sdir, 'cell_0_0_buildings.json')
+        buildings_path = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
         fetch_buildings(lon_min, lat_min, lon_max, lat_max, buildings_path, cache=True)
 
         with open(buildings_path) as f:
             buildings_data = json.load(f)
 
         # 4. HAZUS damage model
-        damage_path = os.path.join(sdir, 'cell_0_0_damage.geojson')
+        damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
         if buildings_data.get('features'):
             estimate_damage_from_raster(raster_path, buildings_path, damage_path)
         else:
@@ -104,7 +115,7 @@ def warm_storm(storm: StormEntry) -> bool:
         return True
 
     except Exception as e:
-        print(f"  ERROR warming {storm.storm_id}: {e}")
+        print(f"    ERROR cell ({col},{row}): {e}")
         return False
 
 
@@ -146,37 +157,43 @@ def main():
     print("=" * 60)
 
     storms = collect_sidebar_storms()
-    print(f"Found {len(storms)} storms in sidebar")
+    total_cells = len(storms) * len(WARM_CELLS)
+    print(f"Found {len(storms)} storms × {len(WARM_CELLS)} cells = {total_cells} cells to warm")
 
-    cached = 0
-    generated = 0
-    failed = 0
+    storms_cached = 0
+    cells_generated = 0
+    cells_failed = 0
     t0 = time.time()
 
     for i, storm in enumerate(storms, 1):
         tag = f"[{i}/{len(storms)}] {storm.storm_id}"
-        if _is_cached(storm):
-            print(f"  {tag} — cached, skipping")
-            cached += 1
+        already = _cached_cells(storm)
+
+        if len(already) == len(WARM_CELLS):
+            print(f"  {tag} — all 9 cells cached, skipping")
+            storms_cached += 1
             continue
 
-        print(f"  {tag} — generating center cell...")
+        missing = [c for c in WARM_CELLS if c not in already]
+        print(f"  {tag} — generating {len(missing)} cell(s) ({len(already)} cached)...")
         t1 = time.time()
-        ok = warm_storm(storm)
-        elapsed = time.time() - t1
 
-        if ok:
-            print(f"  {tag} — done ({elapsed:.1f}s)")
-            generated += 1
-        else:
-            failed += 1
+        for col, row in missing:
+            ok = warm_cell(storm, col, row)
+            if ok:
+                cells_generated += 1
+            else:
+                cells_failed += 1
+
+        elapsed = time.time() - t1
+        print(f"  {tag} — done ({elapsed:.1f}s)")
 
     total = time.time() - t0
     print()
     print(f"Warm-up complete in {total:.0f}s")
-    print(f"  {cached} already cached")
-    print(f"  {generated} newly generated")
-    print(f"  {failed} failed")
+    print(f"  {storms_cached} storms fully cached (skipped)")
+    print(f"  {cells_generated} cells newly generated")
+    print(f"  {cells_failed} cells failed")
     print("=" * 60)
 
 

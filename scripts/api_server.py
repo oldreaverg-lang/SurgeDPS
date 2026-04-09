@@ -374,15 +374,22 @@ class CellHandler(BaseHTTPRequestHandler):
             print(f"  Grid origin: ({storm.grid_origin_lon}, {storm.grid_origin_lat})")
             print(f"{'='*60}\n")
 
-            # Load only the center cell (0,0) so the map has something to
-            # show immediately and neighbors become clickable. The full grid
-            # loads lazily as the user clicks adjacent cells.
-            print("Loading eye cell (0,0)...")
-            _progress.update(step='Initializing', step_num=0, total_steps=4,
+            # Load the 3×3 grid around landfall so the initial view is
+            # fully populated.  Cached cells return instantly; uncached
+            # ones are generated on the fly (and cached for next time).
+            _ACTIVATE_CELLS = [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
+            total_act = len(_ACTIVATE_CELLS) * 4  # 4 steps per cell
+            _progress.update(step='Initializing', step_num=0, total_steps=total_act,
                              started_at=_time.time(), storm_id=storm.storm_id)
-            center_data = load_cell(0, 0)
-            _progress.update(step='Complete', step_num=4)
-            grid_cells = None
+
+            grid_cells = {}
+            for idx, (c, r) in enumerate(_ACTIVATE_CELLS):
+                _progress.update(step=f'Loading cell ({c},{r})', step_num=idx * 4)
+                print(f"  Loading cell ({c},{r})...")
+                grid_cells[f'{c},{r}'] = load_cell(c, r)
+
+            center_data = grid_cells.get('0,0')
+            _progress.update(step='Complete', step_num=total_act)
 
             # R5: Attach validation confidence after cell load
             conf = _compute_confidence(storm.storm_id)

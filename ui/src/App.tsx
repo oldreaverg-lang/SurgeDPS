@@ -1028,7 +1028,7 @@ function App() {
     try {
       const ac = new AbortController();
       activateAbortRef.current = ac;
-      const timeout = setTimeout(() => { timedOut = true; ac.abort(); }, 120_000); // 2 min timeout
+      const timeout = setTimeout(() => { timedOut = true; ac.abort(); }, 300_000); // 5 min timeout (loading 3×3 grid)
       const resp = await fetch(`/surgedps/api/storm/${stormId}/activate`, { signal: ac.signal });
       clearTimeout(timeout);
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -1046,16 +1046,27 @@ function App() {
         .then((m: any) => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest(m?.cells || {}); })
         .catch(() => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest({}); });
 
-      if (center_cell) {
-        setAllBuildings(center_cell.buildings);
-        setAllFlood(center_cell.flood);
-        setLoadedCells(new Set([cellKey(0, 0)]));
-        const feats = center_cell.buildings?.features || [];
-        const buildings = feats.length;
-        const loss = feats.reduce((s: number, f: any) => s + (f.properties.estimated_loss_usd || 0), 0);
-        const totalDepth = feats.reduce((s: number, f: any) => s + (f.properties.depth_ft || 0), 0);
-        setImpactTotals({ buildings, loss, totalDepth });
+      // Load all grid cells returned by the server (3×3 when pre-cached)
+      const gridCells = data.grid_cells || (center_cell ? { '0,0': center_cell } : {});
+      const loadedKeys = new Set<string>();
+      let mergedBuildings: any[] = [];
+      let mergedFlood: any[] = [];
+      let totalBuildings = 0, totalLoss = 0, totalDepthSum = 0;
+
+      for (const [key, cellData] of Object.entries(gridCells) as [string, any][]) {
+        loadedKeys.add(key);
+        if (cellData.buildings?.features) mergedBuildings = mergedBuildings.concat(cellData.buildings.features);
+        if (cellData.flood?.features) mergedFlood = mergedFlood.concat(cellData.flood.features);
+        const feats = cellData.buildings?.features || [];
+        totalBuildings += feats.length;
+        totalLoss += feats.reduce((s: number, f: any) => s + (f.properties.estimated_loss_usd || 0), 0);
+        totalDepthSum += feats.reduce((s: number, f: any) => s + (f.properties.depth_ft || 0), 0);
       }
+
+      setAllBuildings({ type: 'FeatureCollection', features: mergedBuildings });
+      setAllFlood({ type: 'FeatureCollection', features: mergedFlood });
+      setLoadedCells(loadedKeys);
+      setImpactTotals({ buildings: totalBuildings, loss: totalLoss, totalDepth: totalDepthSum });
 
       mapRef.current?.flyTo({ center: [storm.landfall_lon, storm.landfall_lat], zoom: 10, pitch: 30, duration: 2500 });
 
