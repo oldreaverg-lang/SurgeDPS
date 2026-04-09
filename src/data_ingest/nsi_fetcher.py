@@ -154,8 +154,17 @@ def fetch_buildings_nsi(
 
     nsi_features = raw.get("features", [])
     if not nsi_features:
-        logger.info("[NSI] API returned 0 features for this bbox")
-        return None
+        # NSI API succeeded but returned 0 structures.
+        # For US coverage areas this is authoritative — open water, undeveloped
+        # land, or rural areas with no structures.  Write an empty GeoJSON and
+        # return the path so the caller does NOT fall through to the slow
+        # Overpass query (which would also return 0 but cost 10–60 extra seconds).
+        logger.info("[NSI] API returned 0 features for this bbox — writing empty cache, skipping Overpass")
+        empty_fc = {"type": "FeatureCollection", "features": [], "source": "NSI", "nsi_confirmed_empty": True}
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w") as _f:
+            json.dump(empty_fc, _f)
+        return output_path
 
     logger.info("[NSI] %d structures received", len(nsi_features))
 
