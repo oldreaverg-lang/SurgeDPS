@@ -742,6 +742,8 @@ function App() {
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<any>(null);
   const countiesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showFloodZones, setShowFloodZones] = useState(false);
+  const [floodZonesGeoJSON, setFloodZonesGeoJSON] = useState<any>(null);
+  const floodZonesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   // Building flags — keyed by "lon,lat" for uniqueness. Values: 'confirmed_destroyed' | 'shelter_in_place' | 'inspected' | 'inaccessible' | ''
   const [buildingFlags, setBuildingFlags] = useState<Record<string, string>>({});
@@ -777,6 +779,31 @@ function App() {
         );
         const data = await res.json();
         if (data?.features?.length) setCountiesGeoJSON(data);
+      } catch { /* network error — keep existing data */ }
+    }, 600);
+  }, []);
+
+  // ── FEMA NFHL flood zone fetch ──
+  // Queries FEMA's National Flood Hazard Layer FeatureServer (layer 28 = Flood Hazard Zones)
+  // for the current map view. Returns GeoJSON with FLD_ZONE attribute used for color-coding.
+  const fetchFloodZones = useCallback((bounds: { west: number; south: number; east: number; north: number }) => {
+    if (floodZonesFetchTimer.current) clearTimeout(floodZonesFetchTimer.current);
+    floodZonesFetchTimer.current = setTimeout(async () => {
+      try {
+        const { west, south, east, north } = bounds;
+        const params = new URLSearchParams({
+          geometry: `${west},${south},${east},${north}`,
+          geometryType: 'esriGeometryEnvelope',
+          spatialRel: 'esriSpatialRelIntersects',
+          outFields: 'FLD_ZONE,SFHA_TF,FLOODWAY',
+          returnGeometry: 'true',
+          f: 'geojson',
+        });
+        const res = await fetch(
+          `https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/FeatureServer/28/query?${params}`
+        );
+        const data = await res.json();
+        if (data?.features?.length) setFloodZonesGeoJSON(data);
       } catch { /* network error — keep existing data */ }
     }, 600);
   }, []);
@@ -851,6 +878,17 @@ function App() {
       setCountiesGeoJSON(null);
     }
   }, [showCounties, fetchCounties]);
+
+  // Fetch FEMA flood zones when showFloodZones is enabled; clear when disabled
+  useEffect(() => {
+    if (showFloodZones && mapRef.current) {
+      const b = mapRef.current.getBounds();
+      fetchFloodZones({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
+    } else if (!showFloodZones) {
+      if (floodZonesFetchTimer.current) clearTimeout(floodZonesFetchTimer.current);
+      setFloodZonesGeoJSON(null);
+    }
+  }, [showFloodZones, fetchFloodZones]);
 
   // Fetch imagery acquisition date when switching to satellite, clear when switching away
   useEffect(() => {
@@ -1540,6 +1578,10 @@ function App() {
               const b = mapRef.current.getBounds();
               fetchCounties({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
             }
+            if (showFloodZones && mapRef.current) {
+              const b = mapRef.current.getBounds();
+              fetchFloodZones({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
+            }
           }}
         >
           <NavigationControl position="top-right" />
@@ -1574,12 +1616,52 @@ function App() {
             )
           )}
 
-          {showFloodZones && (
-            <Source id="fema-flood-zones" type="raster"
-              tiles={['https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image']}
-              tileSize={256}
-            >
-              <Layer id="fema-zones-layer" type="raster" paint={{ 'raster-opacity': 0.35 }} />
+          {showFloodZones && floodZonesGeoJSON && (
+            <Source id="fema-flood-zones" type="geojson" data={floodZonesGeoJSON}>
+              {/* Fill — color-coded by FEMA zone type */}
+              <Layer
+                id="fema-zones-fill"
+                type="fill"
+                paint={{
+                  'fill-color': [
+                    'match', ['get', 'FLD_ZONE'],
+                    ['VE', 'V'],  '#dc2626',   // Coastal high-hazard — deep red
+                    ['AE', 'AO', 'AH', 'A'], '#f97316',  // High-risk — orange
+                    ['X'],        '#facc15',   // Moderate / minimal — yellow
+                    '#94a3b8',                // Unknown / D — slate
+                  ],
+                  'fill-opacity': 0.30,
+                }}
+              />
+              {/* Outline */}
+              <Layer
+                id="fema-zones-line"
+                type="line"
+                paint={{
+                  'line-color': [
+                    'match', ['get', 'FLD_ZONE'],
+                    ['VE', 'V'],  '#ef4444',
+                    ['AE', 'AO', 'AH', 'A'], '#fb923c',
+                    ['X'],        '#fde047',
+                    '#cbd5e1',
+                  ],
+                  'line-width': 1,
+                  'line-opacity': 0.7,
+                }}
+              />
+              {/* Zone labels at higher zoom */}
+              <Layer
+                id="fema-zones-labels"
+                type="symbol"
+                minzoom={10}
+                layout={{
+                  'text-field': ['get', 'FLD_ZONE'],
+                  'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+                  'text-size': 10,
+                  'text-anchor': 'center',
+                }}
+                paint={{ 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1 }}
+              />
             </Source>
           )}
 
@@ -2285,6 +2367,12 @@ function App() {
                 <h4 className="font-bold text-gray-800 mb-1">Limitations</h4>
                 <p>This is a modeled estimate, not a field assessment. Actual damage depends on construction quality, mitigation measures, debris impact, and other factors not captured in the model. Loss figures should be treated as order-of-magnitude guidance, not precise valuations.</p>
               </div>
+              {showFloodZones && (
+                <div>
+                  <h4 className="font-bold text-gray-800 mb-1">FEMA Flood Zones</h4>
+                  <p>Sourced from FEMA's National Flood Hazard Layer (NFHL). Zone colors: <span className="text-red-500 font-bold">■ VE/V</span> coastal high-hazard (wave action + surge), <span className="text-orange-400 font-bold">■ AE/A</span> high-risk 100-year floodplain, <span className="text-yellow-400 font-bold">■ X</span> moderate/minimal risk. Zone labels appear at zoom ≥ 10.</p>
+                </div>
+              )}
               {basemap === 'satellite' && (
                 <div>
                   <h4 className="font-bold text-gray-800 mb-1">Satellite Imagery</h4>
