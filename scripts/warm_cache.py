@@ -27,7 +27,7 @@ from storm_catalog.catalog import (
 from storm_catalog.hurdat2_parser import (
     get_seasons, get_storms_for_year,
 )
-from storm_catalog.surge_model import generate_surge_raster
+from storm_catalog.surge_model import generate_surge_raster, SURGE_MODEL_VERSION
 from tile_gen.pmtiles_builder import raster_to_geojson
 from data_ingest.building_fetcher import fetch_buildings
 from damage_model.depth_damage import estimate_damage_from_raster
@@ -63,14 +63,34 @@ def _warm_cells_for(storm: StormEntry) -> list[tuple[int, int]]:
 
 
 def _cached_cells(storm: StormEntry) -> set[tuple[int, int]]:
-    """Return which of the storm's target cells are already cached."""
+    """Return which of the storm's target cells are current (not stale).
+
+    Cells whose damage.geojson was built with an older surge formula are
+    deleted so they get regenerated on this run.
+    """
     sdir = _storm_cache_dir(storm)
     target = _warm_cells_for(storm)
     cached = set()
     for col, row in target:
-        if (os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')) and
-                os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_flood.geojson'))):
-            cached.add((col, row))
+        damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
+        flood_path = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
+        if os.path.exists(damage_path) and os.path.exists(flood_path):
+            # Check version stamp — stale cells must be regenerated
+            try:
+                with open(damage_path) as f:
+                    data = json.load(f)
+                if data.get('surge_model_version') == SURGE_MODEL_VERSION:
+                    cached.add((col, row))
+                else:
+                    print(f"    Stale cell ({col},{row}) for {storm.storm_id} "
+                          f"(version {data.get('surge_model_version')!r} → {SURGE_MODEL_VERSION!r}), deleting...")
+                    for stale in (damage_path, flood_path):
+                        try:
+                            os.remove(stale)
+                        except OSError:
+                            pass
+            except Exception:
+                pass  # unreadable — treat as missing, will regenerate
     return cached
 
 
@@ -137,9 +157,22 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
         damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
         if buildings_data.get('features'):
             estimate_damage_from_raster(raster_path, buildings_path, damage_path)
+            # Stamp the surge model version so stale-cache detection works
+            try:
+                with open(damage_path) as f:
+                    damage_data = json.load(f)
+                damage_data['surge_model_version'] = SURGE_MODEL_VERSION
+                with open(damage_path, 'w') as f:
+                    json.dump(damage_data, f)
+            except Exception:
+                pass  # non-fatal; cell will just be regenerated next time
         else:
             with open(damage_path, 'w') as f:
-                json.dump({"type": "FeatureCollection", "features": []}, f)
+                json.dump({
+                    "type": "FeatureCollection",
+                    "features": [],
+                    "surge_model_version": SURGE_MODEL_VERSION,
+                }, f)
 
         # 5. Record building count in lightweight index so _compute_confidence
         #    can do an O(1) lookup instead of re-reading multi-MB GeoJSON files.

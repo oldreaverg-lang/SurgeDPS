@@ -33,6 +33,10 @@ from typing import Tuple
 
 import numpy as np
 
+# Increment whenever the surge formula changes so warm_cache.py can detect
+# and regenerate stale cells automatically.
+SURGE_MODEL_VERSION = "cubic-v2"
+
 
 def estimate_peak_surge_ft(max_wind_kt: int, min_pressure_mb: int) -> float:
     """
