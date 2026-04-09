@@ -739,6 +739,8 @@ function App() {
   const [imageryDate, setImageryDate] = useState<string | null>(null);
   const imageryFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showCounties, setShowCounties] = useState(false);
+  const [countiesGeoJSON, setCountiesGeoJSON] = useState<any>(null);
+  const countiesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showFloodZones, setShowFloodZones] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   // Building flags — keyed by "lon,lat" for uniqueness. Values: 'confirmed_destroyed' | 'shelter_in_place' | 'inspected' | 'inaccessible' | ''
@@ -753,6 +755,31 @@ function App() {
       mapRef.current.flyTo({ center: [activeStorm.landfall_lon, activeStorm.landfall_lat], zoom: 10, pitch: 30, duration: 2000 });
     }
   }, [activeStorm]);
+
+  // ── County boundaries (Census TIGERweb FeatureServer) ──
+  // Fetches county polygons for the current map view as GeoJSON, debounced so
+  // it only fires after the user stops panning. Only active when showCounties=true.
+  const fetchCounties = useCallback((bounds: { west: number; south: number; east: number; north: number }) => {
+    if (countiesFetchTimer.current) clearTimeout(countiesFetchTimer.current);
+    countiesFetchTimer.current = setTimeout(async () => {
+      try {
+        const { west, south, east, north } = bounds;
+        const params = new URLSearchParams({
+          geometry: `${west},${south},${east},${north}`,
+          geometryType: 'esriGeometryEnvelope',
+          spatialRel: 'esriSpatialRelIntersects',
+          outFields: 'NAME,STUSAB',
+          returnGeometry: 'true',
+          f: 'geojson',
+        });
+        const res = await fetch(
+          `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/FeatureServer/0/query?${params}`
+        );
+        const data = await res.json();
+        if (data?.features?.length) setCountiesGeoJSON(data);
+      } catch { /* network error — keep existing data */ }
+    }, 600);
+  }, []);
 
   // ── ESRI World Imagery date lookup ──
   // Queries the ESRI identify endpoint for the acquisition date of the satellite
@@ -813,6 +840,17 @@ function App() {
   const [retryStormId, setRetryStormId] = useState<string | null>(null);
   useEffect(() => { if (cellError) { const t = setTimeout(() => { setCellError(null); setRetryStormId(null); }, 8000); return () => clearTimeout(t); } }, [cellError]);
   useEffect(() => { if (toastSuccess) { const t = setTimeout(() => setToastSuccess(null), 3000); return () => clearTimeout(t); } }, [toastSuccess]);
+
+  // Fetch county boundaries when showCounties is enabled; clear when disabled
+  useEffect(() => {
+    if (showCounties && mapRef.current) {
+      const b = mapRef.current.getBounds();
+      fetchCounties({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
+    } else if (!showCounties) {
+      if (countiesFetchTimer.current) clearTimeout(countiesFetchTimer.current);
+      setCountiesGeoJSON(null);
+    }
+  }, [showCounties, fetchCounties]);
 
   // Fetch imagery acquisition date when switching to satellite, clear when switching away
   useEffect(() => {
@@ -1498,17 +1536,42 @@ function App() {
           onMoveEnd={e => {
             setZoom(e.viewState.zoom);
             if (basemap === 'satellite') fetchImageryMeta(e.viewState.latitude, e.viewState.longitude);
+            if (showCounties && mapRef.current) {
+              const b = mapRef.current.getBounds();
+              fetchCounties({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
+            }
           }}
         >
           <NavigationControl position="top-right" />
 
           {showCounties && (
-            <Source id="county-boundaries" type="raster"
-              tiles={['https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&layers=show:1,2&f=image']}
-              tileSize={256}
-            >
-              <Layer id="county-layer" type="raster" paint={{ 'raster-opacity': 0.5 }} />
-            </Source>
+            countiesGeoJSON && (
+              <Source id="county-boundaries" type="geojson" data={countiesGeoJSON}>
+                <Layer
+                  id="county-fill"
+                  type="fill"
+                  paint={{ 'fill-color': '#ffffff', 'fill-opacity': 0.04 }}
+                />
+                <Layer
+                  id="county-line"
+                  type="line"
+                  paint={{ 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.5 }}
+                />
+                <Layer
+                  id="county-labels"
+                  type="symbol"
+                  minzoom={6}
+                  layout={{
+                    'text-field': ['get', 'NAME'],
+                    'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+                    'text-size': ['interpolate', ['linear'], ['zoom'], 6, 9, 10, 12],
+                    'text-anchor': 'center',
+                    'text-max-width': 8,
+                  }}
+                  paint={{ 'text-color': '#e2e8f0', 'text-halo-color': '#0f172a', 'text-halo-width': 1 }}
+                />
+              </Source>
+            )
           )}
 
           {showFloodZones && (
