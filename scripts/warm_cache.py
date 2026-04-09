@@ -27,7 +27,7 @@ from storm_catalog.catalog import (
 from storm_catalog.hurdat2_parser import (
     get_seasons, get_storms_for_year,
 )
-from storm_catalog.surge_model import generate_surge_raster, SURGE_MODEL_VERSION
+from storm_catalog.surge_model import generate_surge_raster, SURGE_MODEL_VERSION, validate_surge_model
 from tile_gen.pmtiles_builder import raster_to_geojson
 from data_ingest.building_fetcher import fetch_buildings
 from damage_model.depth_damage import estimate_damage_from_raster
@@ -37,6 +37,75 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Season accordion cutoff — must match api_server.py
 SEASON_MIN_YEAR = 2015
+
+# ── Loss sanity reference ──────────────────────────────────────────────────────
+# Reported total economic losses (USD billions) from authoritative post-event
+# assessments (NOAA, Munich Re, Swiss Re).  These are all-cause (wind + surge +
+# rain) so we deliberately set a wide lower bound — surge-only will always be
+# a fraction of total.  Upper bound is 2× reported to catch formula overcount.
+#
+# Format: storm_id → (lower_B, upper_B, source note)
+_LOSS_REFERENCE_B: dict[str, tuple[float, float, str]] = {
+    "sandy_2012":   (5.0,  40.0,  "NOAA: $65B all-cause; surge ~$20B"),
+    "katrina_2005": (20.0, 125.0, "NOAA: $125B all-cause; surge ~$40-60B"),
+    "ike_2008":     (5.0,  40.0,  "NOAA: $30B all-cause; surge ~$10-20B"),
+    "harvey_2017":  (5.0,  130.0, "NOAA: $125B all-cause; mostly rain-flood"),
+    "ian_2022":     (10.0, 113.0, "NOAA: $113B all-cause; surge significant"),
+}
+
+
+def _check_storm_losses(storm_id: str, sdir: str, target_cells: list) -> list[str]:
+    """
+    Sum total modeled losses across all cached cells for a storm and compare
+    against the known reference range.  Returns a list of warning strings.
+    Called after a storm's cells finish generating.
+    """
+    if storm_id not in _LOSS_REFERENCE_B:
+        return []
+
+    lower_B, upper_B, note = _LOSS_REFERENCE_B[storm_id]
+    total_loss = 0.0
+    cells_read = 0
+
+    for col, row in target_cells:
+        damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
+        if not os.path.exists(damage_path):
+            continue
+        try:
+            with open(damage_path) as f:
+                data = json.load(f)
+            for feat in data.get('features', []):
+                total_loss += feat.get('properties', {}).get('loss_usd', 0) or 0
+            cells_read += 1
+        except Exception:
+            pass
+
+    if cells_read == 0:
+        return []
+
+    total_B = total_loss / 1e9
+    warnings = []
+    status = "✓" if lower_B <= total_B <= upper_B else "✗ OUT OF RANGE"
+    print(
+        f"    Loss check {storm_id}: ${total_B:.1f}B modeled across {cells_read} cells "
+        f"(expected ${lower_B:.0f}–${upper_B:.0f}B)  {status}"
+    )
+    if note:
+        print(f"    Note: {note}")
+
+    if total_B > upper_B:
+        warnings.append(
+            f"LOSS SANITY WARNING — {storm_id}: modeled ${total_B:.1f}B exceeds "
+            f"upper bound ${upper_B:.0f}B. Surge formula may be overcounting. "
+            f"Check surge_model.py."
+        )
+    elif total_B < lower_B:
+        warnings.append(
+            f"LOSS SANITY WARNING — {storm_id}: modeled ${total_B:.1f}B is below "
+            f"lower bound ${lower_B:.0f}B. Surge formula may be too conservative or "
+            f"NSI building data is missing."
+        )
+    return warnings
 
 
 def _storm_cache_dir(storm: StormEntry) -> str:
@@ -234,8 +303,19 @@ def main():
     print("SurgeDPS Cache Warmer")
     print("=" * 60)
 
+    # ── Step 0: Surge formula sanity check (fast, no network) ──
+    print("\n[Step 0] Validating surge formula against historical observations...")
+    surge_warnings = validate_surge_model()
+    if surge_warnings:
+        for w in surge_warnings:
+            print(f"  *** {w}")
+        print("  *** Aborting warm — fix the surge formula before caching.")
+        sys.exit(1)
+    print()
+
     MAX_RETRIES = 3
     RETRY_DELAY = 30  # seconds between retry sweeps
+    all_loss_warnings: list[str] = []
 
     storms = collect_sidebar_storms()
     historic_count = sum(1 for s in storms if s.storm_id in _HISTORIC_IDS)
@@ -275,6 +355,11 @@ def main():
         elapsed = time.time() - t1
         print(f"  {tag} — done ({elapsed:.1f}s)")
 
+        # Per-storm loss sanity check (only for reference storms)
+        sdir = _storm_cache_dir(storm)
+        loss_warns = _check_storm_losses(storm.storm_id, sdir, target)
+        all_loss_warnings.extend(loss_warns)
+
     # ── Retry failed cells ──
     for attempt in range(1, MAX_RETRIES + 1):
         if not failed_cells:
@@ -310,6 +395,14 @@ def main():
             print(f"    - {storm.storm_id} cell ({col},{row})")
     else:
         print(f"  0 failures — all cells cached successfully")
+
+    if all_loss_warnings:
+        print()
+        print("  ⚠️  LOSS SANITY WARNINGS (review before deploying to production):")
+        for w in all_loss_warnings:
+            print(f"    *** {w}")
+    else:
+        print(f"  Loss sanity checks passed for all reference storms ✓")
     print("=" * 60)
 
 

@@ -71,6 +71,64 @@ def estimate_peak_surge_ft(max_wind_kt: int, min_pressure_mb: int) -> float:
     return 0.55 * surge_wind + 0.45 * surge_pressure
 
 
+# ── Surge formula sanity check ────────────────────────────────────────────────
+# Known peak surge observations (feet) at primary landfall location.
+# Tolerance is intentionally generous (±30%) because the parametric model
+# doesn't capture every local bathymetric and track nuance.
+# If estimate_peak_surge_ft() drifts outside these bounds, something is wrong.
+_SURGE_REFERENCE = {
+    # storm                  wind_kt  pressure_mb  observed_ft  label
+    "Sandy (2012)":         (80,      940,          9.0,  "Battery Park, NY"),
+    "Katrina (2005)":       (125,     918,          25.0, "Pass Christian, MS"),
+    "Ike (2008)":           (100,     950,          15.0, "Galveston, TX"),
+    "Harvey (2017)":        (105,     937,          10.0, "Rockport, TX"),
+    "Charley (2004)":       (130,     941,          7.0,  "Punta Gorda, FL"),  # compact storm, lower surge
+}
+_SURGE_TOLERANCE = 0.35  # ±35% — warn if model deviates more than this
+
+
+def validate_surge_model() -> list[str]:
+    """
+    Run a quick sanity check comparing estimated surge against known historical peaks.
+
+    Returns a list of warning strings (empty = all good).  Intended to be called
+    at startup so formula regressions are caught immediately, before any cells are
+    generated or served.
+
+    Example output when everything is fine:
+        Sandy (2012):   observed  9.0 ft, model  9.0 ft  (+0%)  ✓
+        Katrina (2005): observed 25.0 ft, model 24.4 ft  (-2%)  ✓
+        ...
+
+    Example output when something is wrong:
+        WARNING Sandy (2012): observed 9.0 ft, model 14.1 ft (+57%) — EXCEEDS ±35% tolerance
+    """
+    warnings = []
+    lines = []
+    for name, (wind_kt, pressure_mb, observed_ft, location) in _SURGE_REFERENCE.items():
+        modeled_ft = estimate_peak_surge_ft(wind_kt, pressure_mb)
+        pct_err = (modeled_ft - observed_ft) / observed_ft
+        flag = "✓" if abs(pct_err) <= _SURGE_TOLERANCE else "✗ EXCEEDS TOLERANCE"
+        line = (
+            f"  {name:<20} ({location}): "
+            f"observed {observed_ft:5.1f} ft, model {modeled_ft:5.1f} ft "
+            f"({pct_err:+.0%})  {flag}"
+        )
+        lines.append(line)
+        if abs(pct_err) > _SURGE_TOLERANCE:
+            warnings.append(
+                f"SURGE MODEL WARNING — {name}: observed {observed_ft:.1f} ft, "
+                f"model {modeled_ft:.1f} ft ({pct_err:+.0%}) exceeds ±{_SURGE_TOLERANCE:.0%} tolerance. "
+                f"Check surge_model.py — formula may have regressed."
+            )
+    print("[surge_model] Calibration check:")
+    for l in lines:
+        print(l)
+    if not warnings:
+        print("[surge_model] All reference storms within tolerance ✓")
+    return warnings
+
+
 def estimate_rmax_nm(max_wind_kt: int, landfall_lat: float) -> float:
     """
     Estimate radius of maximum winds (nautical miles).
