@@ -156,15 +156,19 @@ def main():
     print("SurgeDPS Cache Warmer")
     print("=" * 60)
 
+    MAX_RETRIES = 3
+    RETRY_DELAY = 30  # seconds between retry sweeps
+
     storms = collect_sidebar_storms()
     total_cells = len(storms) * len(WARM_CELLS)
     print(f"Found {len(storms)} storms × {len(WARM_CELLS)} cells = {total_cells} cells to warm")
 
-    storms_cached = 0
     cells_generated = 0
-    cells_failed = 0
+    storms_cached = 0
+    failed_cells: list[tuple[StormEntry, int, int]] = []
     t0 = time.time()
 
+    # ── Main pass ──
     for i, storm in enumerate(storms, 1):
         tag = f"[{i}/{len(storms)}] {storm.storm_id}"
         already = _cached_cells(storm)
@@ -183,17 +187,46 @@ def main():
             if ok:
                 cells_generated += 1
             else:
-                cells_failed += 1
+                failed_cells.append((storm, col, row))
 
         elapsed = time.time() - t1
         print(f"  {tag} — done ({elapsed:.1f}s)")
+
+    # ── Retry failed cells ──
+    for attempt in range(1, MAX_RETRIES + 1):
+        if not failed_cells:
+            break
+        print(f"\n--- Retry pass {attempt}/{MAX_RETRIES}: {len(failed_cells)} failed cell(s) ---")
+        print(f"    Waiting {RETRY_DELAY}s before retrying...")
+        time.sleep(RETRY_DELAY)
+
+        still_failed: list[tuple[StormEntry, int, int]] = []
+        for storm, col, row in failed_cells:
+            # Check if it was somehow cached in the meantime
+            sdir = _storm_cache_dir(storm)
+            if (os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')) and
+                    os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_flood.geojson'))):
+                cells_generated += 1
+                continue
+            print(f"    Retrying {storm.storm_id} cell ({col},{row})...")
+            ok = warm_cell(storm, col, row)
+            if ok:
+                cells_generated += 1
+            else:
+                still_failed.append((storm, col, row))
+        failed_cells = still_failed
 
     total = time.time() - t0
     print()
     print(f"Warm-up complete in {total:.0f}s")
     print(f"  {storms_cached} storms fully cached (skipped)")
     print(f"  {cells_generated} cells newly generated")
-    print(f"  {cells_failed} cells failed")
+    if failed_cells:
+        print(f"  {len(failed_cells)} cells STILL FAILED after {MAX_RETRIES} retries:")
+        for storm, col, row in failed_cells:
+            print(f"    - {storm.storm_id} cell ({col},{row})")
+    else:
+        print(f"  0 failures — all cells cached successfully")
     print("=" * 60)
 
 
