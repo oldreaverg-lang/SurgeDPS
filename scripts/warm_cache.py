@@ -208,6 +208,7 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
                 min_pressure_mb=storm.min_pressure_mb,
                 heading_deg=storm.heading_deg,
                 speed_kt=storm.speed_kt,
+                storm_rmax_nm=storm.rmax_nm,
             )
 
         # 2. Flood polygons

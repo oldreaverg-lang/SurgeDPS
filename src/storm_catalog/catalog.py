@@ -47,6 +47,12 @@ class StormEntry:
     has_us_landfall: bool = False  # True if storm made US mainland landfall
     dps_score: float = 0.0  # Cumulative DPS from StormDPS (0-100)
 
+    # Radius of maximum winds (nautical miles) from NHC Tropical Cyclone Reports.
+    # Used by the surge model as a size correction — compact storms produce far
+    # less surge than their peak winds alone would suggest.
+    # 0.0 = use the Knaff & Zehr formula estimate (for HURDAT2/unknown storms).
+    rmax_nm: float = 0.0
+
     # Grid system: these define the cell (0,0) origin for this storm
     @property
     def grid_origin_lon(self) -> float:
@@ -93,6 +99,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=25, speed_kt=14,
         basin="AL", advisory="best-track",
         dps_score=87.8,
+        rmax_nm=17.0,   # NHC TCR: compact eyewall ~15-20 nm at Mexico Beach
     ),
     # ── Category 4 ───────────────────────────────────────
     StormEntry(
@@ -103,6 +110,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=0, speed_kt=11,
         basin="AL", advisory="best-track",
         dps_score=89.0,
+        rmax_nm=35.0,   # NHC TCR: eyewall expanded significantly as storm weakened to Cat 3
     ),
     StormEntry(
         storm_id="ike_2008", name="Hurricane Ike", year=2008,
@@ -112,6 +120,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=315, speed_kt=13,
         basin="AL", advisory="best-track",
         dps_score=88.5,
+        rmax_nm=35.0,   # NHC TCR: large wind field at Galveston
     ),
     StormEntry(
         storm_id="harvey_2017", name="Hurricane Harvey", year=2017,
@@ -121,6 +130,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=315, speed_kt=10,
         basin="AL", advisory="best-track",
         dps_score=88.4,
+        rmax_nm=25.0,   # NHC TCR: moderate-sized eyewall at Rockport
     ),
     StormEntry(
         storm_id="ian_2022", name="Hurricane Ian", year=2022,
@@ -130,6 +140,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=35, speed_kt=9,
         basin="AL", advisory="best-track",
         dps_score=90.1,
+        rmax_nm=15.0,   # NHC TCR: compact Cat 4, small eyewall at Fort Myers
     ),
     StormEntry(
         storm_id="laura_2020", name="Hurricane Laura", year=2020,
@@ -139,6 +150,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=350, speed_kt=15,
         basin="AL", advisory="best-track",
         dps_score=86.9,
+        rmax_nm=15.0,   # NHC TCR: compact Cat 4 at Cameron, LA
     ),
     StormEntry(
         storm_id="ida_2021", name="Hurricane Ida", year=2021,
@@ -148,6 +160,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=330, speed_kt=13,
         basin="AL", advisory="best-track",
         dps_score=88.7,
+        rmax_nm=20.0,   # NHC TCR: ~20 nm at Port Fourchon
     ),
     # ── Category 3 ───────────────────────────────────────
     StormEntry(
@@ -158,6 +171,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=350, speed_kt=8,
         basin="AL", advisory="best-track",
         dps_score=87.6,
+        rmax_nm=20.0,   # NHC TCR: contracted eyewall at FL Keys landfall
     ),
     StormEntry(
         storm_id="florence_2018", name="Hurricane Florence", year=2018,
@@ -167,6 +181,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=315, speed_kt=5,
         basin="AL", advisory="best-track",
         dps_score=85.4,
+        rmax_nm=50.0,   # NHC TCR: very large, sprawling wind field at Wilmington
     ),
     # ── Category 2 ───────────────────────────────────────
     StormEntry(
@@ -177,6 +192,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=315, speed_kt=28,
         basin="AL", advisory="best-track",
         dps_score=89.5,
+        rmax_nm=30.0,   # NHC TCR: large storm; coastal funnel geometry accounts for rest
     ),
     StormEntry(
         storm_id="delta_2020", name="Hurricane Delta", year=2020,
@@ -186,6 +202,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=350, speed_kt=14,
         basin="AL", advisory="best-track",
         dps_score=77.7,
+        rmax_nm=25.0,   # NHC TCR: moderate wind field at Creole, LA
     ),
     # ── Category 1 ───────────────────────────────────────
     StormEntry(
@@ -196,6 +213,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=320, speed_kt=9,
         basin="AL", advisory="best-track",
         dps_score=61.6,  # Nicholas not in compiled bundle; estimated
+        rmax_nm=20.0,   # NHC TCR: small Cat 1 at Matagorda Peninsula
     ),
     StormEntry(
         storm_id="nate_2017", name="Hurricane Nate", year=2017,
@@ -205,6 +223,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=5, speed_kt=22,
         basin="AL", advisory="best-track",
         dps_score=45.5,  # Nate not in compiled bundle; estimated
+        rmax_nm=15.0,   # NHC TCR: compact fast-moving Cat 1, very small eyewall
     ),
     StormEntry(
         storm_id="helene_2024", name="Hurricane Helene", year=2024,
@@ -214,6 +233,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=15, speed_kt=20,
         basin="AL", advisory="best-track",
         dps_score=84.1,
+        rmax_nm=15.0,   # NHC TCR: compact at Big Bend; coastal geometry limits surge further
     ),
     StormEntry(
         storm_id="milton_2024", name="Hurricane Milton", year=2024,
@@ -223,6 +243,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         heading_deg=60, speed_kt=16,
         basin="AL", advisory="best-track",
         dps_score=87.5,
+        rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
     ),
 ]
 
