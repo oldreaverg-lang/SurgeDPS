@@ -435,16 +435,7 @@ const CONFIDENCE_STYLES: Record<string, { bg: string; text: string; label: strin
   unvalidated: { bg: 'bg-gray-100', text: 'text-gray-500', label: 'Unvalidated' },
 };
 
-const ELI_STYLES: Record<string, { bg: string; text: string; border: string; label: string }> = {
-  extreme:   { bg: 'bg-red-50', text: 'text-red-900', border: 'border-red-300', label: 'Extreme' },
-  very_high: { bg: 'bg-orange-50', text: 'text-orange-900', border: 'border-orange-300', label: 'Very High' },
-  high:      { bg: 'bg-yellow-50', text: 'text-yellow-900', border: 'border-yellow-300', label: 'High' },
-  moderate:  { bg: 'bg-blue-50', text: 'text-blue-900', border: 'border-blue-300', label: 'Moderate' },
-  low:       { bg: 'bg-gray-50', text: 'text-gray-700', border: 'border-gray-300', label: 'Low' },
-  unavailable: { bg: 'bg-gray-50', text: 'text-gray-400', border: 'border-gray-200', label: 'Pending' },
-};
-
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli, validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -753,8 +744,6 @@ function App() {
   const [simResult, setSimResult] = useState<any>(null);
   const [forecastCone, setForecastCone] = useState<any>(null);       // GeoJSON polygon
   const [forecastTrack, setForecastTrack] = useState<any[]>([]);     // Forecast points
-  const [forecastLandfall, setForecastLandfall] = useState<{ lat: number; lon: number } | null>(null);
-
   // Toast notifications (error = red, success = green)
   const [cellError, setCellError] = useState<string | null>(null);
   const [toastSuccess, setToastSuccess] = useState<string | null>(null);
@@ -1086,7 +1075,6 @@ function App() {
     if (!activeStorm || activeStorm.status !== 'active') {
       setForecastCone(null);
       setForecastTrack([]);
-      setForecastLandfall(null);
       setSimMode(false);
       return;
     }
@@ -1103,7 +1091,6 @@ function App() {
           setForecastTrack(match.points || []);
           if (match.cone) setForecastCone(match.cone);
           if (match.predicted_landfall) {
-            setForecastLandfall({ lat: match.predicted_landfall.lat, lon: match.predicted_landfall.lon });
             setSimMarker({ lng: match.predicted_landfall.lon, lat: match.predicted_landfall.lat });
           }
         }
