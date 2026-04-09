@@ -607,7 +607,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
                   <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
                   <span className="text-gray-600 flex-1">{label}</span>
                   <span className="font-bold text-gray-800">{count.toLocaleString()}</span>
-                  <span className="text-gray-400 w-10 text-right">{pct.toFixed(0)}%</span>
+                  <span className="text-gray-400 w-10 text-right">{count > 0 && pct < 1 ? '<1' : pct.toFixed(0)}%</span>
                 </div>
               );
             })}
@@ -658,7 +658,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       <div className="bg-blue-50/50 rounded-lg p-2.5 mb-3 border border-blue-100">
         <div className="text-[10px] text-blue-600 font-bold uppercase tracking-wider mb-0.5">Map Coverage</div>
         <div className="text-sm text-blue-800 font-semibold">
-          {loadedCells.size} area{loadedCells.size !== 1 ? 's' : ''} analyzed
+          {totals.buildings > 0 ? `${totals.buildings.toLocaleString()} buildings` : `${loadedCells.size} area${loadedCells.size !== 1 ? 's' : ''}`} analyzed
         </div>
         <div className="text-xs text-blue-500 mt-0.5">
           {loadingCells.size > 0
@@ -933,7 +933,7 @@ function App() {
 
   // ── CSV export of visible buildings ──
   const handleExportCSV = useCallback(() => {
-    if (!allBuildings?.features?.length) return;
+    if (!allBuildings?.features?.length) { setToastSuccess('No building data loaded — select a storm and load cells first.'); return; }
     const totalLoss = allBuildings.features.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
     const summaryLines = [
       `# SurgeDPS Export — ${activeStorm?.name || 'Unknown'} (${activeStorm?.year || ''})`,
@@ -964,6 +964,7 @@ function App() {
     a.download = `surgedps_${activeStorm?.storm_id || 'export'}_buildings.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    setToastSuccess(`Exported ${allBuildings.features.length.toLocaleString()} buildings to CSV`);
   }, [allBuildings, activeStorm, buildingFlags]);
 
   // Reverse geocoding for building hover
@@ -1150,12 +1151,14 @@ function App() {
     for (const [c, r] of parsed) {
       if (!loadedCells.has(cellKey(c, r))) continue;
       for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-        const nk = cellKey(c + dc, r + dr);
+        const nc = c + dc, nr = r + dr;
+        if (nc < 0 || nr < 0) continue; // Skip invalid negative cell coordinates
+        const nk = cellKey(nc, nr);
         if (!seen.has(nk)) {
           seen.add(nk);
           // Pre-computed cells in manifest get "ready" status (solid border, instant load)
           const status = manifest[nk] ? 'ready' : 'available';
-          features.push(cellPolygon(c + dc, r + dr, status, oLon, oLat));
+          features.push(cellPolygon(nc, nr, status, oLon, oLat));
         }
       }
     }
@@ -1304,7 +1307,7 @@ function App() {
         }));
       }, 0);
     } catch (err) { console.error(`Failed cell (${col},${row}):`, err); setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.'); }
-    finally { if (activeStormRef.current?.storm_id === stormId) setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
+    finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
   }, []); // stable — all state accessed via refs
 
   // Reverse-geocode building popup via Nominatim (debounced 300ms to avoid hammering the API)
@@ -1353,6 +1356,8 @@ function App() {
   }, []);
 
   const onClick = useCallback((event: any) => {
+    // Close any open menus when map is clicked
+    setMoreMenuOpen(false);
     // Cluster click → zoom in
     const cluster = event.features?.find((f: any) => f.layer.id === 'damage-clusters');
     if (cluster && mapRef.current) {
@@ -1414,7 +1419,7 @@ function App() {
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
           mapStyle={BASEMAPS[basemap]}
           interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
-          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' ? 'pointer' : ''}
+          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
           onMoveEnd={e => setZoom(e.viewState.zoom)}
         >
@@ -1447,7 +1452,7 @@ function App() {
             >
               <Layer id="damage-points" type="circle" filter={['!', ['has', 'point_count']]}
                 paint={{
-                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 4, 14, 10, 16, 14, 18, 20],
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 13, 8, 14, 12, 16, 16, 18, 22],
                   'circle-color': ['match', ['get', 'damage_category'], 'none', '#4ade80', 'minor', '#facc15', 'moderate', '#fb923c', 'major', '#ef4444', 'severe', '#7f1d1d', '#9ca3af'],
                   'circle-opacity': 0.85,
                   'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
@@ -1809,7 +1814,7 @@ function App() {
                         onClick={() => { handleExportPDA(); setMoreMenuOpen(false); }}
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
                         title="Export FEMA Preliminary Damage Assessment summary"
-                      >📋 PDA Export</button>
+                      >📋 PDF Export</button>
                     </div>
                   </>
                 )}
