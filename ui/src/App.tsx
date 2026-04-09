@@ -43,6 +43,7 @@ interface StormInfo {
   status: string; landfall_lon: number; landfall_lat: number;
   max_wind_kt: number; min_pressure_mb: number;
   grid_origin_lon: number; grid_origin_lat: number;
+  rmax_nm?: number;
   dps_score: number;
   confidence?: string;
   building_count?: number;
@@ -212,6 +213,7 @@ function StormRow({ s, activeStormId, activating, onSelect }: {
 }) {
   const isActive = s.storm_id === activeStormId;
   const dot = dpsColor(s.dps_score || 0);
+  const catColor = CAT_COLORS[s.category] ?? '#94a3b8';
   return (
     <button
       onClick={() => onSelect(s.storm_id)}
@@ -220,10 +222,17 @@ function StormRow({ s, activeStormId, activating, onSelect }: {
         isActive ? 'bg-indigo-500/20 text-white' : 'text-slate-300 hover:bg-slate-700/60 hover:text-white'
       }`}
     >
-      <span style={{ background: dot, width: 8, height: 8, borderRadius: '50%', flexShrink: 0 }} />
+      {/* Category dot */}
+      <span style={{ background: catColor, width: 8, height: 8, borderRadius: '50%', flexShrink: 0 }} />
       <span className="truncate font-medium">{shortName(s.name)}</span>
-      <span className="ml-auto text-xs text-slate-500 shrink-0">
-        {s.dps_score ? <><span style={{ color: dot, fontWeight: 600 }}>{s.dps_score.toFixed(1)}</span>{' '}<span className="text-slate-600">DPS</span></> : '—'}
+      {/* Year chip — muted, helps disambiguate same-name storms */}
+      <span className="text-[10px] text-slate-600 font-normal shrink-0">{s.year}</span>
+      {/* DPS score */}
+      <span className="ml-auto text-xs shrink-0">
+        {s.dps_score
+          ? <><span style={{ color: dot, fontWeight: 700 }}>{s.dps_score.toFixed(0)}</span><span className="text-slate-600"> DPS</span></>
+          : <span className="text-slate-600">—</span>
+        }
       </span>
     </button>
   );
@@ -233,12 +242,13 @@ function StormRow({ s, activeStormId, activating, onSelect }: {
 // Storm Browser Sidebar
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClose }: {
+function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClose, activeStorm }: {
   onSelectStorm: (id: string) => void;
   activeStormId: string | null;
   activating: boolean;
   isOpen: boolean;
   onClose: () => void;
+  activeStorm: StormInfo | null;
 }) {
   const [seasons, setSeasons] = useState<Season[]>([]);
   const [historicStorms, setHistoricStorms] = useState<StormInfo[]>([]);
@@ -304,7 +314,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
               rel="noopener noreferrer"
               className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
             >
-              ← Return to StormDPS
+              ← StormDPS
             </a>
             <button
               onClick={onClose}
@@ -314,6 +324,15 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
           </div>
         </div>
         <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">Storm Surge Analysis</p>
+        {/* Active storm indicator */}
+        {activeStorm && (
+          <div className="mt-2 px-2 py-1.5 bg-indigo-500/15 border border-indigo-500/30 rounded-lg flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-indigo-400 shrink-0 animate-pulse" />
+            <span className="text-xs font-semibold text-indigo-300 truncate">{activeStorm.name} ({activeStorm.year})</span>
+            <span className="ml-auto text-[10px] font-bold text-white px-1.5 py-0.5 rounded-full shrink-0"
+              style={{ backgroundColor: CAT_COLORS[activeStorm.category] }}>Cat {activeStorm.category}</span>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -1401,6 +1420,7 @@ function App() {
         activating={activating}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        activeStorm={activeStorm}
       />
 
       {/* Backdrop — taps to close sidebar on mobile/tablet */}
@@ -1745,6 +1765,15 @@ function App() {
           )}
         </Map>
 
+        {/* ── Mobile sidebar toggle — always visible on small screens ── */}
+        {!sidebarOpen && (
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="lg:hidden absolute top-3 left-3 z-20 bg-slate-900/95 backdrop-blur text-white rounded-lg shadow-lg border border-slate-700 w-10 h-10 flex items-center justify-center text-lg hover:bg-slate-800 transition-colors"
+            aria-label="Open storm browser"
+          >☰</button>
+        )}
+
         {/* ── Address search bar (top-center of map) — always visible ── */}
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
           <div className="flex bg-white/95 backdrop-blur shadow-lg rounded-lg overflow-hidden border border-gray-200">
@@ -1813,7 +1842,7 @@ function App() {
                         onClick={() => { handleExportPDA(); setMoreMenuOpen(false); }}
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
                         title="Export FEMA Preliminary Damage Assessment summary"
-                      >📋 PDF Export</button>
+                      >📋 FEMA PDA Export</button>
                     </div>
                   </>
                 )}
@@ -1920,8 +1949,10 @@ function App() {
 
         {/* Cell loading progress indicator */}
         {loadingCells.size > 0 && (
-          <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-30 bg-indigo-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-sm text-center animate-pulse">
-            Loading {loadingCells.size} area(s)... {loadedCells.size} loaded
+          <div className="absolute top-20 right-4 z-30 bg-slate-900/95 backdrop-blur border border-indigo-500/40 text-indigo-300 text-xs font-semibold px-4 py-2.5 rounded-lg shadow-xl flex items-center gap-2.5">
+            <span className="w-3 h-3 rounded-full border-2 border-indigo-400 border-t-transparent animate-spin shrink-0" />
+            <span>Loading {loadingCells.size} area{loadingCells.size !== 1 ? 's' : ''}…</span>
+            {loadedCells.size > 0 && <span className="text-slate-500">· {loadedCells.size} done</span>}
           </div>
         )}
 
@@ -1947,43 +1978,68 @@ function App() {
         {/* Empty-state overlay — shown when no storm is active */}
         {!activeStorm && !activating && (
           <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-            <div className="bg-black/60 backdrop-blur-sm rounded-2xl px-8 py-6 text-center shadow-2xl max-w-sm pointer-events-auto">
-              <img src="/surgedps/logo-180.png" alt="SurgeDPS" className="w-16 h-16 mx-auto mb-3 rounded-2xl" style={{ boxShadow: '0 4px 20px rgba(99,102,241,0.3)', filter: 'brightness(1.15)' }} />
+            <div className="bg-slate-900/95 backdrop-blur-sm rounded-2xl px-8 py-6 text-center shadow-2xl border border-slate-700 max-w-sm w-full mx-4 pointer-events-auto">
+              <img src="/surgedps/logo-180.png" alt="SurgeDPS" className="w-16 h-16 mx-auto mb-3 rounded-2xl" style={{ boxShadow: '0 4px 20px rgba(99,102,241,0.4)', filter: 'brightness(1.15)' }} />
               <p className="text-white font-bold text-lg">Select a storm to begin</p>
-              <p className="text-slate-300 text-sm mt-1">Choose a hurricane from the browser on the left to load surge data and damage estimates.</p>
-              <p className="text-slate-400 text-xs mt-2 italic">DPS = Damage Potential Score — higher means more destructive surge</p>
-              <div className="flex flex-col gap-2 mt-4">
-                <button
-                  onClick={() => activateStorm('harvey_2017')}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-                >Try Hurricane Harvey</button>
-                <button
-                  onClick={() => setSidebarOpen(true)}
-                  className="lg:hidden bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-                >☰ Browse Storms</button>
+              <p className="text-slate-400 text-sm mt-1 mb-4">Choose a hurricane from the list on the left to see surge depths and damage estimates across the impact zone.</p>
+              {/* Quick-launch notable storms */}
+              <div className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mb-2">Notable Storms</div>
+              <div className="grid grid-cols-2 gap-2">
+                {([
+                  { id: 'harvey_2017',  label: 'Harvey 2017',  cat: 4, color: CAT_COLORS[4] },
+                  { id: 'katrina_2005', label: 'Katrina 2005', cat: 3, color: CAT_COLORS[3] },
+                  { id: 'ian_2022',     label: 'Ian 2022',     cat: 4, color: CAT_COLORS[4] },
+                  { id: 'michael_2018', label: 'Michael 2018', cat: 5, color: CAT_COLORS[5] },
+                ] as { id: string; label: string; cat: number; color: string }[]).map(({ id, label, cat, color }) => (
+                  <button
+                    key={id}
+                    onClick={() => activateStorm(id)}
+                    className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-slate-500 text-slate-200 text-xs font-semibold px-3 py-2.5 rounded-lg transition-colors text-left"
+                  >
+                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                    <span className="flex-1 truncate">{label}</span>
+                    <span className="text-[10px] font-bold text-white px-1 py-0.5 rounded shrink-0" style={{ backgroundColor: color }}>C{cat}</span>
+                  </button>
+                ))}
               </div>
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="lg:hidden mt-3 w-full bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+              >☰ Browse All Storms</button>
+              <p className="text-slate-600 text-[10px] mt-4">DPS = Damage Potential Score · higher score = more destructive surge</p>
             </div>
           </div>
         )}
 
         {/* Loading overlay with real progress */}
         {activating && (
-          <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-20">
-            <div className="bg-white rounded-xl p-6 shadow-2xl text-center min-w-[280px]">
-              <div className="animate-spin w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full mx-auto mb-3"></div>
-              <p className="font-semibold text-gray-800">Analyzing storm...</p>
-              <p className="text-xs text-gray-600 mt-1 font-medium">{loadProgress.step || 'Connecting to server'}</p>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-20" style={{ animation: 'fadeIn 0.2s ease-out' }}>
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-7 shadow-2xl text-center min-w-[300px] max-w-sm">
+              {/* Animated ring */}
+              <div className="relative w-14 h-14 mx-auto mb-4">
+                <div className="absolute inset-0 animate-spin rounded-full border-4 border-slate-700 border-t-indigo-500"></div>
+                <div className="absolute inset-2 rounded-full bg-slate-900 flex items-center justify-center">
+                  <span className="text-indigo-400 text-lg">🌀</span>
+                </div>
+              </div>
+              <p className="font-bold text-white text-base">
+                {loadProgress.step_num === 0 ? 'Loading storm data…' : 'Analyzing storm…'}
+              </p>
+              <p className="text-xs text-indigo-300 mt-1 font-medium">{loadProgress.step || 'Connecting to server…'}</p>
               {/* Progress bar */}
-              <div className="mt-3 w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+              <div className="mt-4 w-full bg-slate-700 rounded-full h-1.5 overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 rounded-full transition-all duration-700 ease-out"
-                  style={{ width: `${Math.max(5, (loadProgress.step_num / loadProgress.total_steps) * 100)}%` }}
+                  style={{ width: `${Math.max(4, (loadProgress.step_num / loadProgress.total_steps) * 100)}%` }}
                 />
               </div>
-              <p className="text-[10px] text-gray-400 mt-1.5">Step {loadProgress.step_num} of {loadProgress.total_steps}{loadProgress.elapsed > 0 ? ` · ${Math.round(loadProgress.elapsed)}s` : ''}</p>
+              <p className="text-[10px] text-slate-500 mt-2">
+                Step {loadProgress.step_num} of {loadProgress.total_steps}
+                {loadProgress.elapsed > 0 ? ` · ${Math.round(loadProgress.elapsed)}s elapsed` : ''}
+              </p>
               <button
                 onClick={() => activateAbortRef.current?.abort()}
-                className="mt-3 text-xs text-gray-500 hover:text-gray-700 transition-colors font-medium"
+                className="mt-4 text-xs text-slate-500 hover:text-slate-300 transition-colors font-medium border border-slate-700 hover:border-slate-500 rounded-lg px-4 py-1.5"
               >Cancel</button>
             </div>
           </div>
@@ -2110,44 +2166,47 @@ function App() {
 
         {/* Grid onboarding hint */}
         {showGrid && activeStorm && !gridHintDismissed && loadedCells.size > 0 && (
-          <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur shadow-lg rounded-lg px-4 py-3 border border-gray-200 max-w-xs text-center animate-bounce"
+          <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 bg-slate-900/95 backdrop-blur shadow-lg rounded-lg px-4 py-3 border border-slate-700 max-w-xs text-center"
+            style={{ animation: 'fadeInUp 0.4s ease-out' }}
           >
-            <p className="text-sm text-gray-800 font-medium">Expand coverage by clicking the dashed borders around the loaded area</p>
+            <p className="text-sm text-slate-200 font-medium">Click the dashed borders around the loaded area to expand coverage</p>
             <button
               onClick={() => setGridHintDismissed(true)}
-              className="mt-2 text-xs font-semibold text-indigo-600 hover:text-indigo-700 transition-colors"
-            >Got it</button>
+              className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
+            >Got it ✓</button>
           </div>
         )}
 
-        {/* ── Basemap toggle + Reset View (bottom-right of map) ── */}
-        {activeStorm && (
-          <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
-            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-              {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
-                <button
-                  key={key}
-                  onClick={() => setBasemap(key)}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${basemap === key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-                >{label}</button>
-              ))}
-            </div>
-            <button
-              onClick={handleResetView}
-              className="bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors text-center"
-            >↺ Reset View</button>
-            <div className="flex gap-1.5">
+        {/* ── Basemap toggle + map controls (bottom-left of map) — always visible ── */}
+        <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
+          <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+            {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
               <button
-                onClick={() => setShowCounties(c => !c)}
-                className={`rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium transition-colors ${showCounties ? 'bg-blue-600 text-white' : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100'}`}
-              >Counties</button>
-              <button
-                onClick={() => setShowFloodZones(f => !f)}
-                className={`rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium transition-colors ${showFloodZones ? 'bg-blue-600 text-white' : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100'}`}
-              >FEMA Zones</button>
-            </div>
+                key={key}
+                onClick={() => setBasemap(key)}
+                className={`px-3 py-1.5 text-xs font-medium transition-colors ${basemap === key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >{label}</button>
+            ))}
           </div>
-        )}
+          {activeStorm && (
+            <>
+              <button
+                onClick={handleResetView}
+                className="bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors text-center"
+              >↺ Reset View</button>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setShowCounties(c => !c)}
+                  className={`rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium transition-colors ${showCounties ? 'bg-blue-600 text-white' : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100'}`}
+                >Counties</button>
+                <button
+                  onClick={() => setShowFloodZones(f => !f)}
+                  className={`rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium transition-colors ${showFloodZones ? 'bg-blue-600 text-white' : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100'}`}
+                >FEMA Zones</button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -8,3 +8,13 @@ html, body, #root {
   font-family: 'Inter', sans-serif;
   background-color: #0f172a;
 }
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
