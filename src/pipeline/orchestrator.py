@@ -421,6 +421,9 @@ def handle_tilegen(event: dict, context: Any) -> dict:
                     depth_raster_path=compound_path,
                     buildings_geojson_path=buildings_path,
                     output_path=damage_geojson,
+                    storm_id=event.get("storm_id"),
+                    landfall_lat=event.get("landfall_lat"),
+                    landfall_lon=event.get("landfall_lon"),
                 )
                 damage_summary = {
                     "buildings_assessed": damage_est.buildings_assessed,

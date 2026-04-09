@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +34,78 @@ from damage_model.building_adjuster import adjust_damage_pct
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Wind Damage Model (ported from StormDPS economic_vulnerability.py)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Based on:
+#   - Emanuel (2011) power dissipation index relationship
+#   - Florida Building Code loss reduction studies
+#   - HAZUS-MH wind damage curves
+#
+# The function uses a modified power law: d = 1 - exp(-3 × normalized^2.5)
+# with a building-code-dependent onset threshold.
+
+
+def estimate_wind_damage_pct(
+    wind_speed_mph: float,
+    building_resilience: float = 0.60,
+    med_yr_blt: Optional[int] = None,
+) -> float:
+    """
+    Estimate wind damage as a percentage of structure replacement value.
+
+    Based on StormDPS core/economic_vulnerability.py wind_damage_function(),
+    recalibrated for 1-minute sustained surface winds (IBTrACS reference).
+
+    The original StormDPS function used gradient-level winds (~1.25× surface);
+    thresholds here are adjusted downward accordingly.  Onset thresholds
+    align with FEMA HAZUS-MH wind damage initiation for wood-frame
+    residential:  ~55 mph for older construction, ~70 mph for modern code.
+
+    Args:
+        wind_speed_mph: Sustained surface wind speed at the building (mph)
+        building_resilience: Building code quality factor (0-1, 1 = best).
+                             Default 0.60 = typical Gulf Coast.
+        med_yr_blt: Year built — post-2002 Florida Building Code gets
+                    a resilience boost; pre-1995 gets a penalty.
+
+    Returns:
+        Structure damage percentage (0-100) from wind only.
+    """
+    vmax_ms = wind_speed_mph * 0.44704  # mph → m/s
+
+    # Era adjustment to building resilience
+    if med_yr_blt is not None:
+        if med_yr_blt >= 2002:
+            building_resilience = min(1.0, building_resilience + 0.15)
+        elif med_yr_blt < 1995:
+            building_resilience = max(0.20, building_resilience * 0.85)
+
+    # Damage onset threshold (calibrated for 1-min sustained surface winds)
+    #   resilience=0.40 (poor code):  23 m/s ≈  51 mph (damage at strong TS)
+    #   resilience=0.60 (typical):    27 m/s ≈  60 mph (damage at weak Cat 1)
+    #   resilience=0.80 (modern):     31 m/s ≈  69 mph (damage at Cat 1)
+    #   resilience=1.00 (best):       35 m/s ≈  78 mph (damage at Cat 1+)
+    v_threshold = 15.0 + 20.0 * building_resilience
+
+    if vmax_ms < v_threshold:
+        return 0.0
+
+    v_excess = vmax_ms - v_threshold
+    # Cat 5 surface sustained ≈ 70 m/s (157 mph)
+    v_max_excess = 70.0 - v_threshold
+
+    normalized = min(1.0, v_excess / v_max_excess)
+
+    # Modified power law: rapid onset, then saturation
+    # d = 1 - exp(-3 × n^2.5)
+    damage_frac = 1.0 - math.exp(-3.0 * normalized ** 2.5)
+    damage_frac = max(0.0, min(1.0, damage_frac))
+
+    return round(damage_frac * 100, 1)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,8 +219,73 @@ DEFAULT_SQFT: Dict[str, float] = {
     "IND": 10000.0,
 }
 
-# HAZUS default: contents value = 50% of building replacement value
+# ── Contents-to-Structure Value Ratios ────────────────────────────────────
+# Source: FEMA HAZUS Flood Technical Manual, Table 5.7
+# "Ratio of Contents to Structure Value by Occupancy"
+#
+# The flat 0.50 ratio is HAZUS's default for single-family residential.
+# Commercial and industrial occupancy types have dramatically different
+# ratios — a retail store's inventory can equal its building value, and a
+# heavy-industrial facility's equipment can be worth 1.5× the structure.
+#
+# Keyed by NSI occtype prefix so that "COM1" and "COM1-1S" both match "COM1".
+# Fallback: 0.50 for any unrecognized code.
+CONTENTS_TO_STRUCTURE_RATIO_TABLE: Dict[str, float] = {
+    # ── Residential ──
+    "RES1":  0.50,   # Single-family dwelling
+    "RES2":  0.50,   # Manufactured housing
+    "RES3":  0.50,   # Multi-family (2-4 units)
+    "RES4":  0.50,   # Temporary lodging (hotel/motel)
+    "RES5":  0.50,   # Institutional dormitory
+    "RES6":  0.50,   # Nursing home
+    # ── Commercial ──
+    "COM1":  1.00,   # Retail trade (inventory-heavy)
+    "COM2":  1.00,   # Wholesale trade (inventory-heavy)
+    "COM3":  0.50,   # Personal/repair services
+    "COM4":  1.00,   # Professional/technical services (IT equipment)
+    "COM5":  0.50,   # Banks/financial institutions
+    "COM6":  0.50,   # Hospital/medical office
+    "COM7":  0.50,   # Medical office/clinic
+    "COM8":  0.75,   # Restaurant/bar (equipment + perishables)
+    "COM9":  1.00,   # Entertainment/recreation
+    "COM10": 0.50,   # Parking garage
+    # ── Industrial ──
+    "IND1":  1.50,   # Heavy industrial (machinery/equipment dominant)
+    "IND2":  1.50,   # Light industrial
+    "IND3":  1.50,   # Food/drugs/chemicals manufacturing
+    "IND4":  1.50,   # Metals/minerals processing
+    "IND5":  1.50,   # High-technology manufacturing
+    "IND6":  1.00,   # Construction
+    # ── Agriculture ──
+    "AGR1":  1.00,   # Agriculture
+    # ── Religious / Government / Education ──
+    "REL1":  1.00,   # Church/non-profit
+    "GOV1":  0.50,   # General government
+    "GOV2":  0.50,   # Emergency response
+    "EDU1":  0.50,   # Schools
+    "EDU2":  0.50,   # Colleges/universities
+}
+
+# Default fallback ratio (HAZUS residential default)
 CONTENTS_TO_STRUCTURE_RATIO = 0.50
+
+
+def _get_contents_ratio(occtype: Optional[str] = None) -> float:
+    """
+    Return the contents-to-structure value ratio for a given occupancy type.
+
+    Matches on the longest prefix: "COM1" matches "COM1", "RES1-1SNB" matches "RES1".
+    Falls back to the flat 0.50 default for unrecognized codes.
+    """
+    if not occtype:
+        return CONTENTS_TO_STRUCTURE_RATIO
+    occ = occtype.upper().strip()
+    # Try exact match first, then progressively shorter prefixes
+    for length in range(len(occ), 2, -1):
+        prefix = occ[:length]
+        if prefix in CONTENTS_TO_STRUCTURE_RATIO_TABLE:
+            return CONTENTS_TO_STRUCTURE_RATIO_TABLE[prefix]
+    return CONTENTS_TO_STRUCTURE_RATIO
 
 # First finished floor height above grade (feet)
 # Slab-on-grade (no basement) = ~1 foot; with basement = ~1 foot;
@@ -208,18 +346,19 @@ def get_damage_pct(
 def get_total_damage_pct(
     depth_ft: float,
     building_type: str = DEFAULT_BUILDING_TYPE,
+    occtype: Optional[str] = None,
 ) -> float:
     """
     Combined structure + contents damage as percentage of total value.
 
-    Total value = structure replacement + contents (50% of structure).
+    Total value = structure replacement + contents (ratio depends on occupancy type).
     Combined damage = (struct_dmg * struct_val + content_dmg * content_val) / total_val
     """
     struct_pct = get_damage_pct(depth_ft, building_type, "structure")
     content_pct = get_damage_pct(depth_ft, building_type, "contents")
 
-    # Weighted average: structure is 1/(1+0.5) = 66.7%, contents is 0.5/(1+0.5) = 33.3%
-    r = CONTENTS_TO_STRUCTURE_RATIO
+    # Use occupancy-specific ratio if available, else HAZUS residential default
+    r = _get_contents_ratio(occtype)
     return (struct_pct + r * content_pct) / (1 + r)
 
 
@@ -246,6 +385,24 @@ class BuildingDamage:
     found_ht: Optional[float] = None      # foundation height (ft above grade)
     val_struct: Optional[float] = None     # structure replacement value (USD)
     val_cont: Optional[float] = None       # contents replacement value (USD)
+    # ── Wind damage (separate peril, from StormDPS wind model) ──
+    wind_damage_pct: Optional[float] = None        # structure damage from wind (%)
+    wind_loss_usd: Optional[float] = None          # wind-only loss (USD)
+    wind_speed_mph: Optional[float] = None         # wind speed at building location
+    combined_loss_usd: Optional[float] = None      # surge + wind combined loss
+    # ── Depth uncertainty confidence interval ──
+    # Parametric surge models have ~±30% depth uncertainty.  We report
+    # low/high loss bounds so adjusters can bracket their estimates.
+    loss_low_usd: Optional[float] = None   # loss at 0.7× depth (optimistic)
+    loss_high_usd: Optional[float] = None  # loss at 1.3× depth (conservative)
+    structure_dmg_pct_low: Optional[float] = None
+    structure_dmg_pct_high: Optional[float] = None
+    contents_dmg_pct_low: Optional[float] = None
+    contents_dmg_pct_high: Optional[float] = None
+    # ── FEMA IHP eligibility estimate ──
+    ihp_eligible: Optional[bool] = None    # estimated IHP eligibility
+    ihp_category: Optional[str] = None     # "minor"/"moderate"/"major"/"severe"
+    ihp_est_amount: Optional[float] = None # estimated IHP payout (USD)
     # ── Pass-through metadata from building source (NSI/OSM) ──
     # These fields survive the damage pipeline so the frontend CSV export
     # can include them for insurance adjusters and emergency managers.
@@ -318,6 +475,9 @@ def estimate_building_damage(
     num_story: Optional[int] = None,
     occtype: Optional[str] = None,
     use_nsi_adjustments: bool = True,
+    county_cost_per_sqft: Optional[float] = None,
+    wind_speed_mph: Optional[float] = None,
+    building_resilience: float = 0.60,
 ) -> BuildingDamage:
     """
     Estimate flood damage for a single building.
@@ -348,6 +508,9 @@ def estimate_building_damage(
         num_story:  Number of stories (from FEMA NSI)
         occtype:    NSI occupancy type code (e.g. "RES1")
         use_nsi_adjustments: Apply per-building refinements (default True)
+        county_cost_per_sqft: Census ACS-derived $/sqft for this county (optional).
+                              Overrides the flat DEFAULT_COST_PER_SQFT when no
+                              NSI val_struct is available.
 
     Returns:
         BuildingDamage with loss estimates
@@ -377,24 +540,114 @@ def estimate_building_damage(
         )
 
     # Recompute weighted total from (possibly adjusted) struct/content pcts
-    r = CONTENTS_TO_STRUCTURE_RATIO
+    # Use occupancy-specific contents-to-structure ratio (HAZUS Table 5.7)
+    r = _get_contents_ratio(occtype)
     total_pct = (struct_pct + r * content_pct) / (1 + r)
 
     # ── Replacement value ───────────────────────────────────────────
     if val_struct is not None:
         # NSI path: use actual tabulated replacement costs
         struct_value = float(val_struct)
-        content_value = float(val_cont) if val_cont is not None else struct_value * CONTENTS_TO_STRUCTURE_RATIO
+        content_value = float(val_cont) if val_cont is not None else struct_value * r
     else:
         # Fallback path: sqft × $/sqft with per-building cost variation
+        # Use Census ACS county-level cost if available, else type default
         area = sqft or DEFAULT_SQFT.get(building_type, 1400)
-        base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
+        if county_cost_per_sqft is not None:
+            base_cost = county_cost_per_sqft
+        else:
+            base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
         cost_per_sqft = base_cost * _cost_multiplier(building_id)
         struct_value = area * cost_per_sqft
-        content_value = struct_value * CONTENTS_TO_STRUCTURE_RATIO
+        content_value = struct_value * r
 
     replacement = struct_value + content_value
     loss = (struct_pct / 100 * struct_value) + (content_pct / 100 * content_value)
+
+    # ── Depth uncertainty bounds (±30%) ─────────────────────────────
+    # Parametric surge models carry ~30% depth uncertainty (FEMA 2015,
+    # "Guidelines for Flood Risk Analysis").  We bracket loss at 0.7×
+    # and 1.3× the best-estimate depth to give adjusters a range.
+    loss_low = loss_high = None
+    s_low = s_high = c_low = c_high = None
+    for depth_mult, tag in [(0.7, "low"), (1.3, "high")]:
+        d_ft = depth_m * depth_mult * 3.28084
+        daf = d_ft - ffh
+        sp = get_damage_pct(daf, building_type, "structure")
+        cp = get_damage_pct(daf, building_type, "contents")
+        if use_nsi_adjustments and any(v is not None for v in (first_floor_ht_ft, med_yr_blt, num_story)):
+            sp, cp = adjust_damage_pct(
+                structure_pct=sp, contents_pct=cp,
+                found_ht=first_floor_ht_ft, med_yr_blt=med_yr_blt,
+                num_story=num_story, occtype=occtype,
+                depth_above_grade_ft=d_ft,
+            )
+        bound_loss = (sp / 100 * struct_value) + (cp / 100 * content_value)
+        if tag == "low":
+            loss_low = round(bound_loss, 0)
+            s_low, c_low = round(sp, 1), round(cp, 1)
+        else:
+            loss_high = round(bound_loss, 0)
+            s_high, c_high = round(sp, 1), round(cp, 1)
+
+    # ── FEMA IHP eligibility estimate ───────────────────────────────
+    # IHP provides assistance to owner-occupied primary residences.
+    # Thresholds based on FEMA IHP guidance (simplified):
+    #   - Real property damage > $0 → eligible for some assistance
+    #   - Up to $41,000 (FY2024 max, adjusted periodically)
+    # Categories mirror FEMA preliminary damage assessment levels.
+    ihp_eligible = None
+    ihp_category = None
+    ihp_est_amount = None
+    occ_upper = (occtype or "").upper()
+    is_residential = occ_upper.startswith("RES") or building_type.startswith("RES")
+    if is_residential and loss > 0:
+        ihp_eligible = True
+        IHP_MAX = 42_500.0  # FY2025 maximum IHP award
+        struct_loss = struct_pct / 100 * struct_value
+        if struct_loss < 5_000:
+            ihp_category = "minor"
+            ihp_est_amount = min(struct_loss * 0.8, IHP_MAX)
+        elif struct_loss < 20_000:
+            ihp_category = "moderate"
+            ihp_est_amount = min(struct_loss * 0.7, IHP_MAX)
+        elif struct_loss < 50_000:
+            ihp_category = "major"
+            ihp_est_amount = min(struct_loss * 0.6, IHP_MAX)
+        else:
+            ihp_category = "severe"
+            ihp_est_amount = IHP_MAX
+        ihp_est_amount = round(ihp_est_amount, 0)
+    elif is_residential:
+        ihp_eligible = False
+
+    # ── Wind damage (separate peril) ───────────────────────────────
+    # Uses the asymmetric Holland model (wind_field.py) to provide
+    # per-building sustained surface wind speed.  Structural failures
+    # are driven by 3-second gust loading (ASCE 7), not 1-minute
+    # sustained speeds, so we apply a 1.25 gust factor to the damage
+    # calculation (typical ASCE 7 open terrain value is 1.25–1.30).
+    #
+    # The combined loss formula uses "max + 50% secondary" to account
+    # for synergistic wind-water interaction: wind breaches roofs →
+    # rain intrusion amplifies flood damage.  This is standard practice
+    # in cat modeling (RMS, AIR use 40-60% interaction factors).
+    GUST_FACTOR = 1.25  # 3-sec gust / 1-min sustained (ASCE 7 Exposure C)
+    INTERACTION = 0.50  # secondary peril contribution
+    wind_dmg_pct = None
+    wind_loss = None
+    combined_loss = None
+    if wind_speed_mph is not None and wind_speed_mph > 0:
+        effective_wind = wind_speed_mph * GUST_FACTOR
+        wind_dmg_pct = estimate_wind_damage_pct(
+            effective_wind, building_resilience, med_yr_blt,
+        )
+        wind_loss = round(wind_dmg_pct / 100 * struct_value, 0)
+        # Combined: primary peril + 50% of secondary (interaction factor)
+        if wind_loss > loss:
+            combined_loss = round(wind_loss + INTERACTION * loss, 0)
+        else:
+            combined_loss = round(loss + INTERACTION * wind_loss, 0)
 
     return BuildingDamage(
         building_id=building_id,
@@ -411,6 +664,19 @@ def estimate_building_damage(
         found_ht=first_floor_ht_ft,
         val_struct=round(val_struct, 0) if val_struct is not None else None,
         val_cont=round(val_cont, 0) if val_cont is not None else None,
+        wind_damage_pct=wind_dmg_pct,
+        wind_loss_usd=wind_loss,
+        wind_speed_mph=round(wind_speed_mph, 0) if wind_speed_mph is not None else None,
+        combined_loss_usd=combined_loss,
+        loss_low_usd=loss_low,
+        loss_high_usd=loss_high,
+        structure_dmg_pct_low=s_low,
+        structure_dmg_pct_high=s_high,
+        contents_dmg_pct_low=c_low,
+        contents_dmg_pct_high=c_high,
+        ihp_eligible=ihp_eligible,
+        ihp_category=ihp_category,
+        ihp_est_amount=ihp_est_amount,
     )
 
 
@@ -419,6 +685,9 @@ def estimate_damage_from_raster(
     buildings_geojson_path: str,
     output_path: str = "",
     building_type: str = DEFAULT_BUILDING_TYPE,
+    storm_id: Optional[str] = None,
+    landfall_lat: Optional[float] = None,
+    landfall_lon: Optional[float] = None,
 ) -> DamageEstimate:
     """
     Estimate damage for all buildings by sampling flood depth at each location.
@@ -428,6 +697,9 @@ def estimate_damage_from_raster(
         buildings_geojson_path: GeoJSON with building point/polygon features
         output_path: Optional path to write damage results as GeoJSON
         building_type: Default building type (used when feature has no type)
+        storm_id: Storm identifier for IBTrACS wind field lookup (e.g. "michael_2018")
+        landfall_lat: Landfall latitude for wind field snapshot selection
+        landfall_lon: Landfall longitude for wind field snapshot selection
 
     Returns:
         DamageEstimate with per-building and aggregated loss data
@@ -453,6 +725,53 @@ def estimate_damage_from_raster(
             avg_damage_pct=0, max_damage_pct=0,
             damage_by_category={}, buildings=[],
         )
+
+    # ── Census ACS county-level cost (one lookup per cell) ──
+    # Use the cell center as the location for the county lookup.
+    # This replaces the flat $150/sqft fallback for non-NSI buildings.
+    county_cost_per_sqft = None
+    try:
+        from data_ingest.census_fetcher import get_county_home_value
+        # Estimate cell center from the first few building coordinates
+        sample_coords = []
+        for feat in features[:10]:
+            geom = feat.get("geometry", {})
+            c = _get_centroid(geom)
+            if c[0] != 0 and c[1] != 0:
+                sample_coords.append(c)
+        if sample_coords:
+            avg_lon = sum(c[0] for c in sample_coords) / len(sample_coords)
+            avg_lat = sum(c[1] for c in sample_coords) / len(sample_coords)
+            home_val = get_county_home_value(avg_lat, avg_lon)
+            if home_val:
+                county_cost_per_sqft = home_val["cost_per_sqft_est"]
+                logger.info(
+                    "[Census] Using county-level cost: $%.0f/sqft for %s, %s",
+                    county_cost_per_sqft, home_val["county_name"], home_val["state_code"],
+                )
+    except Exception as exc:
+        logger.info("[Census] County cost lookup failed (using defaults): %s", exc)
+
+    # ── Wind field from IBTrACS quadrant radii (Phase 2) ──
+    # Loads the landfall-nearest IBTrACS snapshot and creates an asymmetric
+    # Holland parametric wind model.  Wind speed at each building is queried
+    # individually using the per-quadrant fitted profile.
+    wind_snapshot = None
+    if storm_id and landfall_lat is not None and landfall_lon is not None:
+        try:
+            from damage_model.wind_field import load_landfall_snapshot, get_wind_speed_at_point
+            wind_snapshot = load_landfall_snapshot(storm_id, landfall_lat, landfall_lon)
+            if wind_snapshot:
+                logger.info(
+                    "[WindField] Asymmetric Holland model active — %s | Vmax=%d kt | "
+                    "RMW=%.0f nm | R34 max=%.0f nm",
+                    wind_snapshot.storm_name,
+                    wind_snapshot.max_wind_kt,
+                    wind_snapshot.rmw_m / 1852,
+                    wind_snapshot.r34.max_radius() / 1852,
+                )
+        except Exception as exc:
+            logger.info("[WindField] Wind field init failed (wind damage disabled): %s", exc)
 
     # Open depth raster
     with rasterio.open(depth_raster_path) as src:
@@ -509,6 +828,14 @@ def estimate_damage_from_raster(
                 # Allow 0.1 ft buffer: water at floor level causes moisture/mold damage.
                 continue
 
+            # ── Wind speed from asymmetric Holland model ──
+            bldg_wind_mph = None
+            if wind_snapshot is not None:
+                try:
+                    bldg_wind_mph = get_wind_speed_at_point(wind_snapshot, lat, lon)
+                except Exception:
+                    pass  # wind model failure is non-fatal
+
             damage = estimate_building_damage(
                 depth_m=depth_m, lon=lon, lat=lat,
                 building_type=btype, building_id=str(bid),
@@ -519,6 +846,8 @@ def estimate_damage_from_raster(
                 med_yr_blt=int(props["med_yr_blt"]) if props.get("med_yr_blt") is not None else None,
                 num_story=int(props["num_story"]) if props.get("num_story") is not None else None,
                 occtype=str(props["occtype"]) if props.get("occtype") else None,
+                county_cost_per_sqft=county_cost_per_sqft,
+                wind_speed_mph=bldg_wind_mph,
             )
             # Carry source metadata through so the frontend CSV export can use it
             damage.source       = props.get("source")
@@ -622,6 +951,19 @@ def _write_damage_geojson(
                 "found_ht": b.found_ht,
                 "val_struct": b.val_struct,
                 "val_cont": b.val_cont,
+                "loss_low_usd": b.loss_low_usd,
+                "loss_high_usd": b.loss_high_usd,
+                "structure_dmg_pct_low": b.structure_dmg_pct_low,
+                "structure_dmg_pct_high": b.structure_dmg_pct_high,
+                "contents_dmg_pct_low": b.contents_dmg_pct_low,
+                "contents_dmg_pct_high": b.contents_dmg_pct_high,
+                "ihp_eligible": b.ihp_eligible,
+                "ihp_category": b.ihp_category,
+                "ihp_est_amount": b.ihp_est_amount,
+                "wind_damage_pct": b.wind_damage_pct,
+                "wind_loss_usd": b.wind_loss_usd,
+                "wind_speed_mph": b.wind_speed_mph,
+                "combined_loss_usd": b.combined_loss_usd,
                 "source": b.source,
                 "data_quality": b.data_quality,
                 "occtype": b.occtype,

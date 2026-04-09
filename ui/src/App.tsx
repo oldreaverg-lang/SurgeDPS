@@ -1191,6 +1191,8 @@ function App() {
         p.contents_damage_pct ?? '',
         p.total_damage_pct ?? '',
         p.estimated_loss_usd ?? '',
+        p.loss_low_usd ?? '',
+        p.loss_high_usd ?? '',
         p.val_struct ?? '',
         p.val_cont ?? '',
         p.replacement_value_usd ?? '',
@@ -1198,9 +1200,16 @@ function App() {
         p.num_story ?? '',                         // stories
         csvField(p.damage_category || ''),
         csvField(flag),
+        p.ihp_eligible != null ? (p.ihp_eligible ? 'Y' : 'N') : '',
+        csvField(p.ihp_category || ''),
+        p.ihp_est_amount ?? '',
+        p.wind_speed_mph ?? '',
+        p.wind_damage_pct ?? '',
+        p.wind_loss_usd ?? '',
+        p.combined_loss_usd ?? '',
       ].join(',');
     });
-    const header = 'lat,lon,building_id,source,data_quality,building_type,occupancy_type,surge_depth_ft,foundation_ht_ft,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,val_struct,val_cont,replacement_value_usd,year_built,num_stories,damage_category,field_flag';
+    const header = 'lat,lon,building_id,source,data_quality,building_type,occupancy_type,surge_depth_ft,foundation_ht_ft,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,loss_low_usd,loss_high_usd,val_struct,val_cont,replacement_value_usd,year_built,num_stories,damage_category,field_flag,ihp_eligible,ihp_category,ihp_est_amount,wind_speed_mph,wind_damage_pct,wind_loss_usd,combined_loss_usd';
     const csv = [...summaryLines, header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -1313,8 +1322,20 @@ function App() {
   <tr><td>Contents Value</td><td>${p.val_cont != null ? '$' + Number(p.val_cont).toLocaleString() : 'Not available'}</td></tr>
   <tr><td colspan="2" style="text-align: center; padding-top: 12px">
     <span class="loss-total">Total Modeled Loss: $${(p.estimated_loss_usd ?? 0).toLocaleString()}</span>
+    ${p.loss_low_usd != null && p.loss_high_usd != null ? `<br><span style="font-size:11px;color:#64748b">Loss range (±30% depth uncertainty): $${p.loss_low_usd.toLocaleString()} – $${p.loss_high_usd.toLocaleString()}</span>` : ''}
   </td></tr>
 </table>
+
+${p.ihp_eligible ? `
+<h2>FEMA IHP Eligibility Estimate</h2>
+<table>
+  <tr><td>Eligibility Status</td><td style="color:#059669;font-weight:700">Likely Eligible</td></tr>
+  <tr><td>Damage Category</td><td>${(p.ihp_category || '').charAt(0).toUpperCase() + (p.ihp_category || '').slice(1)}</td></tr>
+  <tr><td>Estimated IHP Award</td><td style="font-weight:700">$${(p.ihp_est_amount ?? 0).toLocaleString()}</td></tr>
+  <tr><td>FY2025 Maximum</td><td>$42,500</td></tr>
+</table>
+<p style="font-size:10px;color:#94a3b8;margin-top:4px">IHP assists owner-occupied primary residences. Actual award depends on FEMA inspection, insurance coverage, and other factors. This is a modeled estimate only.</p>
+` : ''}
 
 ${wwSplit && windMph != null ? `
 <h2>Peril Attribution (Wind vs. Water)</h2>
@@ -1428,6 +1449,8 @@ ${fieldFlag ? `
         p.structure_damage_pct ?? '',
         p.contents_damage_pct ?? '',
         p.estimated_loss_usd ?? '',
+        p.loss_low_usd ?? '',
+        p.loss_high_usd ?? '',
         structLoss ?? '',
         contLoss ?? '',
         p.val_struct ?? '',
@@ -1439,12 +1462,28 @@ ${fieldFlag ? `
         p.med_yr_blt ?? '',
         p.num_story ?? '',
         csvField(flag),
+        p.ihp_eligible != null ? (p.ihp_eligible ? 'Y' : 'N') : '',
+        csvField(p.ihp_category || ''),
+        p.ihp_est_amount ?? '',
+        p.wind_speed_mph ?? '',
+        p.wind_damage_pct ?? '',
+        p.wind_loss_usd ?? '',
+        p.combined_loss_usd ?? '',
       ].join(',');
     });
 
-    // Category counts
+    // Category counts and IHP totals
     const catCounts: Record<string, number> = { minor: 0, moderate: 0, major: 0, severe: 0 };
-    damaged.forEach((f: any) => { const c = f.properties?.damage_category; if (c && catCounts[c] !== undefined) catCounts[c]++; });
+    let ihpTotal = 0;
+    let ihpCount = 0;
+    damaged.forEach((f: any) => {
+      const c = f.properties?.damage_category;
+      if (c && catCounts[c] !== undefined) catCounts[c]++;
+      if (f.properties?.ihp_est_amount) { ihpTotal += f.properties.ihp_est_amount; ihpCount++; }
+    });
+
+    const totalLossLow = damaged.reduce((s: number, f: any) => s + (f.properties?.loss_low_usd || f.properties?.estimated_loss_usd || 0), 0);
+    const totalLossHigh = damaged.reduce((s: number, f: any) => s + (f.properties?.loss_high_usd || f.properties?.estimated_loss_usd || 0), 0);
 
     const lines = [
       `# ═══════════════════════════════════════════════════════════════`,
@@ -1461,19 +1500,26 @@ ${fieldFlag ? `
       `#   Minor Damage (repairable): ${catCounts.moderate.toLocaleString()}`,
       `#   Major Damage (uninhabitable): ${catCounts.major.toLocaleString()}`,
       `#   Destroyed (total loss): ${catCounts.severe.toLocaleString()}`,
-      `# Total Modeled Loss: $${(totalLoss / 1e6).toFixed(1)}M`,
+      `# Total Modeled Loss: $${(totalLoss / 1e6).toFixed(1)}M (range: $${(totalLossLow / 1e6).toFixed(1)}M – $${(totalLossHigh / 1e6).toFixed(1)}M)`,
+      `# Est. FEMA IHP Assistance: $${(ihpTotal / 1e6).toFixed(1)}M across ${ihpCount.toLocaleString()} eligible residences`,
       `#`,
       `# COLUMN GUIDE`,
       `# claim_ref: Unique identifier for cross-referencing (SDC = SurgeDPS Claim)`,
       `# interior_flood_ft: Surge depth above first finished floor (the real damage driver)`,
+      `# loss_low/high_usd: Loss range from ±30% depth uncertainty bracketing`,
       `# wind_pct / water_pct: Modeled peril attribution for coverage determination`,
+      `# wind_speed_mph: StormDPS modeled wind speed at building location`,
+      `# wind_damage_pct / wind_loss_usd: Wind-only damage estimate from StormDPS vulnerability curves`,
+      `# combined_loss_usd: Surge + 30% × wind (avoids double-counting co-located perils)`,
       `# data_quality: 0.0–1.0 reliability of source building data (higher = more trustworthy)`,
+      `# ihp_eligible: FEMA Individual & Households Program eligibility estimate (Y/N)`,
+      `# ihp_est_amount: Estimated IHP payout (capped at FY2025 maximum $42,500)`,
       `# field_flag: Adjuster annotation set in SurgeDPS (blank = not yet inspected)`,
       `#`,
       `# MODELED ESTIMATE — NOT FIELD VERIFIED. Use as initial triage; confirm with field inspection.`,
       `# Cells loaded: ${loadedCells.size} — export covers loaded cells only.`,
       `#`,
-      `seq,claim_ref,lat,lon,building_type,occupancy_type,damage_severity,surge_depth_ft,foundation_ht_ft,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_loss_usd,structure_loss_usd,contents_loss_usd,val_struct,val_cont,wind_pct,water_pct,data_source,data_quality,year_built,num_stories,field_flag`,
+      `seq,claim_ref,lat,lon,building_type,occupancy_type,damage_severity,surge_depth_ft,foundation_ht_ft,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_loss_usd,loss_low_usd,loss_high_usd,structure_loss_usd,contents_loss_usd,val_struct,val_cont,wind_pct,water_pct,data_source,data_quality,year_built,num_stories,field_flag,ihp_eligible,ihp_category,ihp_est_amount,wind_speed_mph,wind_damage_pct,wind_loss_usd,combined_loss_usd`,
       ...rows,
     ];
 
@@ -2248,7 +2294,56 @@ ${fieldFlag ? `
                       <p className="flex justify-between"><span className="text-gray-500">Structure:</span> <span className="font-medium">{structPct}%{structLoss != null ? ` ($${structLoss.toLocaleString()})` : ''}</span></p>
                       <p className="flex justify-between"><span className="text-gray-500">Contents:</span> <span className="font-medium">{contPct}%{contLoss != null ? ` ($${contLoss.toLocaleString()})` : ''}</span></p>
                       <p className="flex justify-between text-sm"><span className="text-gray-500">Total loss:</span> <span className="font-bold text-red-600">${(p.estimated_loss_usd ?? 0).toLocaleString()}</span></p>
-                      <p className="text-[10px] text-gray-400 mt-0.5">Modeled repair cost (FEMA HAZUS depth-damage curves)</p>
+                      {/* Loss confidence interval from ±30% depth uncertainty */}
+                      {p.loss_low_usd != null && p.loss_high_usd != null && (
+                        <div className="bg-gray-50 rounded px-2 py-1 mt-0.5 border border-gray-200">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-gray-500">Loss range (±30% depth):</span>
+                          </div>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span className="text-[10px] text-green-700 font-bold">${p.loss_low_usd.toLocaleString()}</span>
+                            <div className="flex-1 h-1.5 rounded-full bg-gradient-to-r from-green-300 via-yellow-300 to-red-400 relative">
+                              {p.estimated_loss_usd != null && p.loss_high_usd > p.loss_low_usd && (
+                                <div className="absolute top-[-1px] w-1.5 h-2 bg-white border border-gray-600 rounded-sm" style={{ left: `${Math.min(100, ((p.estimated_loss_usd - p.loss_low_usd) / (p.loss_high_usd - p.loss_low_usd)) * 100)}%` }} />
+                              )}
+                            </div>
+                            <span className="text-[10px] text-red-700 font-bold">${p.loss_high_usd.toLocaleString()}</span>
+                          </div>
+                        </div>
+                      )}
+                      <p className="text-[10px] text-gray-400 mt-0.5">Surge/flood loss (FEMA HAZUS depth-damage curves)</p>
+                      {/* Wind damage from StormDPS wind model */}
+                      {p.wind_damage_pct != null && p.wind_damage_pct > 0 && (
+                        <div className="bg-sky-50 rounded px-2 py-1 mt-1 border border-sky-200">
+                          <div className="flex justify-between text-[10px]">
+                            <span className="text-sky-700 font-bold">Wind Damage: {p.wind_damage_pct}%</span>
+                            <span className="text-sky-700 font-bold">${(p.wind_loss_usd ?? 0).toLocaleString()}</span>
+                          </div>
+                          {p.combined_loss_usd != null && (
+                            <div className="flex justify-between text-[11px] mt-0.5 pt-0.5 border-t border-sky-200">
+                              <span className="font-bold text-gray-700">Combined Loss (Surge + Wind):</span>
+                              <span className="font-bold text-red-700">${p.combined_loss_usd.toLocaleString()}</span>
+                            </div>
+                          )}
+                          <p className="text-[9px] text-sky-500 mt-0.5">Wind model: StormDPS Emanuel/HAZUS curve{p.wind_speed_mph ? ` at ${p.wind_speed_mph} mph` : ''}</p>
+                        </div>
+                      )}
+                      {/* FEMA IHP eligibility estimate */}
+                      {p.ihp_eligible != null && (
+                        <div className={`mt-1 rounded px-2 py-1 border text-[10px] ${p.ihp_eligible ? 'bg-emerald-50 border-emerald-200' : 'bg-gray-50 border-gray-200'}`}>
+                          <div className="flex justify-between items-center">
+                            <span className={`font-bold uppercase tracking-wider ${p.ihp_eligible ? 'text-emerald-700' : 'text-gray-500'}`}>
+                              FEMA IHP: {p.ihp_eligible ? 'Likely Eligible' : 'Not Eligible'}
+                            </span>
+                            {p.ihp_est_amount != null && (
+                              <span className="font-bold text-emerald-700">Est. ${p.ihp_est_amount.toLocaleString()}</span>
+                            )}
+                          </div>
+                          {p.ihp_category && (
+                            <p className="text-gray-500 mt-0.5">Category: {p.ihp_category.charAt(0).toUpperCase() + p.ihp_category.slice(1)} — Owner-occupied residential only</p>
+                          )}
+                        </div>
+                      )}
                       {/* Deductible threshold flag */}
                       {p.estimated_loss_usd != null && (() => {
                         const loss = p.estimated_loss_usd;
@@ -2267,6 +2362,7 @@ ${fieldFlag ? `
                         <>
                         <hr className="border-gray-200 !my-1.5" />
                         <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Peril Attribution</div>
+                        <p className="text-[9px] text-gray-500 mb-0.5">Peril split uses StormDPS wind model + HAZUS flood curves.</p>
                         <p className="flex justify-between"><span className="text-gray-500">Est. wind:</span> <span className="font-medium">{estWindMph} mph</span></p>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <div className="flex-1 h-3 rounded-full overflow-hidden bg-gray-200 flex">

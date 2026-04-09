@@ -53,7 +53,8 @@ from validation.ground_truth import get_ground_truth
 from storm_catalog.forecast_track import fetch_forecast_track, fetch_forecast_cone
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'cells')
+PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(BASE_DIR, 'tmp_integration'))
+CACHE_DIR = os.path.join(PERSISTENT_DIR, 'cells')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ── DPS Score Lookup (from StormDPS compiled_bundle) ──
@@ -147,7 +148,7 @@ import hashlib as _hashlib
 import urllib.request as _urllib_request
 
 # ── Persistent Nominatim geocoding cache ──
-_GEOCODE_CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'geocode')
+_GEOCODE_CACHE_DIR = os.path.join(PERSISTENT_DIR, 'geocode')
 os.makedirs(_GEOCODE_CACHE_DIR, exist_ok=True)
 _NOMINATIM_HEADERS = {'User-Agent': 'SurgeDPS/1.0 (surgedps.com)'}
 _last_nominatim_call = 0.0  # rate-limit: 1 req/sec
@@ -384,9 +385,14 @@ def load_cell(col: int, row: int) -> dict:
         _progress.update(step='Complete', step_num=4)
         return {"buildings": empty, "flood": flood_data}
 
-    # 4. Run HAZUS damage model
+    # 4. Run HAZUS damage model (with IBTrACS wind field when available)
     _progress.update(step='Running damage model', step_num=4)
-    estimate_damage_from_raster(raster_path, buildings_path, damage_path)
+    estimate_damage_from_raster(
+        raster_path, buildings_path, damage_path,
+        storm_id=storm.storm_id,
+        landfall_lat=storm.landfall_lat,
+        landfall_lon=storm.landfall_lon,
+    )
 
     with open(damage_path) as f:
         damage_data = json.load(f)
@@ -768,7 +774,12 @@ class CellHandler(BaseHTTPRequestHandler):
             with open(buildings_path) as f:
                 buildings_data = json.load(f)
             if buildings_data.get("features"):
-                estimate_damage_from_raster(raster_path, buildings_path, damage_path)
+                estimate_damage_from_raster(
+                    raster_path, buildings_path, damage_path,
+                    storm_id=sim_storm.storm_id,
+                    landfall_lat=sim_storm.landfall_lat,
+                    landfall_lon=sim_storm.landfall_lon,
+                )
             else:
                 with open(damage_path, 'w') as f:
                     json.dump({"type": "FeatureCollection", "features": []}, f)

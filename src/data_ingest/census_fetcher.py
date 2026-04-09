@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 # ── Persistent disk cache (survives restarts on Railway volume) ──────────
 _BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-_CENSUS_CACHE_DIR = os.path.join(_BASE_DIR, 'tmp_integration', 'census')
+_PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(_BASE_DIR, 'tmp_integration'))
+_CENSUS_CACHE_DIR = os.path.join(_PERSISTENT_DIR, 'census')
 os.makedirs(_CENSUS_CACHE_DIR, exist_ok=True)
 
 _SESSION = requests.Session()
@@ -200,6 +201,93 @@ def get_county_population(state_fips: str, county_fips: str) -> Optional[Dict]:
         logger.info("[Census] ACS fallback failed: %s", exc)
 
     return None
+
+
+def get_median_home_value(state_fips: str, county_fips: str) -> Optional[Dict]:
+    """
+    Query Census ACS 5-year estimates for median home value in a county.
+
+    Uses ACS variable B25077_001E (Median Value for Owner-Occupied Housing Units).
+    This is the best freely available proxy for per-county replacement costs
+    when NSI val_struct is unavailable (OSM/MSFT buildings).
+
+    Returns:
+        {"median_home_value": 215000, "name": "Bay County, Florida",
+         "vintage": 2022, "cost_per_sqft_est": 135.0}
+        or None on failure.
+    """
+    cache_key = f"acs_home_val:{state_fips}:{county_fips}"
+    cached = _read_cache(cache_key)
+    if cached:
+        return cached
+
+    # Try ACS 5-year vintages from newest to oldest
+    for vintage in (2022, 2021, 2020):
+        url = f"https://api.census.gov/data/{vintage}/acs/acs5"
+        try:
+            resp = _SESSION.get(url, params={
+                "get": "B25077_001E,B25035_001E,NAME",
+                "for": f"county:{county_fips}",
+                "in": f"state:{state_fips}",
+            }, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if len(data) >= 2:
+                    headers = data[0]
+                    values = data[1]
+                    val_idx = next((i for i, h in enumerate(headers) if h == "B25077_001E"), None)
+                    yr_idx = next((i for i, h in enumerate(headers) if h == "B25035_001E"), None)
+                    name_idx = next((i for i, h in enumerate(headers) if h == "NAME"), None)
+
+                    if val_idx is not None and values[val_idx] is not None:
+                        median_val = int(values[val_idx])
+                        if median_val <= 0:
+                            continue
+                        median_yr = int(values[yr_idx]) if yr_idx is not None and values[yr_idx] else None
+                        # Estimate $/sqft assuming median single-family ~1,600 sqft
+                        # (national Census median). Rough but better than flat $150.
+                        cost_per_sqft = median_val / 1600.0
+                        result = {
+                            "median_home_value": median_val,
+                            "median_year_built": median_yr,
+                            "name": values[name_idx] if name_idx is not None else None,
+                            "vintage": vintage,
+                            "cost_per_sqft_est": round(cost_per_sqft, 1),
+                        }
+                        _write_cache(cache_key, result)
+                        return result
+        except Exception as exc:
+            logger.info("[Census] ACS home value vintage %d failed: %s", vintage, exc)
+            continue
+
+    return None
+
+
+def get_county_home_value(lat: float, lon: float) -> Optional[Dict]:
+    """
+    High-level: get median home value context for a coordinate.
+
+    Returns:
+        {"county_name": "Bay County", "state_code": "FL",
+         "median_home_value": 215000, "cost_per_sqft_est": 135.0}
+        or None.
+    """
+    county = get_county_fips(lat, lon)
+    if not county:
+        return None
+
+    val = get_median_home_value(county["state_fips"], county["county_fips"])
+    if not val:
+        return None
+
+    return {
+        "county_name": county["county_name"],
+        "state_code": county["state_code"],
+        "full_fips": county["full_fips"],
+        "median_home_value": val["median_home_value"],
+        "cost_per_sqft_est": val["cost_per_sqft_est"],
+        "vintage": val["vintage"],
+    }
 
 
 def get_population_context(lat: float, lon: float) -> Optional[Dict]:
