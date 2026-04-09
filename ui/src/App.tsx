@@ -1152,7 +1152,6 @@ function App() {
       if (!loadedCells.has(cellKey(c, r))) continue;
       for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
         const nc = c + dc, nr = r + dr;
-        if (nc < 0 || nr < 0) continue; // Skip invalid negative cell coordinates
         const nk = cellKey(nc, nr);
         if (!seen.has(nk)) {
           seen.add(nk);

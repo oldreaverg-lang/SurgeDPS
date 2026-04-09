@@ -49,17 +49,21 @@ def estimate_peak_surge_ft(max_wind_kt: int, min_pressure_mb: int) -> float:
       Cat 4 (120 kt, 935 mb) →  ~14-20 ft
       Cat 5 (140 kt, 920 mb) →  ~18-26 ft
     """
-    # Wind-based component: calibrated against SLOSH output for
-    # Gulf Coast and Atlantic landfalls (Ike, Katrina, Harvey, Sandy, Ian)
+    # Wind-based component — cubic power law calibrated against observed peaks:
+    #   Sandy  (80 kt,  940 mb) →  9 ft at Battery Park    (model:  9.0 ft, 0%)
+    #   Ike    (100 kt, 950 mb) → 15 ft at Galveston        (model: 13.3 ft, -11%)
+    #   Katrina(125 kt, 918 mb) → 25 ft at Pass Christian   (model: 24.4 ft, -2%)
+    # Old linear formula (0.013 * mph^1.56) overcounted Sandy by +36%.
+    # Cubic exponent (3.0) gives better scaling across Cat 1-5 range.
     wind_mph = max_wind_kt * 1.15078
-    surge_wind = 0.013 * (wind_mph ** 1.56)
+    surge_wind = 0.0000118 * (wind_mph ** 3.0)
 
     # Pressure deficit component (1013 mb = standard atmosphere)
     # Captures storm-size effect: large low-pressure systems push more water
     dp = max(1013 - min_pressure_mb, 0)
     surge_pressure = 0.12 * dp
 
-    # Blend: wind dominant, pressure corrects for size/surge setup at sea
+    # Blend: wind dominant (55%), pressure corrects for large/slow storms (45%)
     return 0.55 * surge_wind + 0.45 * surge_pressure
 
 
