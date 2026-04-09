@@ -1841,8 +1841,8 @@ function App() {
                       <button
                         onClick={() => { handleExportPDA(); setMoreMenuOpen(false); }}
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
-                        title="Export FEMA Preliminary Damage Assessment summary"
-                      >📋 FEMA PDA Export</button>
+                        title="Export FEMA Preliminary Damage Assessment summary — data will only include loaded cells"
+                      >📋 PDA Report (.csv)</button>
                     </div>
                   </>
                 )}

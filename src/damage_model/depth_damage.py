@@ -485,6 +485,20 @@ def estimate_damage_from_raster(
             val_cont   = props.get("val_cont")     # NSI: actual contents value
             found_ht   = props.get("found_ht")     # NSI: first-floor elevation
 
+            # ── Inundation mask ──────────────────────────────────────────────
+            # Only assess HAZUS damage for buildings where surge actually
+            # reaches the first finished floor.  The parametric raster assigns
+            # small non-zero depths to every grid point (noise floor ~0.05 m)
+            # so without this check all buildings in the cell get some loss.
+            # We resolve foundation height here using the same priority order
+            # as estimate_building_damage(), then skip buildings that are dry.
+            depth_ft = depth_m * 3.28084
+            ffh = (float(found_ht) if found_ht is not None
+                   else DEFAULT_FFH_FT.get(btype, 1.0))
+            if depth_ft <= ffh:
+                # Surge doesn't reach the first floor — building is not flooded.
+                continue
+
             damage = estimate_building_damage(
                 depth_m=depth_m, lon=lon, lat=lat,
                 building_type=btype, building_id=str(bid),
