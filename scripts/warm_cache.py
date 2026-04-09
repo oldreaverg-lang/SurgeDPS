@@ -1,16 +1,15 @@
 """
-Pre-warm 3×3 grid cache for all storms visible in the sidebar.
+Pre-warm grid cache for all storms visible in the sidebar.
 
-Generates the surge raster, flood GeoJSON, building data, and damage
-model output for the full 3×3 grid (9 cells) around each storm's
-landfall so the initial view is fully loaded on first activation.
+- Curated historic storms (Katrina, Harvey, Ian, etc.): 5×5 grid (25 cells)
+- All other sidebar storms (2015+ HURDAT2): 3×3 grid (9 cells)
 
-Run at deploy time (background process alongside the API server):
-    python scripts/warm_cache.py &
-    python scripts/api_server.py
+Generates surge raster, flood GeoJSON, building data, and HAZUS damage
+model output per cell. Run at deploy time as a background process.
 
 The script is idempotent — already-cached cells are skipped, so
-re-deploys only generate new/missing data.
+re-deploys only generate new/missing data. Failed cells are retried
+up to 3 times with a 30s delay between sweeps.
 """
 
 import json
@@ -46,19 +45,37 @@ def _storm_cache_dir(storm: StormEntry) -> str:
     return d
 
 
-# 3×3 grid: all cells visible on the default zoom level
-WARM_CELLS = [
+# 3×3 grid: standard for all storms
+WARM_CELLS_3x3 = [
     (col, row)
     for row in range(-1, 2)
     for col in range(-1, 2)
 ]
 
+# 5×5 grid: expanded coverage for high-traffic historic storms
+WARM_CELLS_5x5 = [
+    (col, row)
+    for row in range(-2, 3)
+    for col in range(-2, 3)
+]
+
+# Storm IDs from the curated HISTORICAL_STORMS list get the 5×5 treatment
+_HISTORIC_IDS = {s.storm_id for s in HISTORICAL_STORMS}
+
+
+def _warm_cells_for(storm: StormEntry) -> list[tuple[int, int]]:
+    """Return which cells to warm: 5×5 for curated historic storms, 3×3 for others."""
+    if storm.storm_id in _HISTORIC_IDS:
+        return WARM_CELLS_5x5
+    return WARM_CELLS_3x3
+
 
 def _cached_cells(storm: StormEntry) -> set[tuple[int, int]]:
-    """Return which of the 3×3 cells are already cached."""
+    """Return which of the storm's target cells are already cached."""
     sdir = _storm_cache_dir(storm)
+    target = _warm_cells_for(storm)
     cached = set()
-    for col, row in WARM_CELLS:
+    for col, row in target:
         if (os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')) and
                 os.path.exists(os.path.join(sdir, f'cell_{col}_{row}_flood.geojson'))):
             cached.add((col, row))
@@ -160,8 +177,10 @@ def main():
     RETRY_DELAY = 30  # seconds between retry sweeps
 
     storms = collect_sidebar_storms()
-    total_cells = len(storms) * len(WARM_CELLS)
-    print(f"Found {len(storms)} storms × {len(WARM_CELLS)} cells = {total_cells} cells to warm")
+    historic_count = sum(1 for s in storms if s.storm_id in _HISTORIC_IDS)
+    other_count = len(storms) - historic_count
+    total_cells = historic_count * len(WARM_CELLS_5x5) + other_count * len(WARM_CELLS_3x3)
+    print(f"Found {len(storms)} storms ({historic_count} historic→5×5, {other_count} others→3×3) = {total_cells} cells to warm")
 
     cells_generated = 0
     storms_cached = 0
@@ -171,15 +190,18 @@ def main():
     # ── Main pass ──
     for i, storm in enumerate(storms, 1):
         tag = f"[{i}/{len(storms)}] {storm.storm_id}"
+        target = _warm_cells_for(storm)
         already = _cached_cells(storm)
 
-        if len(already) == len(WARM_CELLS):
-            print(f"  {tag} — all 9 cells cached, skipping")
+        if len(already) == len(target):
+            grid_label = '5×5' if storm.storm_id in _HISTORIC_IDS else '3×3'
+            print(f"  {tag} — all {len(target)} cells ({grid_label}) cached, skipping")
             storms_cached += 1
             continue
 
-        missing = [c for c in WARM_CELLS if c not in already]
-        print(f"  {tag} — generating {len(missing)} cell(s) ({len(already)} cached)...")
+        missing = [c for c in target if c not in already]
+        grid_label = '5×5' if storm.storm_id in _HISTORIC_IDS else '3×3'
+        print(f"  {tag} — {grid_label}: generating {len(missing)} cell(s) ({len(already)} cached)...")
         t1 = time.time()
 
         for col, row in missing:

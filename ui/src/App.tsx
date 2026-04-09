@@ -785,11 +785,9 @@ function App() {
     setAddressSearching(true);
     setAddressError('');
     if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; }
-    fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`, {
-      headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' },
-    })
+    fetch(`/surgedps/api/geocode/search?q=${encodeURIComponent(q)}`)
       .then(r => r.json())
-      .then((results: any[]) => {
+      .then((data: any) => { const results: any[] = data?.results || [];
         if (results.length === 0) { setAddressError('Address not found'); return; }
         const gLon = parseFloat(results[0].lon), gLat = parseFloat(results[0].lat);
         // Find nearest building within 200m and auto-select it
@@ -829,12 +827,11 @@ function App() {
       if (batchAbortRef.current) break;
       const addr = lines[idx];
       try {
-        const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1`, {
-          headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' },
-        });
-        const data = await r.json();
-        if (!data.length) { results.push({ address: addr, status: 'not found' }); continue; }
-        const lon = parseFloat(data[0].lon), lat = parseFloat(data[0].lat);
+        const r = await fetch(`/surgedps/api/geocode/search?q=${encodeURIComponent(addr)}`);
+        const geoData = await r.json();
+        const geoResults = geoData?.results || [];
+        if (!geoResults.length) { results.push({ address: addr, status: 'not found' }); continue; }
+        const lon = parseFloat(geoResults[0].lon), lat = parseFloat(geoResults[0].lat);
         // Find nearest building within ~200m (haversine)
         let nearest: any = null, minDist = Infinity;
         for (const f of allBuildings.features) {
@@ -849,8 +846,8 @@ function App() {
           results.push({ address: addr, status: 'no building nearby', lat, lon });
         }
       } catch { results.push({ address: addr, status: 'geocode error' }); }
-      // Nominatim rate limit: 1 req/sec
-      if (idx < lines.length - 1) await new Promise(r => setTimeout(r, 1100));
+      // Server handles Nominatim rate limiting; small delay for UI responsiveness
+      if (idx < lines.length - 1) await new Promise(r => setTimeout(r, 200));
     }
     setBatchResults(results);
     setBatchLoading(false);
@@ -1302,18 +1299,12 @@ function App() {
       // Pre-populate so we don't fire duplicate requests
       geocodeCache.current[cacheKey] = '';
       fetch(
-        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
-        { signal: controller.signal, headers: { 'User-Agent': 'SurgeDPS/1.0 (surgedps.com)' } }
+        `/surgedps/api/geocode/reverse?lat=${lat}&lon=${lng}`,
+        { signal: controller.signal }
       )
         .then(r => r.json())
         .then(data => {
-          const addr = data?.address || {};
-          const parts = [
-            addr.house_number,
-            addr.road,
-            addr.city || addr.town || addr.village || addr.hamlet,
-          ].filter(Boolean);
-          const label = parts.length > 1 ? parts.join(', ') : null;
+          const label = data?.label || null;
           geocodeCache.current[cacheKey] = label || '';
           setHoverAddress(label);
         })

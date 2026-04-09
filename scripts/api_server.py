@@ -109,6 +109,74 @@ def _compute_eli(dps_score: float, building_count: int) -> dict:
 
 
 import math as _math
+import hashlib as _hashlib
+import urllib.request as _urllib_request
+
+# ── Persistent Nominatim geocoding cache ──
+_GEOCODE_CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'geocode')
+os.makedirs(_GEOCODE_CACHE_DIR, exist_ok=True)
+_NOMINATIM_HEADERS = {'User-Agent': 'SurgeDPS/1.0 (surgedps.com)'}
+_last_nominatim_call = 0.0  # rate-limit: 1 req/sec
+
+
+def _geocode_cache_path(key: str) -> str:
+    h = _hashlib.md5(key.encode()).hexdigest()
+    return os.path.join(_GEOCODE_CACHE_DIR, f'{h}.json')
+
+
+def _rate_limit_nominatim():
+    """Ensure at least 1 second between Nominatim requests."""
+    global _last_nominatim_call
+    elapsed = _time.time() - _last_nominatim_call
+    if elapsed < 1.0:
+        _time.sleep(1.0 - elapsed)
+    _last_nominatim_call = _time.time()
+
+
+def _geocode_reverse(lat: float, lon: float) -> dict:
+    """Reverse-geocode via Nominatim with persistent disk cache."""
+    cache_key = f'reverse:{lat:.5f},{lon:.5f}'
+    cp = _geocode_cache_path(cache_key)
+    if os.path.exists(cp):
+        with open(cp) as f:
+            return json.load(f)
+
+    _rate_limit_nominatim()
+    url = f'https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json'
+    req = _urllib_request.Request(url, headers=_NOMINATIM_HEADERS)
+    with _urllib_request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+
+    addr = data.get('address', {})
+    parts = [addr.get('house_number'), addr.get('road'),
+             addr.get('city') or addr.get('town') or addr.get('village') or addr.get('hamlet')]
+    label = ', '.join(p for p in parts if p) or None
+    result = {'label': label, 'address': addr}
+
+    with open(cp, 'w') as f:
+        json.dump(result, f)
+    return result
+
+
+def _geocode_forward(query: str) -> dict:
+    """Forward-geocode via Nominatim with persistent disk cache."""
+    cache_key = f'forward:{query.lower()}'
+    cp = _geocode_cache_path(cache_key)
+    if os.path.exists(cp):
+        with open(cp) as f:
+            return json.load(f)
+
+    _rate_limit_nominatim()
+    q = _urllib_request.quote(query)
+    url = f'https://nominatim.openstreetmap.org/search?q={q}&format=json&limit=1'
+    req = _urllib_request.Request(url, headers=_NOMINATIM_HEADERS)
+    with _urllib_request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+
+    result = {'results': data}
+    with open(cp, 'w') as f:
+        json.dump(result, f)
+    return result
 
 # R11: Regional building count baselines (median from HAZUS data per region)
 _REGIONAL_BLDG_BASELINE = {
@@ -374,10 +442,12 @@ class CellHandler(BaseHTTPRequestHandler):
             print(f"  Grid origin: ({storm.grid_origin_lon}, {storm.grid_origin_lat})")
             print(f"{'='*60}\n")
 
-            # Load the 3×3 grid around landfall so the initial view is
-            # fully populated.  Cached cells return instantly; uncached
-            # ones are generated on the fly (and cached for next time).
-            _ACTIVATE_CELLS = [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
+            # Load all pre-cached cells around landfall.  Historic storms
+            # get a 5×5 grid; others get 3×3.  Cached cells return instantly;
+            # uncached ones are generated on the fly (and cached for next time).
+            _is_historic = storm.storm_id in {s.storm_id for s in HISTORICAL_STORMS}
+            _ACTIVATE_CELLS = [(c, r) for r in range(-2, 3) for c in range(-2, 3)] if _is_historic \
+                else [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
             total_act = len(_ACTIVATE_CELLS) * 4  # 4 steps per cell
             _progress.update(step='Initializing', step_num=0, total_steps=total_act,
                              started_at=_time.time(), storm_id=storm.storm_id)
@@ -472,6 +542,33 @@ class CellHandler(BaseHTTPRequestHandler):
             })
             return
 
+        # ── GET /api/geocode/reverse?lat=N&lon=N ── cached reverse geocoding
+        if path == '/api/geocode/reverse':
+            lat = params.get('lat', [''])[0]
+            lon = params.get('lon', [''])[0]
+            if not lat or not lon:
+                self._send_error(400, 'Missing lat/lon')
+                return
+            try:
+                result = _geocode_reverse(float(lat), float(lon))
+                self._send_json(200, result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/geocode/search?q=address ── cached forward geocoding
+        if path == '/api/geocode/search':
+            q = params.get('q', [''])[0]
+            if not q:
+                self._send_error(400, 'Missing ?q= parameter')
+                return
+            try:
+                result = _geocode_forward(q.strip())
+                self._send_json(200, result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
         # ── GET /api/health ──
         if path == '/api/health':
             self._send_json(200, {'status': 'ok', 'active_storm': _active_storm.storm_id if _active_storm else None})
@@ -507,7 +604,15 @@ class CellHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_raw(self, code, body: bytes):
-        self.send_response(code)
+        # Gzip compress large responses (>1 KB) if client supports it
+        accept_enc = self.headers.get('Accept-Encoding', '')
+        if len(body) > 1024 and 'gzip' in accept_enc:
+            import gzip as _gzip
+            body = _gzip.compress(body, compresslevel=6)
+            self.send_response(code)
+            self.send_header('Content-Encoding', 'gzip')
+        else:
+            self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Content-Length', str(len(body)))
