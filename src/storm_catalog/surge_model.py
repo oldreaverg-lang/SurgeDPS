@@ -35,7 +35,7 @@ import numpy as np
 
 # Increment whenever the surge formula changes so warm_cache.py can detect
 # and regenerate stale cells automatically.
-SURGE_MODEL_VERSION = "cubic-v3-rmax"
+SURGE_MODEL_VERSION = "cubic-v4-coastal"
 
 
 def estimate_peak_surge_ft(
@@ -99,17 +99,21 @@ def estimate_peak_surge_ft(
 # Known peak surge observations (feet) at primary landfall location.
 # Parameters match the catalog exactly so the check reflects real model output.
 #
-# Format: name → (wind_kt, pressure_mb, rmax_nm, observed_ft, tolerance, location, note)
+# Format: name → (wind_kt, pressure_mb, rmax_nm, observed_ft, tolerance, location, landfall_lat, landfall_lon, note)
 # Per-storm tolerance: Harvey is anomalous (slow/curved track limits surge despite
 # high winds) so gets a wider band. All others use ±35%.
+#
+# Landfall coords are used to apply the coastal geometry correction so the
+# sanity check validates the full pipeline (base × coastal factor), not just
+# the raw parametric formula.
 _SURGE_REFERENCE = {
-    #                          kt   mb    rmax  obs    tol   location              note
-    "Sandy (2012)":         (  70,  940,  30.0,  9.0, 0.35, "Battery Park, NY",    ""),
-    "Katrina (2005)":       ( 110,  920,  35.0, 25.0, 0.35, "Pass Christian, MS",  "Cat 3 at landfall"),
-    "Ike (2008)":           (  95,  950,  35.0, 15.0, 0.35, "Galveston, TX",       ""),
-    "Harvey (2017)":        ( 115,  938,  25.0, 10.0, 0.60, "Rockport, TX",        "anomalous slow/curved track"),
-    "Michael (2018)":       ( 140,  919,  17.0, 11.0, 0.35, "Mexico Beach, FL",    "compact Cat 5"),
-    "Charley (2004)":       ( 130,  941,   8.0,  7.0, 0.35, "Punta Gorda, FL",     "very compact Cat 4"),
+    #                          kt   mb    rmax  obs    tol   location               lat      lon      note
+    "Sandy (2012)":         (  70,  940,  30.0,  9.0, 0.35, "Battery Park, NY",    40.7,  -74.0,    ""),
+    "Katrina (2005)":       ( 110,  920,  35.0, 25.0, 0.35, "Pass Christian, MS",  30.3,  -89.4,    "Cat 3 at landfall"),
+    "Ike (2008)":           (  95,  950,  35.0, 15.0, 0.35, "Galveston, TX",       29.3,  -94.8,    ""),
+    "Harvey (2017)":        ( 115,  938,  25.0, 10.0, 0.60, "Rockport, TX",        28.0,  -97.0,    "anomalous slow/curved track"),
+    "Michael (2018)":       ( 140,  919,  17.0, 11.0, 0.35, "Mexico Beach, FL",    29.9,  -85.4,    "compact Cat 5"),
+    "Charley (2004)":       ( 130,  941,   8.0,  7.0, 0.35, "Punta Gorda, FL",     26.9,  -82.1,    "very compact Cat 4"),
 }
 
 
@@ -130,10 +134,14 @@ def validate_surge_model() -> list[str]:
         Katrina (2005): observed 25.0 ft, model 21.6 ft  (-14%)  ✓
         ...
     """
+    from storm_catalog.coastal_correction import get_coastal_factor
+
     warnings = []
     lines = []
-    for name, (wind_kt, pressure_mb, rmax_nm, observed_ft, tolerance, location, note) in _SURGE_REFERENCE.items():
-        modeled_ft = estimate_peak_surge_ft(wind_kt, pressure_mb, rmax_nm=rmax_nm)
+    for name, (wind_kt, pressure_mb, rmax_nm, observed_ft, tolerance, location, landfall_lat, landfall_lon, note) in _SURGE_REFERENCE.items():
+        base_ft = estimate_peak_surge_ft(wind_kt, pressure_mb, rmax_nm=rmax_nm)
+        coastal_factor = get_coastal_factor(landfall_lat, landfall_lon)
+        modeled_ft = base_ft * coastal_factor
         pct_err = (modeled_ft - observed_ft) / observed_ft
         ok = abs(pct_err) <= tolerance
         flag = "✓" if ok else f"✗ EXCEEDS ±{tolerance:.0%}"
@@ -141,13 +149,15 @@ def validate_surge_model() -> list[str]:
         line = (
             f"  {name:<20} ({location}): "
             f"observed {observed_ft:5.1f} ft, model {modeled_ft:5.1f} ft "
+            f"(base {base_ft:.1f} × coastal {coastal_factor:.3f}) "
             f"({pct_err:+.0%})  {flag}{note_str}"
         )
         lines.append(line)
         if not ok:
             warnings.append(
                 f"SURGE MODEL WARNING — {name}: observed {observed_ft:.1f} ft, "
-                f"model {modeled_ft:.1f} ft ({pct_err:+.0%}) exceeds ±{tolerance:.0%} tolerance. "
+                f"model {modeled_ft:.1f} ft (base {base_ft:.1f} × coastal {coastal_factor:.3f}) "
+                f"({pct_err:+.0%}) exceeds ±{tolerance:.0%} tolerance. "
                 f"Check surge_model.py — formula may have regressed."
             )
     print("[surge_model] Calibration check:")
@@ -271,8 +281,14 @@ def generate_surge_raster(
     # Keep full surge at/near coast
     inland_decay = np.clip(inland_decay, 0, 1)
 
+    # ── Coastal geometry correction ──
+    # Accounts for shelf width, wetland buffering, and bay funneling.
+    # Factor is normalised so calibration storms (avg US Gulf/Atlantic) stay intact.
+    from storm_catalog.coastal_correction import get_coastal_factor
+    coastal_factor = get_coastal_factor(landfall_lat, landfall_lon)
+
     # ── Combine all factors ──
-    surge_m = peak_surge_m * radial * asymmetry * inland_decay * speed_factor
+    surge_m = peak_surge_m * radial * asymmetry * inland_decay * speed_factor * coastal_factor
 
     # Add realistic noise (wave setup variability)
     rng = np.random.default_rng(seed)
