@@ -46,6 +46,9 @@ from storm_catalog.hurdat2_parser import (
 SEASON_MIN_YEAR = 2015
 from storm_catalog.surge_model import generate_surge_raster
 from data_ingest.census_fetcher import get_population_context
+from validation.run_ledger import record_from_activation
+from validation.backtester import run_backtest, score_storm, predict_loss_range
+from validation.ground_truth import get_ground_truth
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'cells')
@@ -489,6 +492,23 @@ class CellHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"  [warn] Census population lookup failed: {e}")
 
+            # Record model run in validation ledger
+            try:
+                model_run = record_from_activation(storm.storm_id, grid_cells, storm_data)
+                print(f"  Validation: logged run — ${model_run.modeled_loss/1e6:,.1f}M modeled, "
+                      f"{model_run.building_count} bldgs ({model_run.nsi_count} NSI / {model_run.osm_count} OSM)")
+                # Attach ground truth comparison if available
+                gt = get_ground_truth(storm.storm_id)
+                if gt:
+                    storm_data['ground_truth'] = {
+                        'actual_total_B': gt.actual_damage_B,
+                        'surge_fraction': gt.surge_fraction,
+                        'surge_damage_B': gt.surge_damage_B,
+                        'source': gt.source,
+                    }
+            except Exception as e:
+                print(f"  [warn] Validation ledger failed: {e}")
+
             response_data = {
                 "storm": storm_data,
                 "center_cell": center_data,
@@ -574,6 +594,40 @@ class CellHandler(BaseHTTPRequestHandler):
                 return
             try:
                 result = _geocode_forward(q.strip())
+                self._send_json(200, result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/validation/backtest ── full backtest report
+        if path == '/api/validation/backtest':
+            try:
+                report = run_backtest()
+                self._send_json(200, report.to_dict())
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/validation/storm/<id> ── score a single storm
+        if path.startswith('/api/validation/storm/'):
+            try:
+                sid = path.split('/')[4]
+                score = score_storm(sid)
+                if score:
+                    self._send_json(200, score.to_dict())
+                else:
+                    self._send_json(200, {'error': 'No ground truth or model run for this storm',
+                                           'storm_id': sid,
+                                           'has_ground_truth': get_ground_truth(sid) is not None})
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/validation/predict?loss=N ── confidence interval
+        if path == '/api/validation/predict':
+            try:
+                loss = float(params.get('loss', ['0'])[0])
+                result = predict_loss_range(loss)
                 self._send_json(200, result)
             except Exception as e:
                 self._send_error(500, str(e))
