@@ -1007,56 +1007,124 @@ function App() {
   // ── PDA (Preliminary Damage Assessment) export ──
   const handleExportPDA = useCallback(() => {
     if (!allBuildings?.features?.length || !activeStorm) return;
-    // FEMA PDA categories: Affected (minor), Minor Damage, Major Damage, Destroyed
-    // Map our categories: none→skip, minor→Affected, moderate→Minor, major→Major, severe→Destroyed
+
+    // FEMA PDA categories
     const PDA_MAP: Record<string, string> = { minor: 'Affected', moderate: 'Minor Damage', major: 'Major Damage', severe: 'Destroyed' };
-    const counts: Record<string, { affected: number; minor: number; major: number; destroyed: number; totalLoss: number }> = {};
-    const overall = { affected: 0, minor: 0, major: 0, destroyed: 0, totalLoss: 0, totalBuildings: 0 };
+
+    // Critical facility occupancy codes (GOV, EDU, MED, REL → tagged in NSI occtype)
+    const CRITICAL_OCCTYPES = new Set(['GOV1','GOV2','EDU1','EDU2','MED1','MED2','COM8','COM9','COM10']);
+    const isCritical = (p: any) => p.occtype && CRITICAL_OCCTYPES.has((p.occtype || '').toUpperCase().split('-')[0] + (p.occtype || '').replace(/[^0-9]/g,'').slice(0,1));
+
+    // Average household size for displacement estimate (FEMA default)
+    const AVG_HOUSEHOLD = 2.53;
+
+    type JurisData = { affected: number; minor: number; major: number; destroyed: number; totalLoss: number; displaced: number; critical: number };
+    const counts: Record<string, JurisData> = {};
+    const overall = { affected: 0, minor: 0, major: 0, destroyed: 0, totalLoss: 0, totalBuildings: 0, displaced: 0, critical: 0 };
+    const criticalList: { type: string; occtype: string; loss: number; lat: number; lon: number }[] = [];
+
     for (const f of allBuildings.features) {
       const p = f.properties || {};
       const cat = p.damage_category || 'none';
       if (cat === 'none') continue;
-      const pdaCat = PDA_MAP[cat];
-      if (!pdaCat) continue;
-      // Use "Surge Area" as default jurisdiction since we don't have county-level assignment
-      const jurisdiction = 'Surge Area';
-      if (!counts[jurisdiction]) counts[jurisdiction] = { affected: 0, minor: 0, major: 0, destroyed: 0, totalLoss: 0 };
-      if (cat === 'minor') { counts[jurisdiction].affected++; overall.affected++; }
-      else if (cat === 'moderate') { counts[jurisdiction].minor++; overall.minor++; }
-      else if (cat === 'major') { counts[jurisdiction].major++; overall.major++; }
-      else if (cat === 'severe') { counts[jurisdiction].destroyed++; overall.destroyed++; }
+      if (!PDA_MAP[cat]) continue;
+
+      // Jurisdiction: prefer reverse-geocoded county from population context,
+      // fall back to loaded-cell grid coordinates as a zone label
+      const [lon, lat] = f.geometry?.coordinates || [0, 0];
+      // Round to 1° to create coarse zone buckets when county isn't available
+      const jurisdiction = activeStorm.population?.county_name
+        ? activeStorm.population.county_name
+        : `Zone ${Math.round(lat)}N-${Math.round(Math.abs(lon))}W`;
+
+      if (!counts[jurisdiction]) counts[jurisdiction] = { affected:0, minor:0, major:0, destroyed:0, totalLoss:0, displaced:0, critical:0 };
+
+      if (cat === 'minor')    { counts[jurisdiction].affected++;  overall.affected++; }
+      else if (cat === 'moderate') { counts[jurisdiction].minor++;     overall.minor++; }
+      else if (cat === 'major')    { counts[jurisdiction].major++;     overall.major++; }
+      else if (cat === 'severe')   { counts[jurisdiction].destroyed++; overall.destroyed++; }
+
       counts[jurisdiction].totalLoss += p.estimated_loss_usd || 0;
       overall.totalLoss += p.estimated_loss_usd || 0;
       overall.totalBuildings++;
+
+      // Displaced persons: Major + Destroyed residential buildings × avg household
+      const isRes = (p.building_type || '').startsWith('RES');
+      if (isRes && (cat === 'major' || cat === 'severe')) {
+        const disp = Math.round(AVG_HOUSEHOLD);
+        counts[jurisdiction].displaced += disp;
+        overall.displaced += disp;
+      }
+
+      // Critical facilities
+      if (isCritical(p) && (cat === 'major' || cat === 'severe')) {
+        counts[jurisdiction].critical++;
+        overall.critical++;
+        criticalList.push({ type: p.building_type || '', occtype: p.occtype || '', loss: p.estimated_loss_usd || 0, lat, lon });
+      }
     }
+
+    const nsiCount  = allBuildings.features.filter((f: any) => f.properties?.source === 'NSI').length;
+    const cellCount = loadedCells.size;
+    const totalDamaged = overall.affected + overall.minor + overall.major + overall.destroyed;
+
     const lines = [
       `PRELIMINARY DAMAGE ASSESSMENT SUMMARY`,
       `Storm: ${activeStorm.name} (${activeStorm.year}) — Category ${activeStorm.category}`,
       `Generated: ${new Date().toISOString()}`,
-      `Source: SurgeDPS (stormdps.com/surgedps) — MODELED ESTIMATE, NOT FIELD VERIFIED`,
+      `Source: SurgeDPS (stormdps.com/surgedps) — MODELED ESTIMATE NOT FIELD VERIFIED`,
       ``,
-      `Max Wind: ${Math.round(activeStorm.max_wind_kt * 1.15078)} mph | Min Pressure: ${activeStorm.min_pressure_mb} mb`,
-      `Total Structures Assessed: ${allBuildings.features.length.toLocaleString()}`,
-      `Total Structures Damaged: ${overall.totalBuildings.toLocaleString()}`,
-      `Total Modeled Loss: $${(overall.totalLoss / 1e6).toFixed(1)}M`,
+      `STORM PARAMETERS`,
+      `Max Wind,${Math.round(activeStorm.max_wind_kt * 1.15078)} mph`,
+      `Min Pressure,${activeStorm.min_pressure_mb} mb`,
+      `Landfall,${activeStorm.landfall_lat?.toFixed(4) ?? '?'}°N  ${activeStorm.landfall_lon?.toFixed(4) ?? '?'}°W`,
       ``,
-      `DAMAGE CATEGORY SUMMARY (FEMA PDA FORMAT)`,
-      `Jurisdiction,Affected,Minor Damage,Major Damage,Destroyed,Total Damaged,Estimated Loss`,
+      `DATA COVERAGE`,
+      `Cells Loaded,${cellCount} (export covers loaded cells only — full storm footprint may be larger)`,
+      `Buildings in Export,${allBuildings.features.length.toLocaleString()}`,
+      `NSI-sourced Buildings,${nsiCount.toLocaleString()} (${allBuildings.features.length ? Math.round(nsiCount/allBuildings.features.length*100) : 0}% — higher = more reliable valuations)`,
+      ``,
+      `DAMAGE SUMMARY`,
+      `Total Structures Damaged,${totalDamaged.toLocaleString()}`,
+      `  Affected (cosmetic),${overall.affected.toLocaleString()}`,
+      `  Minor Damage (repairable),${overall.minor.toLocaleString()}`,
+      `  Major Damage (uninhabitable),${overall.major.toLocaleString()}`,
+      `  Destroyed (total loss),${overall.destroyed.toLocaleString()}`,
+      `Total Modeled Loss,$${(overall.totalLoss / 1e6).toFixed(1)}M`,
+      `Est. Displaced Persons,${overall.displaced.toLocaleString()} (residential Major+Destroyed × ${AVG_HOUSEHOLD} avg household)`,
+      `Critical Facilities (Major+Destroyed),${overall.critical}`,
+      ``,
+      `JURISDICTION BREAKDOWN (FEMA PDA FORMAT)`,
+      `Jurisdiction,Affected,Minor Damage,Major Damage,Destroyed,Total Damaged,Estimated Loss,Est. Displaced,Critical Facilities`,
     ];
+
     for (const [juris, c] of Object.entries(counts)) {
-      const total = c.affected + c.minor + c.major + c.destroyed;
-      lines.push(`${juris},${c.affected},${c.minor},${c.major},${c.destroyed},${total},$${Math.round(c.totalLoss).toLocaleString()}`);
+      const tot = c.affected + c.minor + c.major + c.destroyed;
+      lines.push(`${juris},${c.affected},${c.minor},${c.major},${c.destroyed},${tot},$${Math.round(c.totalLoss).toLocaleString()},${c.displaced},${c.critical}`);
     }
-    const totalDamaged = overall.affected + overall.minor + overall.major + overall.destroyed;
-    lines.push(`TOTAL,${overall.affected},${overall.minor},${overall.major},${overall.destroyed},${totalDamaged},$${Math.round(overall.totalLoss).toLocaleString()}`);
+    lines.push(`TOTAL,${overall.affected},${overall.minor},${overall.major},${overall.destroyed},${totalDamaged},$${Math.round(overall.totalLoss).toLocaleString()},${overall.displaced},${overall.critical}`);
+
+    if (criticalList.length > 0) {
+      lines.push('');
+      lines.push('CRITICAL FACILITIES — MAJOR/DESTROYED');
+      lines.push('occupancy_type,hazus_type,estimated_loss,lat,lon');
+      for (const cf of criticalList.slice(0, 50)) {
+        lines.push(`${cf.occtype},${cf.type},$${Math.round(cf.loss).toLocaleString()},${cf.lat.toFixed(5)},${cf.lon.toFixed(5)}`);
+      }
+    }
+
     lines.push('');
-    lines.push('NOTES:');
-    lines.push('- "Affected" = minor cosmetic damage (HAZUS minor category)');
-    lines.push('- "Minor Damage" = repairable structural/content damage (HAZUS moderate)');
-    lines.push('- "Major Damage" = significant structural damage, likely uninhabitable (HAZUS major)');
-    lines.push('- "Destroyed" = total or near-total loss (HAZUS severe)');
-    lines.push('- Surge depths reflect SLOSH MOM (worst-case tidal alignment)');
-    lines.push('- Loss estimates use FEMA HAZUS depth-damage functions applied to NSI building inventory');
+    lines.push('CATEGORY DEFINITIONS');
+    lines.push('"Affected","Cosmetic/minor damage (<10% structure loss) — HAZUS minor"');
+    lines.push('"Minor Damage","Repairable structural damage (10–30%) — habitable with repairs"');
+    lines.push('"Major Damage","Significant structural damage (30–50%) — likely uninhabitable"');
+    lines.push('"Destroyed","Total or near-total loss (>50%) — demolition likely"');
+    lines.push('');
+    lines.push('METHODOLOGY NOTES');
+    lines.push('"Surge depths from parametric SLOSH-based model. Losses use FEMA HAZUS depth-damage curves."');
+    lines.push('"Building valuations from FEMA NSI where available; OSM footprints used as fallback."');
+    lines.push('"Inundation mask applied: only buildings where surge exceeds foundation height are assessed."');
+    lines.push('"Displaced persons estimate uses FEMA default of 2.53 persons/household for residential structures."');
 
     const csv = lines.join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -1066,7 +1134,7 @@ function App() {
     a.download = `surgedps_PDA_${activeStorm.storm_id}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [allBuildings, activeStorm]);
+  }, [allBuildings, activeStorm, loadedCells]);
 
   // ── Print / Share ──
   const handlePrint = useCallback(() => { window.print(); }, []);
@@ -1085,27 +1153,54 @@ function App() {
   const handleExportCSV = useCallback(() => {
     if (!allBuildings?.features?.length) { setToastSuccess('No building data loaded — select a storm and load cells first.'); return; }
     const totalLoss = allBuildings.features.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
+    const nsiCount  = allBuildings.features.filter((f: any) => f.properties?.source === 'NSI').length;
+    const osmCount  = allBuildings.features.filter((f: any) => f.properties?.source === 'OSM').length;
+    const cellsLoaded = loadedCells.size;
     const summaryLines = [
-      `# SurgeDPS Export — ${activeStorm?.name || 'Unknown'} (${activeStorm?.year || ''})`,
+      `# SurgeDPS Building Export — ${activeStorm?.name || 'Unknown'} (${activeStorm?.year || ''})`,
       `# Category ${activeStorm?.category || '?'} | Max wind ${activeStorm ? Math.round(activeStorm.max_wind_kt * 1.15078) : '?'} mph | ${activeStorm?.min_pressure_mb || '?'} mb`,
-      `# Buildings: ${allBuildings.features.length.toLocaleString()} | Total modeled loss: $${(totalLoss / 1e6).toFixed(1)}M`,
-      `# Exported: ${new Date().toISOString()} | Source: stormdps.com/surgedps`,
-      `# Note: Depths are SLOSH MOM (worst-case tidal). Losses use FEMA HAZUS depth-damage curves.`,
+      `# Landfall: ${activeStorm?.landfall_lat?.toFixed(4) ?? '?'}°N ${activeStorm?.landfall_lon?.toFixed(4) ?? '?'}°W`,
+      `# Buildings exported: ${allBuildings.features.length.toLocaleString()} (NSI: ${nsiCount.toLocaleString()}, OSM: ${osmCount.toLocaleString()})`,
+      `# Cells loaded: ${cellsLoaded} of full storm footprint — export covers loaded cells only`,
+      `# Total modeled loss: $${(totalLoss / 1e6).toFixed(1)}M`,
+      `# Exported: ${new Date().toISOString()} | Source: SurgeDPS (stormdps.com/surgedps)`,
+      `# MODELED ESTIMATE — NOT FIELD VERIFIED. Losses use FEMA HAZUS depth-damage curves applied to NSI/OSM inventory.`,
+      `# data_quality: 0.0–1.0 reliability score (1.0 = full NSI record with all attributes; 0.1 = ML footprint only)`,
+      `# source: NSI = FEMA National Structure Inventory | OSM = OpenStreetMap | MSFT = Microsoft ML footprints`,
     ];
     const rows = allBuildings.features.map((f: any) => {
       const p = f.properties || {};
       const [lon, lat] = f.geometry?.coordinates || [0, 0];
       const flagKey = `${lon.toFixed(5)},${lat.toFixed(5)}`;
       const flag = buildingFlags[flagKey] || '';
+      // Interior flooding = surge depth above first finished floor
+      const depthFt  = p.depth_ft  != null ? Number(p.depth_ft)  : null;
+      const foundHt  = p.found_ht  != null ? Number(p.found_ht)  : null;
+      const interiorFt = (depthFt != null && foundHt != null) ? Math.max(0, depthFt - foundHt).toFixed(2) : '';
       return [
-        lat, lon, csvField(p.building_type || ''), p.depth_ft ?? '', p.found_ht ?? '',
-        p.structure_damage_pct ?? '', p.contents_damage_pct ?? '', p.total_damage_pct ?? '',
-        p.estimated_loss_usd ?? '', p.val_struct ?? '', p.val_cont ?? '',
-        csvField(p.damage_category || ''), p.replacement_value_usd ?? '',
+        lat, lon,
+        csvField(p.building_id || p.id || ''),   // NSI fd_id for cross-reference
+        csvField(p.source || ''),                  // NSI | OSM | MSFT
+        p.data_quality ?? '',                      // 0.0–1.0 reliability
+        csvField(p.building_type || ''),
+        csvField(p.occtype || ''),                 // raw NSI occupancy code
+        p.depth_ft ?? '',
+        p.found_ht ?? '',
+        interiorFt,                                // interior flooding above floor
+        p.structure_damage_pct ?? '',
+        p.contents_damage_pct ?? '',
+        p.total_damage_pct ?? '',
+        p.estimated_loss_usd ?? '',
+        p.val_struct ?? '',
+        p.val_cont ?? '',
+        p.replacement_value_usd ?? '',
+        p.med_yr_blt ?? '',                        // year built
+        p.num_story ?? '',                         // stories
+        csvField(p.damage_category || ''),
         csvField(flag),
       ].join(',');
     });
-    const header = 'lat,lon,building_type,surge_depth_ft,foundation_ht_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,val_struct,val_cont,damage_category,replacement_value_usd,field_flag';
+    const header = 'lat,lon,building_id,source,data_quality,building_type,occupancy_type,surge_depth_ft,foundation_ht_ft,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_dmg_pct,estimated_loss_usd,val_struct,val_cont,replacement_value_usd,year_built,num_stories,damage_category,field_flag';
     const csv = [...summaryLines, header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -1115,7 +1210,7 @@ function App() {
     a.click();
     URL.revokeObjectURL(url);
     setToastSuccess(`Exported ${allBuildings.features.length.toLocaleString()} buildings to CSV`);
-  }, [allBuildings, activeStorm, buildingFlags]);
+  }, [allBuildings, activeStorm, buildingFlags, loadedCells]);
 
   // Reverse geocoding for building hover
   const geocodeCache = useRef<Record<string, string>>({});
