@@ -3,7 +3,7 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python scripts/api_server.py"
+startCommand = "sh -c 'python scripts/warm_cache.py & python scripts/storm_monitor.py & python scripts/api_server.py'"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
