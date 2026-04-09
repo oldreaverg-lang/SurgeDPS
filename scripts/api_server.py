@@ -168,6 +168,10 @@ def _inject_dps(storm_dict: dict) -> dict:
 _active_storm: StormEntry | None = None
 _active_exposure_region: str = ''  # R11: cached for cell-load lookups
 
+# ── Progress tracking for long-running activation ──
+import time as _time
+_progress: dict = {'step': '', 'step_num': 0, 'total_steps': 4, 'started_at': 0.0, 'storm_id': ''}
+
 
 def _storm_cache_dir(storm: StormEntry) -> str:
     d = os.path.join(CACHE_DIR, storm.storm_id)
@@ -209,6 +213,7 @@ def load_cell(col: int, row: int) -> dict:
         with open(flood_path) as f:
             flood_data = json.load(f)
         print(f"  [cache hit] cell ({col},{row}) for {storm.storm_id}")
+        _progress.update(step='Complete', step_num=4, storm_id=storm.storm_id)
         return {"buildings": damage_data, "flood": flood_data}
 
     lon_min, lat_min, lon_max, lat_max = cell_bbox(col, row)
@@ -216,6 +221,7 @@ def load_cell(col: int, row: int) -> dict:
           f"bbox=({lon_min:.2f},{lat_min:.2f})->({lon_max:.2f},{lat_max:.2f})")
 
     # 1. Parametric surge raster using real storm parameters
+    _progress.update(step='Generating surge model', step_num=1, storm_id=storm.storm_id)
     raster_path = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
     if not os.path.exists(raster_path):
         generate_surge_raster(
@@ -231,12 +237,14 @@ def load_cell(col: int, row: int) -> dict:
         )
 
     # 2. Flood polygons
+    _progress.update(step='Building flood map', step_num=2)
     if not os.path.exists(flood_path):
         raster_to_geojson(raster_path, flood_path)
     with open(flood_path) as f:
         flood_data = json.load(f)
 
     # 3. Fetch real OSM buildings
+    _progress.update(step='Fetching building footprints', step_num=3)
     buildings_path = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
     fetch_buildings(lon_min, lat_min, lon_max, lat_max, buildings_path, cache=True)
 
@@ -246,9 +254,11 @@ def load_cell(col: int, row: int) -> dict:
         empty = _empty_fc()
         with open(damage_path, 'w') as f:
             json.dump(empty, f)
+        _progress.update(step='Complete', step_num=4)
         return {"buildings": empty, "flood": flood_data}
 
     # 4. Run HAZUS damage model
+    _progress.update(step='Running damage model', step_num=4)
     estimate_damage_from_raster(raster_path, buildings_path, damage_path)
 
     with open(damage_path) as f:
@@ -368,7 +378,10 @@ class CellHandler(BaseHTTPRequestHandler):
             # show immediately and neighbors become clickable. The full grid
             # loads lazily as the user clicks adjacent cells.
             print("Loading eye cell (0,0)...")
+            _progress.update(step='Initializing', step_num=0, total_steps=4,
+                             started_at=_time.time(), storm_id=storm.storm_id)
             center_data = load_cell(0, 0)
+            _progress.update(step='Complete', step_num=4)
             grid_cells = None
 
             # R5: Attach validation confidence after cell load
@@ -438,6 +451,18 @@ class CellHandler(BaseHTTPRequestHandler):
                 print(f"Error loading cell ({col},{row}): {e}")
                 import traceback; traceback.print_exc()
                 self._send_error(500, str(e))
+            return
+
+        # ── GET /api/progress ── poll current processing step
+        if path == '/api/progress':
+            elapsed = round(_time.time() - _progress['started_at'], 1) if _progress['started_at'] else 0
+            self._send_json(200, {
+                'step': _progress['step'],
+                'step_num': _progress['step_num'],
+                'total_steps': _progress['total_steps'],
+                'elapsed': elapsed,
+                'storm_id': _progress['storm_id'],
+            })
             return
 
         # ── GET /api/health ──

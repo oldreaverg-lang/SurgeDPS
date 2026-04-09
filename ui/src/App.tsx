@@ -303,7 +303,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
               rel="noopener noreferrer"
               className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
             >
-              StormDPS →
+              ← Return to StormDPS
             </a>
             <button
               onClick={onClose}
@@ -765,8 +765,13 @@ function App() {
   // Toast notifications (error = red, success = green)
   const [cellError, setCellError] = useState<string | null>(null);
   const [toastSuccess, setToastSuccess] = useState<string | null>(null);
-  useEffect(() => { if (cellError) { const t = setTimeout(() => setCellError(null), 5000); return () => clearTimeout(t); } }, [cellError]);
+  const [retryStormId, setRetryStormId] = useState<string | null>(null);
+  useEffect(() => { if (cellError) { const t = setTimeout(() => { setCellError(null); setRetryStormId(null); }, 8000); return () => clearTimeout(t); } }, [cellError]);
   useEffect(() => { if (toastSuccess) { const t = setTimeout(() => setToastSuccess(null), 3000); return () => clearTimeout(t); } }, [toastSuccess]);
+
+  // Progress tracking for loading overlay
+  const [loadProgress, setLoadProgress] = useState<{ step: string; step_num: number; total_steps: number; elapsed: number }>({ step: '', step_num: 0, total_steps: 4, elapsed: 0 });
+  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Address search (geocoding via Nominatim) ──
   const [addressQuery, setAddressQuery] = useState('');
@@ -1005,6 +1010,19 @@ function App() {
     setBatchOpen(false); setBatchResults([]); setBatchInput('');
     setAddressQuery(''); setAddressError('');
     setMethodologyOpen(false); setMoreMenuOpen(false);
+    setLoadProgress({ step: 'Connecting to server', step_num: 0, total_steps: 4, elapsed: 0 });
+
+    // Start polling server for real progress updates
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+    progressIntervalRef.current = setInterval(async () => {
+      try {
+        const r = await fetch('/surgedps/api/progress');
+        if (r.ok) {
+          const p = await r.json();
+          if (p.storm_id === stormId && p.step) setLoadProgress(p);
+        }
+      } catch { /* ignore polling errors */ }
+    }, 2000);
 
     let timedOut = false;
     try {
@@ -1048,12 +1066,15 @@ function App() {
         console.log('Storm activation cancelled by user');
       } else if (err?.name === 'AbortError' && timedOut) {
         console.warn('Storm activation timed out after 2 minutes');
+        setRetryStormId(stormId);
         setCellError('Storm data is still being generated on the server. Please wait a moment and try again — the data will be cached for next time.');
       } else {
         console.error('Failed to activate storm:', err);
+        setRetryStormId(stormId);
         setCellError('Failed to load storm data. The server may be warming up — try again in a moment.');
       }
     } finally {
+      if (progressIntervalRef.current) { clearInterval(progressIntervalRef.current); progressIntervalRef.current = null; }
       setActivating(false);
       activatingRef.current = false;
     }
@@ -1440,16 +1461,16 @@ function App() {
               <Layer id="grid-loaded-border" type="line" filter={['==', ['get', 'status'], 'loaded']}
                 paint={{ 'line-color': '#4ade80', 'line-width': 2, 'line-opacity': 0.6, 'line-dasharray': [4, 2] }} />
               <Layer id="grid-available-fill" type="fill" filter={['==', ['get', 'status'], 'available']}
-                paint={{ 'fill-color': '#ffffff', 'fill-opacity': 0.06 }} />
+                paint={{ 'fill-color': '#6366f1', 'fill-opacity': 0.05 }} />
               <Layer id="grid-available-border" type="line" filter={['==', ['get', 'status'], 'available']}
-                paint={{ 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 0.7, 'line-dasharray': [6, 3] }} />
+                paint={{ 'line-color': '#a5b4fc', 'line-width': 1.5, 'line-opacity': 0.6, 'line-dasharray': [6, 3] }} />
               <Layer id="grid-loading-fill" type="fill" filter={['==', ['get', 'status'], 'loading']}
                 paint={{ 'fill-color': '#facc15', 'fill-opacity': 0.1 }} />
               <Layer id="grid-loading-border" type="line" filter={['==', ['get', 'status'], 'loading']}
                 paint={{ 'line-color': '#facc15', 'line-width': 2.5, 'line-opacity': 0.9 }} />
               <Layer id="grid-available-label" type="symbol" filter={['==', ['get', 'status'], 'available']}
-                layout={{ 'text-field': 'Click to load', 'text-size': 13, 'text-font': ['Open Sans Regular'] }}
-                paint={{ 'text-color': '#fff', 'text-opacity': 0.7, 'text-halo-color': '#000', 'text-halo-width': 1 }} />
+                layout={{ 'text-field': '+ Click to load', 'text-size': 13, 'text-font': ['Open Sans Semibold'] }}
+                paint={{ 'text-color': '#c7d2fe', 'text-opacity': 0.85, 'text-halo-color': '#000', 'text-halo-width': 1.2 }} />
               {/* Pre-computed "ready" cells — solid green border (instant load from cache) */}
               <Layer id="grid-ready-fill" type="fill" filter={['==', ['get', 'status'], 'ready']}
                 paint={{ 'fill-color': '#4ade80', 'fill-opacity': 0.06 }} />
@@ -1754,10 +1775,16 @@ function App() {
           </div>
         )}
 
-        {/* Cell error toast */}
+        {/* Cell error toast with optional retry */}
         {cellError && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-sm text-center">
-            {cellError}
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-red-600 text-white text-sm px-4 py-2.5 rounded-lg shadow-xl max-w-md text-center flex items-center gap-3">
+            <span>{cellError}</span>
+            {retryStormId && (
+              <button
+                onClick={() => { setCellError(null); setRetryStormId(null); activateStorm(retryStormId); }}
+                className="shrink-0 bg-white/20 hover:bg-white/30 text-white text-xs font-semibold px-3 py-1 rounded transition-colors"
+              >Retry</button>
+            )}
           </div>
         )}
         {/* Success toast */}
@@ -1789,16 +1816,24 @@ function App() {
           </div>
         )}
 
-        {/* Loading overlay */}
+        {/* Loading overlay with real progress */}
         {activating && (
           <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-20">
-            <div className="bg-white rounded-xl p-6 shadow-2xl text-center">
+            <div className="bg-white rounded-xl p-6 shadow-2xl text-center min-w-[280px]">
               <div className="animate-spin w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full mx-auto mb-3"></div>
               <p className="font-semibold text-gray-800">Analyzing storm...</p>
-              <p className="text-xs text-gray-500 mt-1">Fetching buildings & running damage model</p>
+              <p className="text-xs text-gray-600 mt-1 font-medium">{loadProgress.step || 'Connecting to server'}</p>
+              {/* Progress bar */}
+              <div className="mt-3 w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div
+                  className="h-full bg-indigo-500 rounded-full transition-all duration-700 ease-out"
+                  style={{ width: `${Math.max(5, (loadProgress.step_num / loadProgress.total_steps) * 100)}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1.5">Step {loadProgress.step_num} of {loadProgress.total_steps}{loadProgress.elapsed > 0 ? ` · ${Math.round(loadProgress.elapsed)}s` : ''}</p>
               <button
                 onClick={() => activateAbortRef.current?.abort()}
-                className="mt-4 text-xs text-gray-500 hover:text-gray-700 transition-colors font-medium"
+                className="mt-3 text-xs text-gray-500 hover:text-gray-700 transition-colors font-medium"
               >Cancel</button>
             </div>
           </div>
