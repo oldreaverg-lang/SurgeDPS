@@ -52,21 +52,13 @@ WARM_CELLS_3x3 = [
     for col in range(-1, 2)
 ]
 
-# 5×5 grid: expanded coverage for high-traffic historic storms
-WARM_CELLS_5x5 = [
-    (col, row)
-    for row in range(-2, 3)
-    for col in range(-2, 3)
-]
-
-# Storm IDs from the curated HISTORICAL_STORMS list get the 5×5 treatment
+# All storms get 3×3 for pre-warming (fits within Railway 5 GB volume limit).
+# Users can still expand coverage on-demand by clicking grid borders.
 _HISTORIC_IDS = {s.storm_id for s in HISTORICAL_STORMS}
 
 
 def _warm_cells_for(storm: StormEntry) -> list[tuple[int, int]]:
-    """Return which cells to warm: 5×5 for curated historic storms, 3×3 for others."""
-    if storm.storm_id in _HISTORIC_IDS:
-        return WARM_CELLS_5x5
+    """Return which cells to warm: 3×3 for all storms."""
     return WARM_CELLS_3x3
 
 
@@ -129,6 +121,16 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
             with open(damage_path, 'w') as f:
                 json.dump({"type": "FeatureCollection", "features": []}, f)
 
+        # 5. Clean up intermediate files to save volume space.
+        #    The API only needs damage.geojson + flood.geojson for cache hits.
+        #    depth.tif and buildings.json can be regenerated on-demand if needed.
+        for tmp in (raster_path, buildings_path):
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
         return True
 
     except Exception as e:
@@ -152,14 +154,15 @@ def collect_sidebar_storms() -> list[StormEntry]:
             seen.add(s.storm_id)
             storms.append(s)
 
-    # Season accordion (2015+)
+    # Season accordion (2015+) — only pre-warm Category 1+ hurricanes.
+    # Tropical storms produce minimal surge and aren't worth the volume space.
     try:
         seasons = get_seasons(min_year=SEASON_MIN_YEAR)
         for season in seasons:
             year = season['year']
             year_storms = get_storms_for_year(year)
             for s in year_storms:
-                if s.storm_id not in seen:
+                if s.storm_id not in seen and s.category >= 1:
                     seen.add(s.storm_id)
                     storms.append(s)
     except Exception as e:
@@ -179,8 +182,8 @@ def main():
     storms = collect_sidebar_storms()
     historic_count = sum(1 for s in storms if s.storm_id in _HISTORIC_IDS)
     other_count = len(storms) - historic_count
-    total_cells = historic_count * len(WARM_CELLS_5x5) + other_count * len(WARM_CELLS_3x3)
-    print(f"Found {len(storms)} storms ({historic_count} historic→5×5, {other_count} others→3×3) = {total_cells} cells to warm")
+    total_cells = len(storms) * len(WARM_CELLS_3x3)
+    print(f"Found {len(storms)} storms ({historic_count} curated + {other_count} season Cat1+, all 3×3) = {total_cells} cells to warm")
 
     cells_generated = 0
     storms_cached = 0
@@ -194,7 +197,7 @@ def main():
         already = _cached_cells(storm)
 
         if len(already) == len(target):
-            grid_label = '5×5' if storm.storm_id in _HISTORIC_IDS else '3×3'
+            grid_label = '3×3'
             print(f"  {tag} — all {len(target)} cells ({grid_label}) cached, skipping")
             storms_cached += 1
             continue
