@@ -1212,6 +1212,282 @@ function App() {
     setToastSuccess(`Exported ${allBuildings.features.length.toLocaleString()} buildings to CSV`);
   }, [allBuildings, activeStorm, buildingFlags, loadedCells]);
 
+  // ── Per-building Claims Documentation Generator ──
+  const generateClaimDoc = useCallback((feature: any, address?: string | null) => {
+    if (!feature || !activeStorm) return;
+    const p = feature.properties || {};
+    const [lon, lat] = feature.geometry?.coordinates || [0, 0];
+    const depthFt = p.depth_ft != null ? Number(p.depth_ft) : null;
+    const foundHt = p.found_ht != null ? Number(p.found_ht) : null;
+    const interiorFt = (depthFt != null && foundHt != null) ? Math.max(0, depthFt - foundHt) : null;
+    const structPct = p.structure_damage_pct ?? 0;
+    const contPct = p.contents_damage_pct ?? 0;
+    const structLoss = p.val_struct != null ? Math.round(p.val_struct * structPct / 100) : null;
+    const contLoss = p.val_cont != null ? Math.round(p.val_cont * contPct / 100) : null;
+
+    // Wind vs water attribution
+    let windMph: number | null = null;
+    let wwSplit: { windPct: number; waterPct: number } | null = null;
+    if (activeStorm.landfall_lat && activeStorm.landfall_lon) {
+      const distKm = haversineKm(lat, lon, activeStorm.landfall_lat, activeStorm.landfall_lon);
+      windMph = Math.round(estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category));
+      const floodForWind = interiorFt != null ? interiorFt : (depthFt != null ? Math.max(0, depthFt - 1) : 0);
+      wwSplit = windWaterSplit(windMph, floodForWind);
+    }
+
+    // Comparable properties
+    const comps = allBuildings?.features
+      ? findComparables(allBuildings.features, p.building_type, lon, lat)
+      : { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
+
+    const flagKey = `${lon.toFixed(5)},${lat.toFixed(5)}`;
+    const fieldFlag = buildingFlags[flagKey] || '';
+
+    const locationStr = address || `${lat.toFixed(5)}°N, ${Math.abs(lon).toFixed(5)}°W`;
+    const severity = !p.damage_category || p.damage_category === 'none' ? 'No Damage' : p.damage_category;
+    const severityLabel: Record<string, string> = { minor: 'Affected — Cosmetic damage', moderate: 'Minor — Repairable structural damage', major: 'Major — Uninhabitable', severe: 'Destroyed — Total loss' };
+    const qualityLabel = p.data_quality != null
+      ? p.data_quality >= 0.8 ? 'High (full NSI record)' : p.data_quality >= 0.5 ? 'Medium (partial NSI)' : 'Low (footprint only)'
+      : 'Unknown';
+
+    const now = new Date();
+    const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Claim Report — ${locationStr}</title>
+<style>
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 24px; color: #1e293b; line-height: 1.5; }
+  h1 { font-size: 20px; color: #0f172a; margin-bottom: 4px; border-bottom: 3px solid #4f46e5; padding-bottom: 8px; }
+  h2 { font-size: 15px; color: #334155; margin-top: 24px; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .meta { font-size: 12px; color: #64748b; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  td { padding: 5px 10px; border-bottom: 1px solid #f1f5f9; }
+  td:first-child { font-weight: 600; color: #475569; width: 45%; }
+  .severity-badge { display: inline-block; padding: 3px 12px; border-radius: 4px; font-weight: 700; font-size: 13px; }
+  .severity-minor { background: #dcfce7; color: #166534; }
+  .severity-moderate { background: #fef9c3; color: #854d0e; }
+  .severity-major { background: #fed7aa; color: #9a3412; }
+  .severity-severe { background: #fecaca; color: #991b1b; }
+  .severity-none { background: #f1f5f9; color: #475569; }
+  .loss-total { font-size: 20px; font-weight: 800; color: #dc2626; }
+  .peril-bar { display: flex; height: 18px; border-radius: 9px; overflow: hidden; margin: 4px 0; }
+  .peril-wind { background: #0ea5e9; }
+  .peril-water { background: #4f46e5; }
+  .comps-box { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin: 8px 0; font-size: 12px; color: #1e40af; }
+  .disclaimer { background: #fefce8; border: 1px solid #fde68a; border-radius: 6px; padding: 10px 14px; margin-top: 24px; font-size: 11px; color: #92400e; }
+  .footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8; text-align: center; }
+  @media print { body { padding: 0; } .no-print { display: none; } }
+</style></head><body>
+<h1>Claims Documentation Report</h1>
+<p class="meta">
+  <strong>${activeStorm.name} (${activeStorm.year})</strong> — Category ${activeStorm.category} |
+  Generated ${now.toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })} at ${now.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' })} |
+  Claim Reference: <strong>SDC-${activeStorm.storm_id}-${(p.building_id || '').slice(-6).toUpperCase() || lat.toFixed(3).replace('.','') + lon.toFixed(3).replace('.','').replace('-','')}</strong>
+</p>
+
+<h2>Property Identification</h2>
+<table>
+  <tr><td>Location</td><td>${locationStr}</td></tr>
+  <tr><td>Coordinates</td><td>${lat.toFixed(6)}°N, ${lon.toFixed(6)}°W</td></tr>
+  <tr><td>Building Type</td><td>${friendlyBuildingType(p.building_type)} (${p.building_type || 'Unknown'})</td></tr>
+  ${p.occtype ? `<tr><td>Occupancy Code</td><td>${p.occtype}</td></tr>` : ''}
+  ${p.num_story ? `<tr><td>Stories</td><td>${p.num_story}</td></tr>` : ''}
+  ${p.med_yr_blt ? `<tr><td>Year Built</td><td>${p.med_yr_blt}</td></tr>` : ''}
+  ${p.area_sqft ? `<tr><td>Footprint</td><td>${Number(p.area_sqft).toLocaleString()} sq ft</td></tr>` : ''}
+  <tr><td>Foundation Height</td><td>${foundHt != null ? foundHt.toFixed(1) + ' ft above grade' : 'Not available'}</td></tr>
+  <tr><td>Building ID</td><td>${p.building_id || 'N/A'} (${p.source || 'Unknown'} inventory)</td></tr>
+  <tr><td>Data Reliability</td><td>${qualityLabel}${p.data_quality != null ? ` (${p.data_quality.toFixed(2)})` : ''}</td></tr>
+  <tr><td>Google Street View</td><td><a href="https://maps.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank">Open in Street View ↗</a></td></tr>
+</table>
+
+<h2>Damage Assessment</h2>
+<table>
+  <tr><td>Damage Severity</td><td><span class="severity-badge severity-${p.damage_category || 'none'}">${severity.charAt(0).toUpperCase() + severity.slice(1)}</span>${severityLabel[p.damage_category] ? ' — ' + severityLabel[p.damage_category].split('—')[1] : ''}</td></tr>
+  <tr><td>Storm Surge Depth</td><td>${depthFt != null ? depthFt.toFixed(1) + ' ft' : 'N/A'}</td></tr>
+  <tr><td>Interior Flooding</td><td style="color: ${interiorFt && interiorFt > 0 ? '#dc2626' : '#16a34a'}; font-weight: 700">${interiorFt != null ? (interiorFt > 0 ? interiorFt.toFixed(1) + ' ft above first floor' : 'None — surge below foundation') : 'N/A'}</td></tr>
+</table>
+
+<h2>Loss Estimate</h2>
+<table>
+  <tr><td>Structure Damage</td><td>${structPct}% of replacement value${structLoss != null ? ' — $' + structLoss.toLocaleString() : ''}</td></tr>
+  <tr><td>Contents Damage</td><td>${contPct}% of replacement value${contLoss != null ? ' — $' + contLoss.toLocaleString() : ''}</td></tr>
+  <tr><td>Structure Replacement Value</td><td>${p.val_struct != null ? '$' + Number(p.val_struct).toLocaleString() : 'Not available'}</td></tr>
+  <tr><td>Contents Value</td><td>${p.val_cont != null ? '$' + Number(p.val_cont).toLocaleString() : 'Not available'}</td></tr>
+  <tr><td colspan="2" style="text-align: center; padding-top: 12px">
+    <span class="loss-total">Total Modeled Loss: $${(p.estimated_loss_usd ?? 0).toLocaleString()}</span>
+  </td></tr>
+</table>
+
+${wwSplit && windMph != null ? `
+<h2>Peril Attribution (Wind vs. Water)</h2>
+<table>
+  <tr><td>Estimated Wind Speed at Property</td><td>${windMph} mph (modeled from ${activeStorm.max_wind_kt ? Math.round(activeStorm.max_wind_kt * 1.15078) : '?'} mph max sustained)</td></tr>
+  <tr><td>Wind Damage Attribution</td><td>${wwSplit.windPct}%${p.estimated_loss_usd ? ' — $' + Math.round(p.estimated_loss_usd * wwSplit.windPct / 100).toLocaleString() : ''}</td></tr>
+  <tr><td>Water Damage Attribution</td><td>${wwSplit.waterPct}%${p.estimated_loss_usd ? ' — $' + Math.round(p.estimated_loss_usd * wwSplit.waterPct / 100).toLocaleString() : ''}</td></tr>
+</table>
+<div class="peril-bar">
+  <div class="peril-wind" style="width:${wwSplit.windPct}%"></div>
+  <div class="peril-water" style="width:${wwSplit.waterPct}%"></div>
+</div>
+<div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b">
+  <span style="color:#0ea5e9;font-weight:700">Wind ${wwSplit.windPct}%</span>
+  <span style="color:#4f46e5;font-weight:700">Water ${wwSplit.waterPct}%</span>
+</div>
+` : ''}
+
+${comps.count >= 2 ? `
+<h2>Comparable Properties</h2>
+<div class="comps-box">
+  <strong>${comps.count}</strong> similar ${friendlyBuildingType(p.building_type).toLowerCase()}s within ${(COMP_RADIUS_KM / 1.609).toFixed(2)} miles
+  averaged <strong>$${comps.avgLoss.toLocaleString()}</strong> in modeled losses (range: $${comps.minLoss.toLocaleString()} – $${comps.maxLoss.toLocaleString()}).
+  ${p.estimated_loss_usd != null && comps.avgLoss > 0 ? `This property's loss is ${Math.round((p.estimated_loss_usd / comps.avgLoss) * 100)}% of the area average.` : ''}
+</div>
+` : ''}
+
+${fieldFlag ? `
+<h2>Field Assessment</h2>
+<table>
+  <tr><td>Field Flag</td><td><strong>${fieldFlag.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase())}</strong> (set by adjuster in SurgeDPS)</td></tr>
+</table>
+` : ''}
+
+<h2>Storm Parameters</h2>
+<table>
+  <tr><td>Storm</td><td>${activeStorm.name} (${activeStorm.year}) — Category ${activeStorm.category}</td></tr>
+  <tr><td>Maximum Sustained Winds</td><td>${Math.round(activeStorm.max_wind_kt * 1.15078)} mph (${activeStorm.max_wind_kt} kt)</td></tr>
+  <tr><td>Minimum Central Pressure</td><td>${activeStorm.min_pressure_mb} mb</td></tr>
+  <tr><td>Landfall Location</td><td>${activeStorm.landfall_lat?.toFixed(4) ?? '?'}°N, ${activeStorm.landfall_lon?.toFixed(4) ?? '?'}°W</td></tr>
+</table>
+
+<div class="disclaimer">
+  <strong>MODELED ESTIMATE — NOT FIELD VERIFIED.</strong> Losses computed using FEMA HAZUS depth-damage curves applied to ${p.source || 'NSI/OSM'} building inventory.
+  Inundation mask applied: only buildings where surge depth exceeds foundation height are assessed. Actual losses may differ based on construction quality,
+  flood-proofing measures, contents specifics, and other factors not captured in the model. This report is intended to support — not replace — field inspection.
+</div>
+
+<div class="footer">
+  Generated by SurgeDPS (stormdps.com/surgedps) — ${now.toISOString()}<br>
+  Claim Ref: SDC-${activeStorm.storm_id}-${(p.building_id || '').slice(-6).toUpperCase() || lat.toFixed(3).replace('.','') + lon.toFixed(3).replace('.','').replace('-','')}
+</div>
+</body></html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `claim_${activeStorm.storm_id}_${(p.building_id || 'bldg').slice(-8)}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setToastSuccess('Claims report downloaded');
+  }, [activeStorm, allBuildings, buildingFlags]);
+
+  // ── Batch Claims Package Export ──
+  const handleExportClaimsPackage = useCallback(() => {
+    if (!allBuildings?.features?.length || !activeStorm) return;
+    const damaged = allBuildings.features.filter((f: any) => {
+      const cat = f.properties?.damage_category;
+      return cat && cat !== 'none';
+    });
+    if (!damaged.length) { setToastSuccess('No damaged buildings to include in claims package.'); return; }
+
+    const now = new Date();
+    const totalLoss = damaged.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
+
+    // Build per-building claim rows
+    const rows = damaged.map((f: any, i: number) => {
+      const p = f.properties || {};
+      const [lon, lat] = f.geometry?.coordinates || [0, 0];
+      const depthFt = p.depth_ft != null ? Number(p.depth_ft) : null;
+      const foundHt = p.found_ht != null ? Number(p.found_ht) : null;
+      const interiorFt = (depthFt != null && foundHt != null) ? Math.max(0, depthFt - foundHt) : null;
+      const structLoss = p.val_struct != null && p.structure_damage_pct != null ? Math.round(p.val_struct * p.structure_damage_pct / 100) : null;
+      const contLoss = p.val_cont != null && p.contents_damage_pct != null ? Math.round(p.val_cont * p.contents_damage_pct / 100) : null;
+      const flagKey = `${lon.toFixed(5)},${lat.toFixed(5)}`;
+      const flag = buildingFlags[flagKey] || '';
+
+      // Wind vs water
+      let windPct = '', waterPct = '';
+      if (activeStorm.landfall_lat && activeStorm.landfall_lon) {
+        const distKm = haversineKm(lat, lon, activeStorm.landfall_lat, activeStorm.landfall_lon);
+        const windMph = estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category);
+        const floodForWind = interiorFt != null ? interiorFt : (depthFt != null ? Math.max(0, depthFt - 1) : 0);
+        const ww = windWaterSplit(windMph, floodForWind);
+        windPct = String(ww.windPct);
+        waterPct = String(ww.waterPct);
+      }
+
+      const sevMap: Record<string, string> = { minor: 'Affected', moderate: 'Minor Damage', major: 'Major Damage', severe: 'Destroyed' };
+      return [
+        i + 1,
+        `SDC-${activeStorm.storm_id}-${(p.building_id || '').slice(-6).toUpperCase() || String(i+1).padStart(4,'0')}`,
+        lat.toFixed(6), lon.toFixed(6),
+        csvField(friendlyBuildingType(p.building_type)),
+        csvField(p.occtype || ''),
+        csvField(sevMap[p.damage_category] || p.damage_category || ''),
+        depthFt != null ? depthFt.toFixed(1) : '',
+        foundHt != null ? foundHt.toFixed(1) : '',
+        interiorFt != null ? interiorFt.toFixed(1) : '',
+        p.structure_damage_pct ?? '',
+        p.contents_damage_pct ?? '',
+        p.estimated_loss_usd ?? '',
+        structLoss ?? '',
+        contLoss ?? '',
+        p.val_struct ?? '',
+        p.val_cont ?? '',
+        windPct,
+        waterPct,
+        p.source || '',
+        p.data_quality ?? '',
+        p.med_yr_blt ?? '',
+        p.num_story ?? '',
+        csvField(flag),
+      ].join(',');
+    });
+
+    // Category counts
+    const catCounts: Record<string, number> = { minor: 0, moderate: 0, major: 0, severe: 0 };
+    damaged.forEach((f: any) => { const c = f.properties?.damage_category; if (c && catCounts[c] !== undefined) catCounts[c]++; });
+
+    const lines = [
+      `# ═══════════════════════════════════════════════════════════════`,
+      `# CLAIMS DOCUMENTATION PACKAGE`,
+      `# ${activeStorm.name} (${activeStorm.year}) — Category ${activeStorm.category}`,
+      `# ═══════════════════════════════════════════════════════════════`,
+      `# Generated: ${now.toISOString()} | SurgeDPS (stormdps.com/surgedps)`,
+      `# Max Wind: ${Math.round(activeStorm.max_wind_kt * 1.15078)} mph | Min Pressure: ${activeStorm.min_pressure_mb} mb`,
+      `# Landfall: ${activeStorm.landfall_lat?.toFixed(4) ?? '?'}°N ${activeStorm.landfall_lon?.toFixed(4) ?? '?'}°W`,
+      `#`,
+      `# DAMAGE SUMMARY`,
+      `# Damaged Buildings: ${damaged.length.toLocaleString()} of ${allBuildings.features.length.toLocaleString()} assessed`,
+      `#   Affected (cosmetic): ${catCounts.minor.toLocaleString()}`,
+      `#   Minor Damage (repairable): ${catCounts.moderate.toLocaleString()}`,
+      `#   Major Damage (uninhabitable): ${catCounts.major.toLocaleString()}`,
+      `#   Destroyed (total loss): ${catCounts.severe.toLocaleString()}`,
+      `# Total Modeled Loss: $${(totalLoss / 1e6).toFixed(1)}M`,
+      `#`,
+      `# COLUMN GUIDE`,
+      `# claim_ref: Unique identifier for cross-referencing (SDC = SurgeDPS Claim)`,
+      `# interior_flood_ft: Surge depth above first finished floor (the real damage driver)`,
+      `# wind_pct / water_pct: Modeled peril attribution for coverage determination`,
+      `# data_quality: 0.0–1.0 reliability of source building data (higher = more trustworthy)`,
+      `# field_flag: Adjuster annotation set in SurgeDPS (blank = not yet inspected)`,
+      `#`,
+      `# MODELED ESTIMATE — NOT FIELD VERIFIED. Use as initial triage; confirm with field inspection.`,
+      `# Cells loaded: ${loadedCells.size} — export covers loaded cells only.`,
+      `#`,
+      `seq,claim_ref,lat,lon,building_type,occupancy_type,damage_severity,surge_depth_ft,foundation_ht_ft,interior_flood_ft,structure_dmg_pct,contents_dmg_pct,total_loss_usd,structure_loss_usd,contents_loss_usd,val_struct,val_cont,wind_pct,water_pct,data_source,data_quality,year_built,num_stories,field_flag`,
+      ...rows,
+    ];
+
+    const csv = lines.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `surgedps_claims_${activeStorm.storm_id}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setToastSuccess(`Claims package exported — ${damaged.length.toLocaleString()} damaged buildings`);
+  }, [allBuildings, activeStorm, buildingFlags, loadedCells]);
+
   // Reverse geocoding for building hover
   const geocodeCache = useRef<Record<string, string>>({});
   const [hoverAddress, setHoverAddress] = useState<string | null>(null);
@@ -2061,6 +2337,18 @@ function App() {
                           </>
                         );
                       })()}
+
+                      {/* ── Generate Claim Report ── */}
+                      {pinnedInfo && (
+                        <>
+                        <hr className="border-gray-200 !my-1.5" />
+                        <button
+                          onClick={() => generateClaimDoc(popupInfo.feature, hoverAddress)}
+                          className="w-full text-center text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 rounded-md py-1.5 transition-colors"
+                          title="Download a formatted claims documentation report for this property"
+                        >📄 Generate Claims Report</button>
+                        </>
+                      )}
                     </div></>
                     );
                   })()
@@ -2148,6 +2436,11 @@ function App() {
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
                         title="Export FEMA Preliminary Damage Assessment summary — data will only include loaded cells"
                       >📋 PDA Report (.csv)</button>
+                      <button
+                        onClick={() => { handleExportClaimsPackage(); setMoreMenuOpen(false); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
+                        title="Export claims documentation package with peril attribution and triage data for all damaged buildings"
+                      >📄 Claims Package (.csv)</button>
                     </div>
                   </>
                 )}
