@@ -32,11 +32,15 @@ COPY data/ ./data/
 # Copy built React frontend from stage 1
 COPY --from=frontend-builder /app/ui/dist/ ./ui/dist/
 
-# Cache dir for cell data
+# Cache dir for cell data — mount a Railway volume here for persistence
+# Railway volume mount point: /app/tmp_integration/cells
 RUN mkdir -p tmp_integration/cells
 
 # Railway sets PORT; default to 8000
 ENV SURGE_API_PORT=8000
 EXPOSE 8000
 
-CMD ["sh", "-c", "python scripts/warm_cache.py && python scripts/api_server.py"]
+# Start warm_cache in background so the server is available immediately.
+# On a fresh volume it generates ~94 storms over 15-30 min; on subsequent
+# deploys it finishes in seconds (skips already-cached storms).
+CMD ["sh", "-c", "python scripts/warm_cache.py &\npython scripts/api_server.py"]
