@@ -52,6 +52,13 @@ class ModelRun:
     avg_damage_pct: float = 0.0     # Average damage % across damaged buildings
     population: Optional[int] = None  # Census county population
 
+    # Forecast track metadata (for advisory-by-advisory timeline)
+    advisory_num: Optional[str] = None     # NHC advisory number
+    hours_to_landfall: Optional[int] = None  # Forecast hours to landfall
+    forecast_lat: Optional[float] = None   # Predicted landfall latitude
+    forecast_lon: Optional[float] = None   # Predicted landfall longitude
+    used_forecast: bool = False            # True if ran at forecast point vs current
+
     # Model version tag — bump when the damage model changes
     model_version: str = "1.0"
 

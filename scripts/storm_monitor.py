@@ -2,16 +2,23 @@
 Active Storm Monitor
 
 Runs as a persistent background process alongside the API server.
-Polls NHC RSS feeds every 30 minutes for active tropical cyclones,
-and automatically runs the full SurgeDPS pipeline for any system
-with tropical storm+ winds approaching the US coast.
+Polls NHC every 30 minutes for active tropical cyclones, fetches
+their forecast tracks, and runs the full SurgeDPS pipeline at the
+predicted landfall point — not just the current position.
 
-Pipeline per storm:
+Pipeline per storm per advisory:
   1. Fetch active storms from NHC RSS
-  2. Filter for actionable systems (≥34 kt, Atlantic, US approach zone)
-  3. Run surge model + NSI buildings + HAZUS damage for 3×3 grid
-  4. Record model run in the validation ledger
-  5. Compute confidence-interval prediction from backtesting data
+  2. Fetch forecast track from NOAA ArcGIS (predicted positions/winds)
+  3. Identify predicted landfall point from the forecast track
+  4. Run surge model at the predicted landfall location
+  5. Fetch NSI buildings + run HAZUS damage for 3×3 grid
+  6. Record model run in the validation ledger (tagged with advisory #)
+  7. Compute confidence-interval prediction from backtesting data
+
+Each advisory creates a new ledger entry, building an advisory-by-
+advisory timeline that shows how the prediction evolves as the storm
+approaches. Post-event, this timeline can be compared against actual
+outcomes to measure forecast-dependent accuracy.
 
 Results are cached to the Railway persistent volume, so when a user
 opens the website during an active storm, everything is pre-computed.
@@ -42,6 +49,7 @@ from damage_model.depth_damage import estimate_damage_from_raster
 from validation.run_ledger import record_from_activation, ModelRun
 from validation.backtester import predict_loss_range
 from data_ingest.census_fetcher import get_population_context
+from storm_catalog.forecast_track import fetch_forecast_track, ForecastTrack
 
 CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'cells')
 MONITOR_STATE_PATH = os.path.join(BASE_DIR, 'tmp_integration', 'monitor_state.json')
@@ -94,17 +102,49 @@ def is_actionable(storm: StormEntry) -> bool:
     return True
 
 
-def run_pipeline(storm: StormEntry) -> dict:
+def run_pipeline(storm: StormEntry, forecast: ForecastTrack = None) -> dict:
     """
     Run the full SurgeDPS pipeline for an active storm.
+
+    If a forecast track is provided, the pipeline runs at the
+    predicted landfall point with forecast wind/pressure rather
+    than the storm's current position. This produces meaningful
+    damage estimates days before the storm arrives.
 
     Returns a summary dict with modeled loss, building count, and
     confidence interval.
     """
+    # ── Use forecast landfall if available ──
+    if forecast and forecast.predicted_landfall:
+        lf = forecast.predicted_landfall
+        # Override storm parameters with forecast landfall values
+        storm = StormEntry(
+            storm_id=storm.storm_id,
+            name=storm.name,
+            year=storm.year,
+            category=lf.category if lf.category > 0 else storm.category,
+            status="active",
+            landfall_lon=lf.lon,
+            landfall_lat=lf.lat,
+            max_wind_kt=lf.max_wind_kt if lf.max_wind_kt > 0 else storm.max_wind_kt,
+            min_pressure_mb=lf.pressure_mb if lf.pressure_mb > 0 else storm.min_pressure_mb,
+            heading_deg=lf.direction_deg if lf.direction_deg > 0 else storm.heading_deg,
+            speed_kt=lf.speed_kt if lf.speed_kt > 0 else storm.speed_kt,
+            basin=storm.basin,
+            advisory=forecast.advisory_num,
+        )
+        print(f"    Running pipeline for {storm.name} — Cat {storm.category}")
+        print(f"    Forecast landfall: ({storm.landfall_lon:.2f}, {storm.landfall_lat:.2f}) "
+              f"in ~{forecast.hours_to_landfall}h")
+        print(f"    Forecast wind: {storm.max_wind_kt} kt, Pressure: {storm.min_pressure_mb} mb")
+    else:
+        print(f"    Running pipeline for {storm.name} ({storm.year}) — Cat {storm.category}")
+        print(f"    Current position: ({storm.landfall_lon:.2f}, {storm.landfall_lat:.2f})")
+        print(f"    Wind: {storm.max_wind_kt} kt, Pressure: {storm.min_pressure_mb} mb")
+        if forecast:
+            print(f"    (no US landfall predicted in forecast track)")
+
     sdir = _storm_cache_dir(storm)
-    print(f"    Running pipeline for {storm.name} ({storm.year}) — Cat {storm.category}")
-    print(f"    Position: ({storm.landfall_lon:.2f}, {storm.landfall_lat:.2f})")
-    print(f"    Wind: {storm.max_wind_kt} kt, Pressure: {storm.min_pressure_mb} mb")
 
     grid_cells = {}
 
@@ -202,6 +242,12 @@ def run_pipeline(storm: StormEntry) -> dict:
         "prediction_high": prediction.get("high", 0),
         "confidence_note": prediction.get("confidence", ""),
         "timestamp": time.time(),
+        # Forecast metadata
+        "advisory_num": forecast.advisory_num if forecast else None,
+        "hours_to_landfall": forecast.hours_to_landfall if forecast else None,
+        "forecast_landfall_lat": storm.landfall_lat,
+        "forecast_landfall_lon": storm.landfall_lon,
+        "used_forecast_track": forecast is not None and forecast.predicted_landfall is not None,
     }
 
     print(f"    ✓ Modeled loss: ${model_run.modeled_loss/1e6:,.1f}M "
@@ -237,6 +283,17 @@ def poll_once() -> list[dict]:
 
     print(f"  Found {len(active)} active system(s)")
 
+    # Fetch forecast tracks from NOAA ArcGIS
+    forecast_tracks: dict[str, ForecastTrack] = {}
+    try:
+        tracks = fetch_forecast_track()
+        for t in tracks:
+            forecast_tracks[t.storm_name.upper()] = t
+        if tracks:
+            print(f"  Fetched {len(tracks)} forecast track(s) from NOAA")
+    except Exception as e:
+        print(f"  [warn] Forecast track fetch failed: {e} — using current positions")
+
     for storm in active:
         tag = f"{storm.name} ({storm.storm_id})"
 
@@ -251,16 +308,30 @@ def poll_once() -> list[dict]:
             print(f"  ⏭ {tag} — skipping: {', '.join(reason)}")
             continue
 
+        # Match forecast track by storm name
+        forecast = forecast_tracks.get(storm.name.upper().replace("HURRICANE ", "")
+                                                          .replace("TROPICAL STORM ", ""))
+
+        # Use forecast advisory number if available, else fall back to RSS
+        current_advisory = (forecast.advisory_num if forecast else None) or storm.advisory or ""
+
         # Check if we already processed this advisory
         last_advisory = state.get("processed", {}).get(storm.storm_id, "")
-        current_advisory = storm.advisory or ""
         if last_advisory == current_advisory and current_advisory:
             print(f"  ⏭ {tag} — advisory {current_advisory} already processed")
             continue
 
         print(f"\n  ▶ {tag} — Cat {storm.category}, {storm.max_wind_kt} kt")
+        if forecast:
+            lf = forecast.predicted_landfall
+            if lf:
+                print(f"    Forecast: landfall in ~{forecast.hours_to_landfall}h "
+                      f"at ({lf.lon:.2f}, {lf.lat:.2f}), {lf.max_wind_kt} kt")
+            else:
+                print(f"    Forecast: {len(forecast.points)} track points, no US landfall predicted")
+
         try:
-            summary = run_pipeline(storm)
+            summary = run_pipeline(storm, forecast=forecast)
             results.append(summary)
 
             # Mark advisory as processed
