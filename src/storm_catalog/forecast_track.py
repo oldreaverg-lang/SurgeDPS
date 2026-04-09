@@ -266,6 +266,52 @@ def _cache_track(track: ForecastTrack):
         json.dump(track.to_dict(), f, indent=2)
 
 
+def fetch_forecast_cone() -> Dict[str, dict]:
+    """
+    Fetch the NHC forecast cone polygons for all active Atlantic storms.
+
+    Returns a dict of storm_name → GeoJSON Polygon geometry representing
+    the cone of uncertainty. This is the area the user can drag the
+    landfall marker within.
+
+    Cone layers: AT1=8, AT2=34, AT3=60, AT4=86, AT5=112
+    """
+    _AT_CONE_LAYERS = [8, 34, 60, 86, 112]
+    cones: Dict[str, dict] = {}
+
+    for layer_id in _AT_CONE_LAYERS:
+        features = _query_layer(layer_id)
+        if not features:
+            continue
+
+        for feat in features:
+            attrs = feat.get("attributes", {})
+            name = (attrs.get("stormname") or "").strip()
+            if not name:
+                continue
+
+            geom = feat.get("geometry", {})
+            rings = geom.get("rings", [])
+            if not rings:
+                continue
+
+            # Convert ArcGIS rings to GeoJSON polygon
+            geojson_coords = []
+            for ring in rings:
+                geojson_coords.append([[pt[0], pt[1]] for pt in ring])
+
+            cones[name.upper()] = {
+                "type": "Polygon",
+                "coordinates": geojson_coords,
+                "properties": {
+                    "storm_name": name,
+                    "advisory_num": attrs.get("advisnum", ""),
+                },
+            }
+
+    return cones
+
+
 def get_cached_tracks(storm_name: str) -> List[dict]:
     """
     Load all cached forecast tracks for a storm (advisory timeline).

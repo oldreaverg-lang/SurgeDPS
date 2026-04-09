@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import Map, { Source, Layer, NavigationControl, Popup } from 'react-map-gl/maplibre';
+import Map, { Source, Layer, NavigationControl, Popup, Marker } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -746,6 +746,15 @@ function App() {
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
   const [manifest, setManifest] = useState<Record<string, any>>({});
 
+  // ── Simulator state (active storms with forecast track) ──
+  const [simMode, setSimMode] = useState(false);
+  const [simMarker, setSimMarker] = useState<{ lng: number; lat: number } | null>(null);
+  const [simRunning, setSimRunning] = useState(false);
+  const [simResult, setSimResult] = useState<any>(null);
+  const [forecastCone, setForecastCone] = useState<any>(null);       // GeoJSON polygon
+  const [forecastTrack, setForecastTrack] = useState<any[]>([]);     // Forecast points
+  const [forecastLandfall, setForecastLandfall] = useState<{ lat: number; lon: number } | null>(null);
+
   // Toast notifications (error = red, success = green)
   const [cellError, setCellError] = useState<string | null>(null);
   const [toastSuccess, setToastSuccess] = useState<string | null>(null);
@@ -1071,6 +1080,54 @@ function App() {
       activatingRef.current = false;
     }
   }, []); // stable — no dependencies
+
+  // ── Fetch forecast track for active storms ──
+  useEffect(() => {
+    if (!activeStorm || activeStorm.status !== 'active') {
+      setForecastCone(null);
+      setForecastTrack([]);
+      setForecastLandfall(null);
+      setSimMode(false);
+      return;
+    }
+    (async () => {
+      try {
+        const r = await fetch('/surgedps/api/forecast/track');
+        if (!r.ok) return;
+        const tracks = await r.json();
+        if (!tracks?.length) return;
+        // Match by storm name
+        const name = activeStorm.name.replace(/^Hurricane\s+/i, '').replace(/^Tropical Storm\s+/i, '').toUpperCase();
+        const match = tracks.find((t: any) => t.storm_name?.toUpperCase() === name);
+        if (match) {
+          setForecastTrack(match.points || []);
+          if (match.cone) setForecastCone(match.cone);
+          if (match.predicted_landfall) {
+            setForecastLandfall({ lat: match.predicted_landfall.lat, lon: match.predicted_landfall.lon });
+            setSimMarker({ lng: match.predicted_landfall.lon, lat: match.predicted_landfall.lat });
+          }
+        }
+      } catch { }
+    })();
+  }, [activeStorm]);
+
+  // ── Run simulation at custom landfall point ──
+  const runSimulation = useCallback(async () => {
+    if (!simMarker || !activeStorm) return;
+    setSimRunning(true);
+    setSimResult(null);
+    try {
+      const r = await fetch(`/surgedps/api/simulate?lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`);
+      if (!r.ok) throw new Error('Simulation failed');
+      const data = await r.json();
+      setSimResult(data);
+    } catch (err) {
+      console.error('Simulation error:', err);
+      setCellError('Simulation failed — try adjusting the landfall point.');
+    } finally {
+      setSimRunning(false);
+    }
+  }, [simMarker, activeStorm]);
 
   // ── Restore shared-link params on mount ──
   useEffect(() => {
@@ -1471,6 +1528,49 @@ function App() {
             </Source>
           )}
 
+          {/* ── Forecast cone overlay (active storms only) ── */}
+          {simMode && forecastCone && (
+            <Source id="forecast-cone" type="geojson" data={forecastCone}>
+              <Layer id="cone-fill" type="fill" paint={{ 'fill-color': '#ffffff', 'fill-opacity': 0.12 }} />
+              <Layer id="cone-border" type="line" paint={{ 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 0.5, 'line-dasharray': [4, 3] }} />
+            </Source>
+          )}
+
+          {/* ── Forecast track line (active storms only) ── */}
+          {simMode && forecastTrack.length > 1 && (
+            <Source id="forecast-track-line" type="geojson" data={{
+              type: 'Feature', geometry: { type: 'LineString', coordinates: forecastTrack.map((p: any) => [p.lon, p.lat]) }, properties: {}
+            }}>
+              <Layer id="track-line" type="line" paint={{ 'line-color': '#ef4444', 'line-width': 3, 'line-dasharray': [6, 4] }} />
+            </Source>
+          )}
+
+          {/* ── Forecast track points ── */}
+          {simMode && forecastTrack.map((p: any, i: number) => (
+            <Marker key={`fpt-${i}`} longitude={p.lon} latitude={p.lat}>
+              <div className="w-3 h-3 rounded-full bg-red-500 border-2 border-white shadow" title={`${p.date_label} — ${p.max_wind_kt} kt`} />
+            </Marker>
+          ))}
+
+          {/* ── Draggable landfall marker (simulator) ── */}
+          {simMode && simMarker && (
+            <Marker
+              longitude={simMarker.lng}
+              latitude={simMarker.lat}
+              draggable
+              onDragEnd={(e) => setSimMarker({ lng: e.lngLat.lng, lat: e.lngLat.lat })}
+            >
+              <div className="flex flex-col items-center cursor-grab active:cursor-grabbing" title="Drag to simulate landfall at a different location">
+                <div className="w-6 h-6 rounded-full bg-red-600 border-3 border-white shadow-lg flex items-center justify-center">
+                  <div className="w-2 h-2 rounded-full bg-white" />
+                </div>
+                <div className="text-[10px] font-bold text-white bg-red-600/90 px-1.5 py-0.5 rounded mt-0.5 whitespace-nowrap shadow">
+                  LANDFALL
+                </div>
+              </div>
+            </Marker>
+          )}
+
           {(pinnedInfo || hoverInfo) && (
             <Popup longitude={pinnedInfo?.lng ?? hoverInfo?.lng} latitude={pinnedInfo?.lat ?? hoverInfo?.lat} closeButton={pinnedInfo ? true : false} closeOnClick={false} anchor="bottom" className="z-50" onClose={() => pinnedInfo && setPinnedInfo(null)}>
               <div className="p-2 min-w-[200px]">
@@ -1752,7 +1852,80 @@ function App() {
           setValidatedDps({ value: 0, adj: 0, reason: '' }); setManifest({});
           setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
           setShowCounties(false); setShowFloodZones(false); setBuildingFlags({});
+          setSimMode(false); setSimResult(null); setForecastCone(null); setForecastTrack([]);
         }} />
+
+        {/* ── Simulator panel (active storms with forecast track) ── */}
+        {activeStorm && activeStorm.status === 'active' && forecastTrack.length > 0 && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30">
+            {!simMode ? (
+              <button
+                onClick={() => setSimMode(true)}
+                className="bg-red-600 hover:bg-red-700 text-white text-sm font-bold px-5 py-2.5 rounded-full shadow-lg transition-all hover:scale-105 flex items-center gap-2"
+              >
+                <span className="text-lg">🎯</span> Open Landfall Simulator
+              </button>
+            ) : (
+              <div className="bg-gray-900/95 backdrop-blur rounded-xl shadow-2xl border border-gray-700 px-5 py-4 max-w-md">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-white font-bold text-sm flex items-center gap-2">
+                    <span className="text-lg">🎯</span> Landfall Simulator
+                  </h3>
+                  <button onClick={() => { setSimMode(false); setSimResult(null); }}
+                    className="text-gray-400 hover:text-white text-xs px-1">✕</button>
+                </div>
+
+                <p className="text-gray-400 text-xs mb-3">
+                  Drag the red marker along the coastline to test different landfall scenarios within the NHC forecast cone.
+                </p>
+
+                {simMarker && (
+                  <div className="text-xs text-gray-300 mb-3 flex gap-4">
+                    <span>Lat: <strong>{simMarker.lat.toFixed(3)}</strong></span>
+                    <span>Lon: <strong>{simMarker.lng.toFixed(3)}</strong></span>
+                  </div>
+                )}
+
+                <button
+                  onClick={runSimulation}
+                  disabled={simRunning || !simMarker}
+                  className={`w-full py-2.5 rounded-lg font-bold text-sm transition-all ${
+                    simRunning
+                      ? 'bg-gray-700 text-gray-400 cursor-wait'
+                      : 'bg-red-600 hover:bg-red-700 text-white hover:scale-[1.02]'
+                  }`}
+                >
+                  {simRunning ? 'Simulating...' : 'Simulate Losses'}
+                </button>
+
+                {/* Simulation results */}
+                {simResult && (
+                  <div className="mt-3 pt-3 border-t border-gray-700 space-y-2">
+                    <div className="text-center">
+                      <div className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">Simulated Loss (Center Cell)</div>
+                      <div className="text-2xl font-black text-red-500">
+                        ${simResult.summary?.total_loss_M?.toLocaleString()}M
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {simResult.summary?.buildings_assessed?.toLocaleString()} properties · {simResult.summary?.buildings_damaged?.toLocaleString()} damaged
+                      </div>
+                    </div>
+                    {simResult.population?.pop_label && (
+                      <div className="text-xs text-gray-400 text-center">
+                        {simResult.population.pop_label} in {simResult.population.county_name}, {simResult.population.state_code}
+                      </div>
+                    )}
+                    {simResult.prediction && (
+                      <div className="text-[10px] text-gray-500 text-center mt-1">
+                        Confidence range: ${(simResult.prediction.low / 1e6).toFixed(0)}M – ${(simResult.prediction.high / 1e6).toFixed(0)}M
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Cell loading progress indicator */}
         {loadingCells.size > 0 && (

@@ -49,6 +49,7 @@ from data_ingest.census_fetcher import get_population_context
 from validation.run_ledger import record_from_activation
 from validation.backtester import run_backtest, score_storm, predict_loss_range
 from validation.ground_truth import get_ground_truth
+from storm_catalog.forecast_track import fetch_forecast_track, fetch_forecast_cone
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'cells')
@@ -597,6 +598,162 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_json(200, result)
             except Exception as e:
                 self._send_error(500, str(e))
+            return
+
+        # ── GET /api/forecast/track ── forecast track points + cone for active storms
+        if path == '/api/forecast/track':
+            try:
+                tracks = fetch_forecast_track()
+                cones = fetch_forecast_cone()
+                result = []
+                for t in tracks:
+                    td = t.to_dict()
+                    cone_key = t.storm_name.upper()
+                    td['cone'] = cones.get(cone_key)
+                    result.append(td)
+                self._send_json(200, result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/simulate?lat=N&lon=N&wind=N&pressure=N ── what-if scenario
+        if path == '/api/simulate':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active — activate a storm first')
+                return
+            try:
+                sim_lat = float(params.get('lat', [str(_active_storm.landfall_lat)])[0])
+                sim_lon = float(params.get('lon', [str(_active_storm.landfall_lon)])[0])
+                sim_wind = int(params.get('wind', [str(_active_storm.max_wind_kt)])[0])
+                sim_pressure = int(params.get('pressure', [str(_active_storm.min_pressure_mb)])[0])
+                sim_heading = float(params.get('heading', [str(_active_storm.heading_deg)])[0])
+                sim_speed = float(params.get('speed', [str(_active_storm.speed_kt)])[0])
+            except (ValueError, TypeError):
+                self._send_error(400, 'Invalid simulation parameters')
+                return
+
+            print(f"\n{'='*60}")
+            print(f"SIMULATION: {_active_storm.name} — What-if at ({sim_lon:.2f}, {sim_lat:.2f})")
+            print(f"  Wind: {sim_wind} kt  Pressure: {sim_pressure} mb")
+            print(f"{'='*60}")
+
+            # Build a temporary StormEntry with the user's parameters
+            sim_storm = StormEntry(
+                storm_id=f"{_active_storm.storm_id}_sim",
+                name=_active_storm.name,
+                year=_active_storm.year,
+                category=_active_storm.category,
+                status="simulation",
+                landfall_lon=sim_lon,
+                landfall_lat=sim_lat,
+                max_wind_kt=sim_wind,
+                min_pressure_mb=sim_pressure,
+                heading_deg=sim_heading,
+                speed_kt=sim_speed,
+                basin=_active_storm.basin,
+                advisory="simulation",
+            )
+
+            # Run center cell only (fast ~15-30s)
+            _progress.update(step='Running simulation', step_num=0, total_steps=4,
+                             started_at=_time.time(), storm_id=sim_storm.storm_id)
+
+            sim_cache = os.path.join(CACHE_DIR, sim_storm.storm_id)
+            os.makedirs(sim_cache, exist_ok=True)
+
+            col, row = 0, 0
+            origin_lon = sim_storm.grid_origin_lon
+            origin_lat = sim_storm.grid_origin_lat
+            lon_min = origin_lon + col * CELL_WIDTH
+            lat_min = origin_lat + row * CELL_HEIGHT
+            lon_max = lon_min + CELL_WIDTH
+            lat_max = lat_min + CELL_HEIGHT
+
+            # 1. Surge raster
+            _progress.update(step='Generating surge model', step_num=1)
+            raster_path = os.path.join(sim_cache, f'sim_depth.tif')
+            generate_surge_raster(
+                lon_min=lon_min, lat_min=lat_min,
+                lon_max=lon_max, lat_max=lat_max,
+                output_path=raster_path,
+                landfall_lon=sim_storm.landfall_lon,
+                landfall_lat=sim_storm.landfall_lat,
+                max_wind_kt=sim_storm.max_wind_kt,
+                min_pressure_mb=sim_storm.min_pressure_mb,
+                heading_deg=sim_storm.heading_deg,
+                speed_kt=sim_storm.speed_kt,
+            )
+
+            # 2. Flood polygons
+            _progress.update(step='Building flood map', step_num=2)
+            flood_path = os.path.join(sim_cache, f'sim_flood.geojson')
+            raster_to_geojson(raster_path, flood_path)
+            with open(flood_path) as f:
+                flood_data = json.load(f)
+
+            # 3. Buildings
+            _progress.update(step='Fetching building footprints', step_num=3)
+            buildings_path = os.path.join(sim_cache, f'sim_buildings.json')
+            fetch_buildings(lon_min, lat_min, lon_max, lat_max, buildings_path, cache=True)
+
+            # 4. Damage model
+            _progress.update(step='Running damage model', step_num=4)
+            damage_path = os.path.join(sim_cache, f'sim_damage.geojson')
+            with open(buildings_path) as f:
+                buildings_data = json.load(f)
+            if buildings_data.get("features"):
+                estimate_damage_from_raster(raster_path, buildings_path, damage_path)
+            else:
+                with open(damage_path, 'w') as f:
+                    json.dump({"type": "FeatureCollection", "features": []}, f)
+
+            with open(damage_path) as f:
+                damage_data = json.load(f)
+
+            # Compute quick summary
+            total_loss = sum(f['properties'].get('estimated_loss_usd', 0) or 0
+                             for f in damage_data.get('features', []))
+            n_buildings = len(damage_data.get('features', []))
+            n_damaged = sum(1 for f in damage_data.get('features', [])
+                           if (f['properties'].get('total_damage_pct', 0) or 0) > 0)
+
+            _progress.update(step='Complete', step_num=4)
+
+            # Population context
+            pop_ctx = None
+            try:
+                pop_ctx = get_population_context(sim_lat, sim_lon)
+            except Exception:
+                pass
+
+            sim_result = {
+                "simulation": True,
+                "parameters": {
+                    "lat": sim_lat, "lon": sim_lon,
+                    "wind_kt": sim_wind, "pressure_mb": sim_pressure,
+                    "heading_deg": sim_heading, "speed_kt": sim_speed,
+                },
+                "summary": {
+                    "total_loss": round(total_loss, 2),
+                    "total_loss_M": round(total_loss / 1e6, 1),
+                    "buildings_assessed": n_buildings,
+                    "buildings_damaged": n_damaged,
+                    "scope": "center_cell",
+                },
+                "population": pop_ctx,
+                "buildings": damage_data,
+                "flood": flood_data,
+            }
+
+            # Confidence interval from backtesting
+            try:
+                pred = predict_loss_range(total_loss)
+                sim_result["prediction"] = pred
+            except Exception:
+                pass
+
+            print(f"  Simulation complete: ${total_loss/1e6:,.1f}M loss, {n_buildings} buildings")
+            self._send_json(200, sim_result)
             return
 
         # ── GET /api/validation/backtest ── full backtest report
