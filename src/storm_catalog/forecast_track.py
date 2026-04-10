@@ -57,11 +57,9 @@ _EP_FORECAST_POINT_LAYERS = [136, 162, 188, 214, 240]
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "SurgeDPS/1.0 (surgedps.com)"})
 
-# Cache on Railway volume
-_BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-_PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(_BASE_DIR, 'tmp_integration'))
-_FORECAST_CACHE_DIR = os.path.join(_PERSISTENT_DIR, 'forecasts')
-os.makedirs(_FORECAST_CACHE_DIR, exist_ok=True)
+# Cache on Railway volume — paths centralised in storage.py
+from persistent_paths import FORECASTS_DIR
+_FORECAST_CACHE_DIR = str(FORECASTS_DIR)
 
 
 @dataclass

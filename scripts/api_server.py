@@ -53,9 +53,9 @@ from validation.ground_truth import get_ground_truth
 from storm_catalog.forecast_track import fetch_forecast_track, fetch_forecast_cone
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(BASE_DIR, 'tmp_integration'))
-CACHE_DIR = os.path.join(PERSISTENT_DIR, 'cells')
-os.makedirs(CACHE_DIR, exist_ok=True)
+from persistent_paths import CELLS_DIR, GEOCODE_DIR, PERSISTENT_DATA_DIR
+PERSISTENT_DIR = str(PERSISTENT_DATA_DIR)
+CACHE_DIR = str(CELLS_DIR)
 
 # ── DPS Score Lookup (from StormDPS compiled_bundle) ──
 _DPS_SCORES: dict = {}
@@ -148,8 +148,7 @@ import hashlib as _hashlib
 import urllib.request as _urllib_request
 
 # ── Persistent Nominatim geocoding cache ──
-_GEOCODE_CACHE_DIR = os.path.join(PERSISTENT_DIR, 'geocode')
-os.makedirs(_GEOCODE_CACHE_DIR, exist_ok=True)
+_GEOCODE_CACHE_DIR = str(GEOCODE_DIR)  # imported from storage.py
 _NOMINATIM_HEADERS = {'User-Agent': 'SurgeDPS/1.0 (surgedps.com)'}
 _last_nominatim_call = 0.0  # rate-limit: 1 req/sec
 
@@ -870,6 +869,12 @@ class CellHandler(BaseHTTPRequestHandler):
         # ── GET /api/health ──
         if path == '/api/health':
             self._send_json(200, {'status': 'ok', 'active_storm': _active_storm.storm_id if _active_storm else None})
+            return
+
+        # ── GET /api/health/storage ──
+        if path == '/api/health/storage':
+            from persistent_paths import storage_summary
+            self._send_json(200, storage_summary())
             return
 
         # ── Static file serving (built React frontend) ──

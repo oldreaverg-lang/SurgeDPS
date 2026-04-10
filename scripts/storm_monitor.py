@@ -51,10 +51,9 @@ from validation.backtester import predict_loss_range
 from data_ingest.census_fetcher import get_population_context
 from storm_catalog.forecast_track import fetch_forecast_track, ForecastTrack
 
-PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(BASE_DIR, 'tmp_integration'))
-CACHE_DIR = os.path.join(PERSISTENT_DIR, 'cells')
-MONITOR_STATE_PATH = os.path.join(PERSISTENT_DIR, 'monitor_state.json')
-os.makedirs(CACHE_DIR, exist_ok=True)
+from persistent_paths import CELLS_DIR, MONITOR_STATE_FILE, PERSISTENT_DATA_DIR as PERSISTENT_DIR
+CACHE_DIR = str(CELLS_DIR)
+MONITOR_STATE_PATH = str(MONITOR_STATE_FILE)
 
 # ── Configuration ──
 POLL_INTERVAL = 1800          # 30 minutes between NHC checks

@@ -22,14 +22,14 @@ from tile_gen.pmtiles_builder import generate_tiles_for_layer
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 UI_PUBLIC_DIR = os.path.join(BASE_DIR, 'ui', 'public')
-TMP_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(BASE_DIR, 'tmp_integration'))
+from persistent_paths import PERSISTENT_DATA_DIR
+TMP_DIR = str(PERSISTENT_DATA_DIR)
 
 # Galveston Bounding Box
 LON_MIN, LAT_MIN = -95.0, 29.2
 LON_MAX, LAT_MAX = -94.6, 29.5
 
 os.makedirs(UI_PUBLIC_DIR, exist_ok=True)
-os.makedirs(TMP_DIR, exist_ok=True)
 
 
 def generate_surge_raster() -> str:
