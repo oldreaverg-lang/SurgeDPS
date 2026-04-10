@@ -1938,6 +1938,17 @@ function App() {
       const mod = await import('./assets/counties-coastal.json');
       const data: any = (mod as any).default ?? mod;
       if (!data?.features?.length) throw new Error('Empty counties dataset');
+      // Assign a stable categorical color index to every feature so the
+      // county-fill layer can render a distinct-color choropleth (four-color-
+      // map style). Uses a simple hash of GEOID mod 8 — not a true greedy
+      // graph-coloring, so occasional same-color neighbors are possible, but
+      // with 8 cool pastels the jurisdictions read at a glance.
+      for (const f of data.features) {
+        const g: string = f.properties?.GEOID || f.properties?.NAME || '';
+        let h = 0;
+        for (let i = 0; i < g.length; i++) h = (h * 31 + g.charCodeAt(i)) | 0;
+        f.properties.colorIdx = Math.abs(h) % 8;
+      }
       setCountiesGeoJSON(data);
       countiesLoadedRef.current = true;
     } catch (err: any) {
@@ -3410,15 +3421,32 @@ ${fieldFlag ? `
           {showCounties && (
             countiesGeoJSON && (
               <Source id="county-boundaries" type="geojson" data={countiesGeoJSON}>
+                {/* Categorical choropleth fill — one of 8 cool pastels per
+                    county so adjacent jurisdictions read as distinct at a
+                    glance. Cool palette deliberately avoids the damage-bubble
+                    hues (green/yellow/orange/red) so bubbles stay legible. */}
                 <Layer
                   id="county-fill"
                   type="fill"
-                  paint={{ 'fill-color': '#ffffff', 'fill-opacity': 0.04 }}
+                  paint={{
+                    'fill-color': ['match', ['get', 'colorIdx'],
+                      0, '#93c5fd',  // blue-300
+                      1, '#a5b4fc',  // indigo-300
+                      2, '#c4b5fd',  // violet-300
+                      3, '#d8b4fe',  // purple-300
+                      4, '#f0abfc',  // fuchsia-300
+                      5, '#7dd3fc',  // sky-300
+                      6, '#67e8f9',  // cyan-300
+                      7, '#5eead4',  // teal-300
+                      '#cbd5e1',     // slate fallback
+                    ],
+                    'fill-opacity': 0.32,
+                  }}
                 />
                 <Layer
                   id="county-line"
                   type="line"
-                  paint={{ 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.5 }}
+                  paint={{ 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.7 }}
                 />
                 <Layer
                   id="county-labels"
