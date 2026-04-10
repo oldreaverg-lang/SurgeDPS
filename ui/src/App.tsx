@@ -33,7 +33,7 @@ import type {
   VendorCoverageLayer,
   TimeToAccessLayer,
 } from './betaLayers';
-import { rollupByCounty } from './jurisdictions';
+import { rollupByCounty, rollupToCentroidGeoJSON } from './jurisdictions';
 import type { CountyRollup } from './jurisdictions';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1905,7 +1905,6 @@ function App() {
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<any>(null);
   const [countiesLoading, setCountiesLoading] = useState(false);
   const [countiesError, setCountiesError] = useState<string | null>(null);
-  const countiesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showFloodZones, setShowFloodZones] = useState(false);
   const [floodZonesGeoJSON, setFloodZonesGeoJSON] = useState<any>(null);
   const [floodZonesLoading, setFloodZonesLoading] = useState(false);
@@ -1925,50 +1924,28 @@ function App() {
     }
   }, [activeStorm]);
 
-  // ── County boundaries (Census TIGERweb FeatureServer) ──
-  // Fetches county polygons for the current map view as GeoJSON, debounced so
-  // it only fires after the user stops panning. Only active when showCounties=true.
-  // Sets loading + error state so the user actually sees what's happening — the
-  // old silent-catch version made the toggle feel broken on upstream failures.
-  const fetchCounties = useCallback((bounds: { west: number; south: number; east: number; north: number }) => {
-    if (countiesFetchTimer.current) clearTimeout(countiesFetchTimer.current);
-    countiesFetchTimer.current = setTimeout(async () => {
-      const { west, south, east, north } = bounds;
-      const params = new URLSearchParams({
-        geometry: `${west},${south},${east},${north}`,
-        geometryType: 'esriGeometryEnvelope',
-        inSR: '4326',
-        outSR: '4326',
-        spatialRel: 'esriSpatialRelIntersects',
-        outFields: 'NAME,STUSAB,GEOID',
-        returnGeometry: 'true',
-        f: 'geojson',
-      });
-      const url = `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/FeatureServer/0/query?${params}`;
-      setCountiesLoading(true);
-      setCountiesError(null);
-      const ac = new AbortController();
-      const timeout = setTimeout(() => ac.abort(), 12_000);
-      try {
-        const res = await fetch(url, { signal: ac.signal });
-        clearTimeout(timeout);
-        if (!res.ok) throw new Error(`TIGERweb ${res.status}`);
-        const data = await res.json();
-        if (data?.error) throw new Error(data.error.message || 'TIGERweb error');
-        if (data?.features?.length) {
-          setCountiesGeoJSON(data);
-        } else {
-          // Not an error — just empty — but clear any stale polygon
-          setCountiesGeoJSON({ type: 'FeatureCollection', features: [] });
-        }
-      } catch (err: any) {
-        clearTimeout(timeout);
-        console.warn('[counties] fetch failed:', err?.message || err);
-        setCountiesError(err?.name === 'AbortError' ? 'County fetch timed out' : 'Could not load county boundaries');
-      } finally {
-        setCountiesLoading(false);
-      }
-    }, 600);
+  // ── County boundaries (bundled coastal-states GeoJSON) ──
+  // The overlay ships as a static asset (~1.2 MB, Census cartographic boundary,
+  // coastal + Gulf + Pacific states only). Lazy-loaded on first toggle via dynamic
+  // import so the initial bundle isn't penalized. No upstream dependency = no
+  // WAF/CORS/timeout failure modes. Once loaded, the same GeoJSON is reused.
+  const countiesLoadedRef = useRef(false);
+  const loadCounties = useCallback(async () => {
+    if (countiesLoadedRef.current) return;
+    setCountiesLoading(true);
+    setCountiesError(null);
+    try {
+      const mod = await import('./assets/counties-coastal.json');
+      const data: any = (mod as any).default ?? mod;
+      if (!data?.features?.length) throw new Error('Empty counties dataset');
+      setCountiesGeoJSON(data);
+      countiesLoadedRef.current = true;
+    } catch (err: any) {
+      console.warn('[counties] load failed:', err?.message || err);
+      setCountiesError('Could not load county boundaries');
+    } finally {
+      setCountiesLoading(false);
+    }
   }, []);
 
   // ── FEMA NFHL flood zone fetch ──
@@ -2113,28 +2090,19 @@ function App() {
   useEffect(() => { if (cellError) { const t = setTimeout(() => { setCellError(null); setRetryStormId(null); }, 8000); return () => clearTimeout(t); } }, [cellError]);
   useEffect(() => { if (toastSuccess) { const t = setTimeout(() => setToastSuccess(null), 3000); return () => clearTimeout(t); } }, [toastSuccess]);
 
-  // Fetch county boundaries when showCounties is enabled; clear when disabled.
-  // Retries briefly if the map ref isn't ready yet on first toggle (race on
-  // initial render) — the old version silently no-op'd and the layer never
-  // populated until the user panned.
+  // Load counties on first enable OR as soon as buildings are loaded (needed
+  // for the low-zoom county-aggregate bubble layer, which is on regardless of
+  // the overlay toggle). The GeoJSON is bundled so there's no network
+  // dependency — a successful load sticks until the tab reloads.
   useEffect(() => {
-    if (showCounties) {
-      const tryFetch = (attempt: number) => {
-        if (mapRef.current) {
-          const b = mapRef.current.getBounds();
-          fetchCounties({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
-        } else if (attempt < 10) {
-          setTimeout(() => tryFetch(attempt + 1), 150);
-        }
-      };
-      tryFetch(0);
-    } else {
-      if (countiesFetchTimer.current) clearTimeout(countiesFetchTimer.current);
-      setCountiesGeoJSON(null);
+    if (showCounties || allBuildings?.features?.length) {
+      loadCounties();
+    }
+    if (!showCounties) {
       setCountiesError(null);
       setCountiesLoading(false);
     }
-  }, [showCounties, fetchCounties]);
+  }, [showCounties, allBuildings, loadCounties]);
 
   // Fetch FEMA flood zones when showFloodZones is enabled; clear when disabled.
   useEffect(() => {
@@ -3033,10 +3001,20 @@ ${fieldFlag ? `
   // overlay is on. EM uses this to allocate rescue teams/shelter beds
   // per jurisdiction since counties are independently managed.
   // Null when the overlay is off or there's no data yet.
+  // Compute county rollup whenever counties data and buildings are both present.
+  // This drives both the JurisdictionsPanel (when Counties overlay is on) and
+  // the low-zoom county-aggregated bubble layer (always on, so the EM sees
+  // one bubble per county at max zoom out instead of geographically arbitrary
+  // supercluster blobs).
   const countyRollup = useMemo(() => {
-    if (!showCounties || !countiesGeoJSON || !allBuildings) return null;
+    if (!countiesGeoJSON || !allBuildings) return null;
     return rollupByCounty(allBuildings, countiesGeoJSON);
-  }, [showCounties, countiesGeoJSON, allBuildings]);
+  }, [countiesGeoJSON, allBuildings]);
+
+  const countyAggregatePoints = useMemo(() => {
+    if (!countyRollup || countyRollup.length === 0) return null;
+    return rollupToCentroidGeoJSON(countyRollup);
+  }, [countyRollup]);
 
   // Critical facilities breakdown
   const criticalBreakdown = useMemo(() => {
@@ -3420,10 +3398,7 @@ ${fieldFlag ? `
           onMoveEnd={e => {
             setZoom(e.viewState.zoom);
             if (basemap === 'satellite') fetchImageryMeta(e.viewState.latitude, e.viewState.longitude);
-            if (showCounties && mapRef.current) {
-              const b = mapRef.current.getBounds();
-              fetchCounties({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
-            }
+            // Counties are bundled so no per-pan refetch needed.
             if (showFloodZones && mapRef.current) {
               const b = mapRef.current.getBounds();
               fetchFloodZones({ west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() });
@@ -3518,7 +3493,12 @@ ${fieldFlag ? `
               cluster={true} clusterMaxZoom={14} clusterRadius={50}
               clusterProperties={{ total_loss: ['+', ['get', 'estimated_loss_usd']] }}
             >
+              {/* Individual-building and supercluster bubbles only at zoom ≥ 8.
+                  Below zoom 8 we switch to county-aggregate bubbles so the EM
+                  sees one marker per jurisdiction instead of geographically
+                  arbitrary supercluster blobs. */}
               <Layer id="damage-points" type="circle" filter={['!', ['has', 'point_count']]}
+                minzoom={8}
                 paint={{
                   'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 13, 8, 14, 12, 16, 16, 18, 22],
                   'circle-color': ['match', ['get', 'damage_category'], 'none', '#4ade80', 'minor', '#facc15', 'moderate', '#fb923c', 'major', '#ef4444', 'severe', '#7f1d1d', '#9ca3af'],
@@ -3526,6 +3506,7 @@ ${fieldFlag ? `
                   'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
                 }} />
               <Layer id="damage-clusters" type="circle" filter={['has', 'point_count']}
+                minzoom={8}
                 paint={{
                   'circle-color': ['step', ['/', ['get', 'total_loss'], ['get', 'point_count']],
                     '#4ade80', 5000, '#facc15', 25000, '#fb923c', 75000, '#ef4444', 200000, '#7f1d1d'],
@@ -3533,11 +3514,49 @@ ${fieldFlag ? `
                   'circle-stroke-width': 3, 'circle-stroke-color': '#fff',
                 }} />
               <Layer id="damage-cluster-count" type="symbol" filter={['has', 'point_count']}
+                minzoom={8}
                 layout={{
                   'text-field': ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1000]]], 'K'],
                   'text-size': 11,
                 }}
                 paint={{ 'text-color': '#fff', 'text-halo-color': 'rgba(0,0,0,0.8)', 'text-halo-width': 1.5 }} />
+            </Source>
+          )}
+
+          {/* County-aggregate bubbles — one per county at the bbox center.
+              Visible only at low zoom (zoom < 8). Color by worst-severity,
+              radius by building count, label with county name + count. */}
+          {countyAggregatePoints && (
+            <Source id="county-aggregate-data" type="geojson" data={countyAggregatePoints}>
+              <Layer id="county-aggregate-circle" type="circle"
+                maxzoom={8}
+                paint={{
+                  'circle-radius': ['interpolate', ['linear'], ['get', 'buildings'],
+                    1, 10, 100, 14, 1000, 20, 10000, 30, 50000, 42],
+                  'circle-color': ['match', ['get', 'worstCategory'],
+                    'severe', '#7f1d1d',
+                    'major', '#ef4444',
+                    'moderate', '#fb923c',
+                    'minor', '#facc15',
+                    '#4ade80'],
+                  'circle-opacity': 0.9,
+                  'circle-stroke-width': 3,
+                  'circle-stroke-color': '#fff',
+                }} />
+              <Layer id="county-aggregate-label" type="symbol"
+                maxzoom={8}
+                layout={{
+                  'text-field': ['get', 'label'],
+                  'text-size': 11,
+                  'text-offset': [0, 1.8],
+                  'text-anchor': 'top',
+                  'text-allow-overlap': false,
+                }}
+                paint={{
+                  'text-color': '#fff',
+                  'text-halo-color': 'rgba(0,0,0,0.85)',
+                  'text-halo-width': 1.5,
+                }} />
             </Source>
           )}
 
@@ -3992,7 +4011,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} countyRollup={countyRollup} countiesGeoJSON={countiesGeoJSON} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} countyRollup={showCounties ? countyRollup : null} countiesGeoJSON={countiesGeoJSON} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);

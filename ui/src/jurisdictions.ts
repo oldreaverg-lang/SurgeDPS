@@ -91,6 +91,8 @@ export interface CountyRollup {
   criticalFacilities: number;
   estDisplaced: number;    // residential major+severe × 2.5 avg household
   maxDepthFt: number;
+  centerLon: number;       // bbox midpoint — "where to put the label"
+  centerLat: number;
 }
 
 const CRITICAL_OCCTYPES = new Set(['GOV1','GOV2','EDU1','EDU2','MED1','MED2','COM8','COM9','COM10']);
@@ -125,8 +127,16 @@ export function rollupByCounty(
       criticalFacilities: 0,
       estDisplaced: 0,
       maxDepthFt: 0,
+      centerLon: 0,
+      centerLat: 0,
     } as CountyRollup,
   }));
+  // Fill bbox midpoint as center
+  for (const c of countyData) {
+    const [minX, minY, maxX, maxY] = c.bbox;
+    c.rollup.centerLon = (minX + maxX) / 2;
+    c.rollup.centerLat = (minY + maxY) / 2;
+  }
 
   for (const b of buildings.features) {
     const coords = b.geometry?.coordinates;
@@ -171,4 +181,42 @@ export function rollupByCounty(
 
   rows.sort((a, b) => b.loss - a.loss);
   return rows;
+}
+
+/**
+ * Convert a county rollup array into a Point FeatureCollection suitable for
+ * rendering as an aggregated bubble layer at low zoom. Each feature sits at
+ * the county's bbox center and carries aggregate properties for paint exprs.
+ *
+ * The `worstCategory` field is the worst severity present in the county and
+ * drives bubble color so the EM can see "red counties" at a glance.
+ */
+export function rollupToCentroidGeoJSON(rows: CountyRollup[]): any {
+  const features = rows.map(r => {
+    let worst: string = 'none';
+    if (r.severe > 0) worst = 'severe';
+    else if (r.major > 0) worst = 'major';
+    else if (r.moderate > 0) worst = 'moderate';
+    else if (r.minor > 0) worst = 'minor';
+    return {
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [r.centerLon, r.centerLat] },
+      properties: {
+        geoid: r.geoid,
+        name: r.name,
+        state: r.state,
+        buildings: r.buildings,
+        loss: r.loss,
+        severe: r.severe,
+        major: r.major,
+        moderate: r.moderate,
+        minor: r.minor,
+        criticalFacilities: r.criticalFacilities,
+        estDisplaced: r.estDisplaced,
+        worstCategory: worst,
+        label: `${r.name}  ${r.buildings.toLocaleString()}`,
+      },
+    };
+  });
+  return { type: 'FeatureCollection', features };
 }
