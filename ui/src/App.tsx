@@ -3,6 +3,14 @@ import Map, { Source, Layer, NavigationControl, Popup, Marker } from 'react-map-
 import type { MapRef } from 'react-map-gl/maplibre';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import {
+  recommendAdjusters,
+  routingHint,
+  workloadSummary,
+  aggregatePerilMix,
+  perilHeadline,
+} from './catTeam';
+import type { RoutingTag, AdjusterRecommendation } from './catTeam';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PMTiles Protocol (cloud-native vector tiles for flood polygons)
@@ -482,6 +490,130 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CAT Deployment Summary Panel (CAT_TEAM_PLAN §4a B1)
+//
+// Shown at the top of DashboardPanel in Ops Mode, above the existing
+// Total Modeled Loss scoreboard. Purpose: give a CAT / CRT deployment
+// lead a glanceable answer to "how big is this, what's the peril
+// mix, where do I send people first?" — without making the numbers
+// sound more precise than the model warrants.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function CatDeploymentSummary({
+  storm,
+  totals,
+  estimatedPop,
+  severityCounts,
+  hotspots,
+  mode,
+}: {
+  storm: StormInfo;
+  totals: { buildings: number; loss: number; totalDepth: number };
+  estimatedPop: number;
+  severityCounts: Record<string, number>;
+  hotspots: Hotspot[];
+  mode: DisplayMode;
+}) {
+  if (mode !== 'ops') return null;
+  if (totals.buildings <= 0) return null;
+
+  const wl = workloadSummary(severityCounts);
+  const stormMix = aggregatePerilMix(
+    hotspots.map(h => ({ windPct: h.windPct, waterPct: h.waterPct, weight: h.count })),
+  );
+  const headline = wl.headline;
+  const top = hotspots[0];
+
+  // Deployment-urgency color borrowed from the workloadSummary headline.
+  const urgencyColor =
+    headline === 'Deploy immediately' ? 'bg-red-600'
+    : headline === 'Deploy CAT team' ? 'bg-orange-500'
+    : headline === 'Deploy field adjusters' ? 'bg-amber-500'
+    : headline === 'Standard claims handling' ? 'bg-sky-500'
+    : 'bg-slate-400';
+
+  return (
+    <div className="rounded-xl p-3 mb-3 border-2 border-orange-300 bg-gradient-to-br from-orange-50 to-white shadow-sm">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-orange-700">CAT Deployment Summary</span>
+        <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-white shrink-0" style={{ backgroundColor: 'transparent' }}>
+          <span className={`px-1.5 py-0.5 rounded-sm ${urgencyColor}`}>{headline}</span>
+        </span>
+      </div>
+
+      {/* Exposure line */}
+      <div className="text-[11px] text-slate-700 leading-snug mb-2">
+        <div>
+          <span className="font-bold">{storm.name}</span> — CAT {storm.category}
+          {storm.year ? `, ${storm.year}` : ''}
+          {estimatedPop > 0 && (
+            <> · ~{formatCountOps(estimatedPop, mode)} residents in surge zone</>
+          )}
+        </div>
+        <div className="text-slate-500">{perilHeadline(stormMix)}</div>
+      </div>
+
+      {/* Peril mix bar — storm-wide weighted aggregate */}
+      <div className="flex items-center gap-2 mb-2" title={`${stormMix.waterPct}% water · ${stormMix.windPct}% wind (weighted by building count in hardest-hit areas)`}>
+        <div className="flex-1 h-3 rounded-full overflow-hidden bg-slate-200 flex">
+          <div className="bg-indigo-500" style={{ width: `${stormMix.waterPct}%` }} />
+          <div className="bg-sky-400"    style={{ width: `${stormMix.windPct}%` }} />
+        </div>
+        <div className="text-[10px] text-slate-600 tabular-nums shrink-0 font-semibold">
+          🌊 {stormMix.waterPct}% · 🌬️ {stormMix.windPct}%
+        </div>
+      </div>
+
+      {/* Workload translation */}
+      {wl.inspections_needed > 0 && (
+        <div className="text-[11px] text-slate-700 leading-snug mb-2">
+          <span className="font-bold">~{formatCountOps(wl.inspections_needed, mode)}</span> inspections needed
+          {wl.uninhabitable > 0 && (
+            <> · <span className="font-bold text-red-700">~{formatCountOps(wl.uninhabitable, mode)}</span> likely uninhabitable</>
+          )}
+        </div>
+      )}
+
+      {/* Top priority callout */}
+      {top && (
+        <div className="rounded-md bg-white/80 border border-orange-200 px-2 py-1.5 mb-2">
+          <div className="text-[9px] text-orange-700 font-bold uppercase tracking-wider">Top Priority</div>
+          <div className="text-[11px] text-slate-800">
+            <span className="font-bold">#{top.rank}</span> · {formatLossOps(top.loss, mode)} ·{' '}
+            <span className="text-slate-500">{formatCountOps(top.count, mode)} bldgs</span>
+          </div>
+          <div className="text-[10px] text-slate-700 mt-0.5">
+            🚗 <span className="font-semibold">{top.recommend.label}</span>
+            <span className={`ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${top.routing.classes}`}
+              title={top.routing.description}>
+              {top.routing.short}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Action buttons (placeholders until Phase 3 C4/B8 ships exports) */}
+      <div className="flex gap-1.5">
+        <button
+          disabled
+          title="Phase 3 — CAT Deployment Report export (coming soon)"
+          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-300 text-orange-700 bg-white/60 cursor-not-allowed opacity-60"
+        >Generate CAT Report ↓</button>
+        <button
+          disabled
+          title="Phase 4 — Situation Report export (coming soon)"
+          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-slate-300 text-slate-600 bg-white/60 cursor-not-allowed opacity-60"
+        >Generate SitRep ↓</button>
+      </div>
+
+      <div className="text-[9px] text-slate-400 mt-1.5 italic">
+        Modeled estimate — not field verified. Rounded for deployment planning.
+      </div>
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Dashboard Panel (right overlay on map)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -491,6 +623,24 @@ const CONFIDENCE_STYLES: Record<string, { bg: string; text: string; label: strin
   low:         { bg: 'bg-red-100', text: 'text-red-800', label: 'Low Confidence' },
   unvalidated: { bg: 'bg-gray-100', text: 'text-gray-500', label: 'Unvalidated' },
 };
+
+// Hotspot row — shared between App computation and DashboardPanel rendering.
+// Phase 2 adds per-area peril mix (windPct/waterPct), severity breakdown,
+// adjuster recommendation, and routing hint.
+interface Hotspot {
+  rank: number;
+  loss: number;
+  count: number;
+  lat: number;
+  lon: number;
+  avgLoss: number;
+  maxDepthFt: number;
+  windPct: number;
+  waterPct: number;
+  severity: { severe: number; major: number; moderate: number; minor: number; none: number };
+  recommend: AdjusterRecommendation;
+  routing: RoutingTag;
+}
 
 function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange }: {
   storm: StormInfo | null;
@@ -507,7 +657,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   severityCounts: Record<string, number>;
   criticalCount: number;
   criticalBreakdown: Array<{ icon: string; label: string; count: number }>;
-  hotspots: Array<{ rank: number; loss: number; count: number; lat: number; lon: number; avgLoss: number }>;
+  hotspots: Hotspot[];
   onFlyTo?: (lon: number, lat: number) => void;
   mode: DisplayMode;
   onModeChange: (m: DisplayMode) => void;
@@ -624,6 +774,16 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <span className="font-semibold">Surge note:</span> Modeled depths reflect SLOSH maximum-of-maximums (worst-case tidal alignment). Actual depths may have been lower if landfall did not coincide with local high tide.
         </div>
       </div>
+
+      {/* CAT Deployment Summary (Ops Mode only — CAT_TEAM_PLAN §4a B1) */}
+      <CatDeploymentSummary
+        storm={storm}
+        totals={totals}
+        estimatedPop={estimatedPop}
+        severityCounts={severityCounts}
+        hotspots={hotspots}
+        mode={mode}
+      />
 
       {/* R5: Confidence badge + sub-component pips (CAT_TEAM_PLAN B5) */}
       {(() => {
@@ -754,13 +914,24 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
               );
             })}
           </div>
-          {(severityCounts.major + severityCounts.severe) > 0 && (
-            <div className="mt-2 bg-red-50 rounded px-2 py-1 border border-red-200">
-              <span className="text-[10px] font-bold text-red-700">
-                {(severityCounts.major + severityCounts.severe).toLocaleString()} potentially uninhabitable
-              </span>
-            </div>
-          )}
+          {(() => {
+            // CAT_TEAM_PLAN §4a B3 — severity → workload translation footer
+            const wl = workloadSummary(severityCounts);
+            if (wl.inspections_needed === 0) return null;
+            const show = wl.uninhabitable > 0 || wl.inspections_needed >= 100;
+            if (!show) return null;
+            return (
+              <div className="mt-2 bg-red-50 rounded px-2 py-1 border border-red-200">
+                <div className="text-[10px] font-bold text-red-700">
+                  {formatCountOps(wl.inspections_needed, mode)} inspections needed
+                  {wl.uninhabitable > 0 && (
+                    <> · {formatCountOps(wl.uninhabitable, mode)} likely uninhabitable</>
+                  )}
+                </div>
+                <div className="text-[9px] text-red-500 mt-0.5 italic">{wl.headline}</div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -774,26 +945,54 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         </div>
       )}
 
-      {/* Hardest-Hit Areas */}
+      {/* Hardest-Hit Areas (CAT_TEAM_PLAN §4b C1/C2/B2 — peril bar, routing, adjusters) */}
       {hotspots.length > 0 && (
         <div className="bg-red-50/50 rounded-lg p-2.5 mb-3 border border-red-100">
           <div className="text-[10px] text-red-600 font-bold uppercase tracking-wider mb-1.5">Hardest-Hit Areas</div>
-          <div className="space-y-1.5">
-            {hotspots.map((h: any) => (
+          <div className="space-y-2">
+            {hotspots.map((h) => (
               <button
                 key={h.rank}
                 onClick={() => onFlyTo?.(h.lon, h.lat)}
-                className="w-full flex items-center gap-2 text-left hover:bg-red-100/50 rounded px-1 py-0.5 transition-colors"
+                className="w-full text-left hover:bg-red-100/50 rounded px-1 py-1 transition-colors"
               >
-                <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
-                  <div className="text-[10px] text-red-400">
-                    {mode === 'ops'
-                      ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`
-                      : `${h.count} bldgs · avg $${h.avgLoss.toLocaleString()}`}
+                {/* Top line: rank, loss, routing tag */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
+                    <div className="text-[10px] text-red-400">
+                      {mode === 'ops'
+                        ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`
+                        : `${h.count} bldgs · avg $${h.avgLoss.toLocaleString()}`}
+                    </div>
                   </div>
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 ${h.routing.classes}`}
+                    title={h.routing.description}
+                  >{h.routing.short}</span>
                 </div>
+
+                {/* Peril mix bar (B2) */}
+                <div className="mt-1 ml-6 flex items-center gap-1.5">
+                  <div className="flex-1 h-1.5 rounded-sm overflow-hidden bg-slate-200 flex" title={`${h.waterPct}% water · ${h.windPct}% wind`}>
+                    <div className="bg-indigo-500" style={{ width: `${h.waterPct}%` }} />
+                    <div className="bg-sky-400"    style={{ width: `${h.windPct}%` }} />
+                  </div>
+                  <span className="text-[9px] text-slate-500 tabular-nums shrink-0">
+                    🌊 {h.waterPct}% · 🌬️ {h.windPct}%
+                  </span>
+                </div>
+
+                {/* Adjuster recommendation (C1) — CAT-only vibe; shown in both modes for now */}
+                {h.recommend.adjusters > 0 && (
+                  <div className="mt-0.5 ml-6 text-[10px] text-slate-600">
+                    <span className="font-semibold">🚗 {h.recommend.label}</span>
+                    {(h.severity.severe + h.severity.major) > 0 && (
+                      <span className="text-slate-400"> · {h.severity.severe + h.severity.major} uninhabitable</span>
+                    )}
+                  </div>
+                )}
               </button>
             ))}
           </div>
@@ -1931,23 +2130,89 @@ ${fieldFlag ? `
   const hotspots = useMemo(() => {
     if (!allBuildings?.features?.length) return [];
     const BIN = 0.005; // ~0.5km grid
-    const bins: Record<string, { loss: number; count: number; lat: number; lon: number }> = {};
+
+    // Bin aggregates include peril-mix accumulators and per-severity counts
+    // so we can drive CAT_TEAM_PLAN §4b C1/C2 without a second pass.
+    type Bin = {
+      loss: number;
+      count: number;
+      lat: number;
+      lon: number;
+      // Weighted peril accumulators — the weight is building count so that
+      // a cluster of 200 water-damaged homes outweighs a single wind-hit house.
+      windSum: number;
+      waterSum: number;
+      windWeight: number;
+      maxDepthFt: number;
+      severity: { severe: number; major: number; moderate: number; minor: number; none: number };
+    };
+    const bins: Record<string, Bin> = {};
+
+    const hasLandfall = activeStorm?.landfall_lat != null && activeStorm?.landfall_lon != null;
+
     for (const f of allBuildings.features) {
       const [lon, lat] = f.geometry?.coordinates || [0, 0];
       const p = f.properties || {};
       const bLon = Math.floor(lon / BIN) * BIN;
       const bLat = Math.floor(lat / BIN) * BIN;
       const key = `${bLon.toFixed(4)},${bLat.toFixed(4)}`;
-      if (!bins[key]) bins[key] = { loss: 0, count: 0, lat: bLat + BIN / 2, lon: bLon + BIN / 2 };
-      bins[key].loss += p.estimated_loss_usd || 0;
-      bins[key].count += 1;
+      if (!bins[key]) {
+        bins[key] = {
+          loss: 0, count: 0, lat: bLat + BIN / 2, lon: bLon + BIN / 2,
+          windSum: 0, waterSum: 0, windWeight: 0, maxDepthFt: 0,
+          severity: { severe: 0, major: 0, moderate: 0, minor: 0, none: 0 },
+        };
+      }
+      const b = bins[key];
+      b.loss += p.estimated_loss_usd || 0;
+      b.count += 1;
+
+      // Severity tally
+      const cat = (p.damage_category as string | undefined) || 'none';
+      if (cat === 'severe' || cat === 'major' || cat === 'moderate' || cat === 'minor' || cat === 'none') {
+        b.severity[cat] += 1;
+      }
+
+      // Depth / peril contribution — only when we have landfall + depth data
+      const depthFt = p.depth_ft != null ? Number(p.depth_ft) : null;
+      const foundHt = p.found_ht != null ? Number(p.found_ht) : null;
+      if (depthFt != null && depthFt > b.maxDepthFt) b.maxDepthFt = depthFt;
+      if (hasLandfall && activeStorm && depthFt != null) {
+        const interiorFt = (foundHt != null) ? Math.max(0, depthFt - foundHt) : Math.max(0, depthFt - 1);
+        const distKm = haversineKm(lat, lon, activeStorm.landfall_lat!, activeStorm.landfall_lon!);
+        const windMph = estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category);
+        const ww = windWaterSplit(windMph, interiorFt);
+        b.windSum  += ww.windPct;
+        b.waterSum += ww.waterPct;
+        b.windWeight += 1;
+      }
     }
+
     return Object.values(bins)
       .filter(b => b.count >= 5 && b.loss > 0)
       .sort((a, b) => b.loss - a.loss)
       .slice(0, 5)
-      .map((b, i) => ({ rank: i + 1, ...b, avgLoss: Math.round(b.loss / b.count) }));
-  }, [allBuildings]);
+      .map((b, i) => {
+        const windPct  = b.windWeight > 0 ? Math.round(b.windSum  / b.windWeight) : 50;
+        const waterPct = 100 - windPct;
+        const recommend = recommendAdjusters(b.severity);
+        const routing   = routingHint(windPct, waterPct);
+        return {
+          rank: i + 1,
+          loss: b.loss,
+          count: b.count,
+          lat: b.lat,
+          lon: b.lon,
+          avgLoss: Math.round(b.loss / b.count),
+          maxDepthFt: b.maxDepthFt,
+          windPct,
+          waterPct,
+          severity: b.severity,
+          recommend,
+          routing,
+        };
+      });
+  }, [allBuildings, activeStorm]);
 
   // Callback to fly to hotspot
   const handleFlyToHotspot = useCallback((lon: number, lat: number) => {
