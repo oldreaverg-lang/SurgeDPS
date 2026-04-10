@@ -23,15 +23,21 @@ export type SeverityCounts = {
 // ───────────────────────────────────────────────────────────
 // §4b C1 — Adjuster recommendation heuristic
 //
-// Industry rule-of-thumb throughput per adjuster per 8-hour day.
-// These numbers are editable per-user in the Phase 3 Deployment
-// Planner (C3). Values are deliberately conservative.
+// Throughput per adjuster per 8-hour day. These are deliberately
+// conservative — roughly half of the raw industry rule-of-thumb
+// numbers — so the Deployment Summary errs toward recommending
+// bigger teams rather than overpromising on a single adjuster's
+// capacity during a chaotic first-48-hour CAT response.
+//
+// The Phase 3 Deployment Planner (C3) will expose these as
+// editable values in the UI, so a sophisticated user can tune
+// them to match their own shop's throughput.
 // ───────────────────────────────────────────────────────────
 export const ADJUSTER_THROUGHPUT: Required<SeverityCounts> = {
-  severe:   15, // per adjuster-day
-  major:    25,
-  moderate: 40,
-  minor:    60,
+  severe:    7, // per adjuster-day (raw rule-of-thumb ~15)
+  major:    12, //                  (raw ~25)
+  moderate: 20, //                  (raw ~40)
+  minor:    30, //                  (raw ~60)
   none:      0, // "none" inspections not counted
 };
 
