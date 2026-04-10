@@ -13,9 +13,12 @@ import {
   suggestTeamSize,
   timeToClearDays,
   formatTimeToClear,
+  shelterPosture,
+  worstShelterPosture,
+  stagingPlan,
 } from './catTeam';
-import type { RoutingTag, AdjusterRecommendation } from './catTeam';
-import { buildCatDeploymentReport, buildSitRep } from './catReports';
+import type { RoutingTag, AdjusterRecommendation, SubPersona, StagingPlan } from './catTeam';
+import { buildCatDeploymentReport, buildSitRep, draftPublicAdvisory } from './catReports';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PMTiles Protocol (cloud-native vector tiles for flood polygons)
@@ -511,6 +514,7 @@ function CatDeploymentSummary({
   severityCounts,
   hotspots,
   mode,
+  subPersona,
   teamSize,
   onGenerateCatReport,
   onGenerateSitRep,
@@ -521,12 +525,14 @@ function CatDeploymentSummary({
   severityCounts: Record<string, number>;
   hotspots: Hotspot[];
   mode: DisplayMode;
+  subPersona: SubPersona;
   teamSize: number;
   onGenerateCatReport: () => void;
   onGenerateSitRep: () => void;
 }) {
   if (mode !== 'ops') return null;
   if (totals.buildings <= 0) return null;
+  const isEM = subPersona === 'em';
 
   const wl = workloadSummary(severityCounts);
   const stormMix = aggregatePerilMix(
@@ -543,10 +549,23 @@ function CatDeploymentSummary({
     : headline === 'Standard claims handling' ? 'bg-sky-500'
     : 'bg-slate-400';
 
+  // EM-specific aggregates: worst shelter posture across the footprint
+  // and staging plan for the Top Priority callout.
+  const worstPost = worstShelterPosture(hotspots.map(h => h.maxDepthFt));
+  const staging = isEM
+    ? stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings)
+    : null;
+
+  const panelClass = isEM
+    ? 'rounded-xl p-3 mb-3 border-2 border-emerald-300 bg-gradient-to-br from-emerald-50 to-white shadow-sm'
+    : 'rounded-xl p-3 mb-3 border-2 border-orange-300 bg-gradient-to-br from-orange-50 to-white shadow-sm';
+  const headerText = isEM ? 'EM Situation Summary' : 'CAT Deployment Summary';
+  const headerColor = isEM ? 'text-emerald-700' : 'text-orange-700';
+
   return (
-    <div className="rounded-xl p-3 mb-3 border-2 border-orange-300 bg-gradient-to-br from-orange-50 to-white shadow-sm">
+    <div className={panelClass}>
       <div className="flex items-center gap-2 mb-2">
-        <span className="text-[10px] font-bold uppercase tracking-wider text-orange-700">CAT Deployment Summary</span>
+        <span className={`text-[10px] font-bold uppercase tracking-wider ${headerColor}`}>{headerText}</span>
         <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-white shrink-0" style={{ backgroundColor: 'transparent' }}>
           <span className={`px-1.5 py-0.5 rounded-sm ${urgencyColor}`}>{headline}</span>
         </span>
@@ -585,26 +604,64 @@ function CatDeploymentSummary({
         </div>
       )}
 
-      {/* Top priority callout */}
+      {/* Top priority callout — persona-aware */}
       {top && (
-        <div className="rounded-md bg-white/80 border border-orange-200 px-2 py-1.5 mb-2">
-          <div className="text-[9px] text-orange-700 font-bold uppercase tracking-wider">Top Priority</div>
+        <div className={`rounded-md bg-white/80 border px-2 py-1.5 mb-2 ${isEM ? 'border-emerald-200' : 'border-orange-200'}`}>
+          <div className={`text-[9px] font-bold uppercase tracking-wider ${isEM ? 'text-emerald-700' : 'text-orange-700'}`}>Top Priority</div>
           <div className="text-[11px] text-slate-800">
             <span className="font-bold">#{top.rank}</span> · {formatLossOps(top.loss, mode)} ·{' '}
             <span className="text-slate-500">{formatCountOps(top.count, mode)} bldgs</span>
           </div>
-          <div className="text-[10px] text-slate-700 mt-0.5">
-            🚗 <span className="font-semibold">{top.recommend.label}</span>
-            <span className={`ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${top.routing.classes}`}
-              title={top.routing.description}>
-              {top.routing.short}
-            </span>
-          </div>
+          {isEM ? (
+            (() => {
+              const post = shelterPosture(top.maxDepthFt);
+              return (
+                <div className="text-[10px] text-slate-700 mt-0.5">
+                  {post.icon}{' '}
+                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${post.classes}`} title={post.description}>
+                    {post.label}
+                  </span>
+                  <span className="ml-1.5 text-slate-500">max ~{Math.round(top.maxDepthFt)} ft</span>
+                </div>
+              );
+            })()
+          ) : (
+            <div className="text-[10px] text-slate-700 mt-0.5">
+              🚗 <span className="font-semibold">{top.recommend.label}</span>
+              <span className={`ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${top.routing.classes}`}
+                title={top.routing.description}>
+                {top.routing.short}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Time to Clear — storm-wide single-line summary (C5) */}
-      {(() => {
+      {/* EM-only: worst storm-wide shelter posture pill */}
+      {isEM && (
+        <div className="text-[10px] text-slate-700 mb-2 flex items-center gap-1.5">
+          <span className="font-semibold">Storm-wide posture:</span>
+          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${worstPost.classes}`} title={worstPost.description}>
+            {worstPost.icon} {worstPost.label}
+          </span>
+        </div>
+      )}
+
+      {/* EM-only: mutual-aid quick numbers (E3 preview — full panel is below) */}
+      {isEM && staging && (staging.rescueTeams > 0 || staging.shelterBedsNeeded > 0) && (
+        <div className="text-[10px] text-slate-700 mb-2 leading-snug">
+          {staging.rescueTeams > 0 && (
+            <>Request <span className="font-bold text-emerald-800">{staging.rescueTeams}</span> rescue team{staging.rescueTeams === 1 ? '' : 's'}</>
+          )}
+          {staging.rescueTeams > 0 && staging.shelterBedsNeeded > 0 && <> · </>}
+          {staging.shelterBedsNeeded > 0 && (
+            <>~<span className="font-bold text-emerald-800">{staging.shelterBedsNeeded.toLocaleString()}</span> shelter beds</>
+          )}
+        </div>
+      )}
+
+      {/* Time to Clear — storm-wide single-line summary (C5, CAT only) */}
+      {!isEM && (() => {
         const ttc = timeToClearDays(hotspots, teamSize);
         if (!isFinite(ttc) || ttc <= 0) return null;
         return (
@@ -615,18 +672,35 @@ function CatDeploymentSummary({
         );
       })()}
 
-      {/* Action buttons — CAT Report (C4) & SitRep (B8) */}
+      {/* Action buttons — primary export reflects the active persona */}
       <div className="flex gap-1.5">
-        <button
-          onClick={onGenerateCatReport}
-          title="Download CAT Deployment Report (HTML)"
-          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-400 text-orange-800 bg-white hover:bg-orange-50 transition-colors"
-        >Generate CAT Report ↓</button>
-        <button
-          onClick={onGenerateSitRep}
-          title="Download Situation Report (HTML)"
-          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-400 text-emerald-800 bg-white hover:bg-emerald-50 transition-colors"
-        >Generate SitRep ↓</button>
+        {isEM ? (
+          <>
+            <button
+              onClick={onGenerateSitRep}
+              title="Download Situation Report (HTML)"
+              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-500 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
+            >Generate SitRep ↓</button>
+            <button
+              onClick={onGenerateCatReport}
+              title="Download CAT Deployment Report (HTML)"
+              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-300 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
+            >CAT Report ↓</button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={onGenerateCatReport}
+              title="Download CAT Deployment Report (HTML)"
+              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-500 text-white bg-orange-600 hover:bg-orange-700 transition-colors"
+            >Generate CAT Report ↓</button>
+            <button
+              onClick={onGenerateSitRep}
+              title="Download Situation Report (HTML)"
+              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-300 text-emerald-700 bg-white hover:bg-emerald-50 transition-colors"
+            >SitRep ↓</button>
+          </>
+        )}
       </div>
 
       <div className="text-[9px] text-slate-400 mt-1.5 italic">
@@ -792,6 +866,155 @@ function DeploymentPlanner({
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Resource Staging Panel (CAT_TEAM_PLAN §4c E2/E3/E4)
+//
+// EM-only panel showing mutual-aid sizing (rescue teams, shelter
+// beds, generators) plus a copyable public-advisory draft. All
+// numbers come from stagingPlan() — a pure helper — and the
+// advisory text comes from draftPublicAdvisory(). Nothing here
+// calls an LLM; the copy is template-driven so an EM can verify
+// every field before release.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function ResourceStagingPanel({
+  storm,
+  totals,
+  hotspots,
+  estimatedPop,
+  severityCounts,
+  criticalBreakdown,
+}: {
+  storm: StormInfo;
+  totals: { buildings: number; loss: number; totalDepth: number };
+  hotspots: Hotspot[];
+  estimatedPop: number;
+  severityCounts: Record<string, number>;
+  criticalBreakdown: Array<{ icon: string; label: string; count: number }>;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [advisoryOpen, setAdvisoryOpen] = useState(false);
+  const [copyToast, setCopyToast] = useState(false);
+
+  if (hotspots.length === 0 || totals.buildings <= 0) return null;
+
+  const plan: StagingPlan = stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings);
+  const advisory = draftPublicAdvisory({
+    storm: storm as any,
+    hotspots,
+    estimatedPop,
+    criticalBreakdown,
+    shelterBedsNeeded: plan.shelterBedsNeeded,
+    rescueTeams: plan.rescueTeams,
+  });
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(advisory);
+      setCopyToast(true);
+      setTimeout(() => setCopyToast(false), 1800);
+    } catch {
+      // Fallback: select the pre text so the user can copy manually
+      const el = document.getElementById('em-advisory-pre');
+      if (el) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+    }
+  };
+
+  return (
+    <div className="rounded-xl p-2.5 mb-3 border border-emerald-200 bg-emerald-50/60">
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800">
+          Resource Staging
+        </span>
+        <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-emerald-900 bg-emerald-100">
+          EM
+        </span>
+        <span className="text-emerald-600 text-xs">{expanded ? '▲' : '▼'}</span>
+      </button>
+
+      {expanded && (
+        <>
+          {/* Quick numbers — mutual aid sizing (E3) */}
+          <div className="grid grid-cols-3 gap-1.5 mt-2 mb-2">
+            <div className="rounded bg-white/80 border border-emerald-200 px-1.5 py-1 text-center">
+              <div className="text-[9px] text-emerald-700 font-bold uppercase tracking-wider">Rescue</div>
+              <div className="text-sm font-black text-emerald-900 tabular-nums">{plan.rescueTeams}</div>
+              <div className="text-[9px] text-slate-500">team{plan.rescueTeams === 1 ? '' : 's'}</div>
+            </div>
+            <div className="rounded bg-white/80 border border-emerald-200 px-1.5 py-1 text-center">
+              <div className="text-[9px] text-emerald-700 font-bold uppercase tracking-wider">Shelter</div>
+              <div className="text-sm font-black text-emerald-900 tabular-nums">{plan.shelterBedsNeeded.toLocaleString()}</div>
+              <div className="text-[9px] text-slate-500">beds</div>
+            </div>
+            <div className="rounded bg-white/80 border border-emerald-200 px-1.5 py-1 text-center">
+              <div className="text-[9px] text-emerald-700 font-bold uppercase tracking-wider">Gens</div>
+              <div className="text-sm font-black text-emerald-900 tabular-nums">{plan.generatorsRecommended}</div>
+              <div className="text-[9px] text-slate-500">units</div>
+            </div>
+          </div>
+
+          {/* Displaced pop summary */}
+          <div className="text-[10px] text-slate-700 mb-2">
+            Est. displaced: <span className="font-bold text-emerald-900">~{plan.displacedPop.toLocaleString()}</span>
+            {plan.topStagingArea && (
+              <> · Stage {plan.topStagingArea}</>
+            )}
+          </div>
+
+          {/* Narrative notes (E2) */}
+          {plan.notes.length > 0 && (
+            <ul className="text-[10px] text-slate-600 mb-2 space-y-0.5 list-disc pl-4">
+              {plan.notes.map((n, i) => <li key={i}>{n}</li>)}
+            </ul>
+          )}
+
+          {/* Public advisory toggle (E4) */}
+          <button
+            onClick={() => setAdvisoryOpen(o => !o)}
+            className="w-full text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-400 text-emerald-800 bg-white hover:bg-emerald-50 transition-colors"
+            title="Show / hide the draft public advisory — copy and adapt before release"
+          >
+            {advisoryOpen ? '▲' : '▼'} Draft public advisory
+          </button>
+
+          {advisoryOpen && (
+            <div className="mt-2">
+              <pre
+                id="em-advisory-pre"
+                className="whitespace-pre-wrap bg-white border border-emerald-200 rounded-md p-2 text-[10px] leading-snug text-slate-800 font-mono max-h-48 overflow-y-auto"
+              >{advisory}</pre>
+              <div className="flex items-center gap-2 mt-1.5">
+                <button
+                  onClick={handleCopy}
+                  className="text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-500 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
+                >📋 Copy advisory</button>
+                {copyToast && (
+                  <span className="text-[10px] text-emerald-700 font-semibold">✓ Copied</span>
+                )}
+                <span className="ml-auto text-[9px] text-slate-400 italic">
+                  Template only — verify before release
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div className="text-[9px] text-slate-400 mt-1.5 italic">
+            Rule-of-thumb sizing — tune against your agency's playbook.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Dashboard Panel (right overlay on map)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -820,7 +1043,7 @@ interface Hotspot {
   routing: RoutingTag;
 }
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -839,6 +1062,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   onFlyTo?: (lon: number, lat: number) => void;
   mode: DisplayMode;
   onModeChange: (m: DisplayMode) => void;
+  subPersona: SubPersona;
+  onSubPersonaChange: (p: SubPersona) => void;
   onGenerateCatReport: () => void;
   onGenerateSitRep: () => void;
   teamSize: number;
@@ -925,12 +1150,46 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
               onClick={() => onModeChange('ops')}
               className={`flex-1 px-2 py-1 rounded transition-colors ${
                 mode === 'ops'
-                  ? 'bg-white text-orange-700 shadow-sm'
+                  ? subPersona === 'em'
+                    ? 'bg-white text-emerald-700 shadow-sm'
+                    : 'bg-white text-orange-700 shadow-sm'
                   : 'text-slate-500 hover:text-slate-700'
               }`}
               title="Ops Mode — deployment-focused with confidence bands and rounded numbers"
             >Ops</button>
           </div>
+
+          {/* ── Sub-persona pill — only meaningful in Ops Mode (Phase 4 §16) ── */}
+          {mode === 'ops' && (
+            <div
+              role="tablist"
+              aria-label="Ops sub-persona"
+              className="inline-flex w-full items-center rounded-md bg-slate-50 border border-slate-200 p-0.5 text-[9px] font-bold uppercase tracking-wider mt-1"
+            >
+              <button
+                role="tab"
+                aria-selected={subPersona === 'cat'}
+                onClick={() => onSubPersonaChange('cat')}
+                className={`flex-1 px-2 py-1 rounded transition-colors ${
+                  subPersona === 'cat'
+                    ? 'bg-orange-500 text-white shadow-sm'
+                    : 'text-slate-500 hover:text-orange-600'
+                }`}
+                title="Insurance CAT / CRT lens — adjuster deployment, claims routing, CAT Report"
+              >🏢 Insurance CAT</button>
+              <button
+                role="tab"
+                aria-selected={subPersona === 'em'}
+                onClick={() => onSubPersonaChange('em')}
+                className={`flex-1 px-2 py-1 rounded transition-colors ${
+                  subPersona === 'em'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-slate-500 hover:text-emerald-700'
+                }`}
+                title="Emergency Manager lens — shelter/evac posture, resource staging, SitRep"
+              >🚨 Emergency Mgr</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -967,19 +1226,32 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         severityCounts={severityCounts}
         hotspots={hotspots}
         mode={mode}
+        subPersona={subPersona}
         teamSize={teamSize}
         onGenerateCatReport={onGenerateCatReport}
         onGenerateSitRep={onGenerateSitRep}
       />
 
-      {/* Deployment Planner (CAT_TEAM_PLAN §4b C3) — shown in Ops Mode */}
-      {mode === 'ops' && (
+      {/* Deployment Planner (CAT_TEAM_PLAN §4b C3) — CAT persona only */}
+      {mode === 'ops' && subPersona === 'cat' && (
         <DeploymentPlanner
           hotspots={hotspots}
           teamSize={teamSize}
           windowDays={windowDays}
           onTeamSizeChange={onTeamSizeChange}
           onWindowDaysChange={onWindowDaysChange}
+        />
+      )}
+
+      {/* Resource Staging (CAT_TEAM_PLAN §4c E2/E3/E4) — EM persona only */}
+      {mode === 'ops' && subPersona === 'em' && (
+        <ResourceStagingPanel
+          storm={storm}
+          totals={totals}
+          hotspots={hotspots}
+          estimatedPop={estimatedPop}
+          severityCounts={severityCounts}
+          criticalBreakdown={criticalBreakdown}
         />
       )}
 
@@ -1148,51 +1420,70 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         <div className="bg-red-50/50 rounded-lg p-2.5 mb-3 border border-red-100">
           <div className="text-[10px] text-red-600 font-bold uppercase tracking-wider mb-1.5">Hardest-Hit Areas</div>
           <div className="space-y-2">
-            {hotspots.map((h) => (
-              <button
-                key={h.rank}
-                onClick={() => onFlyTo?.(h.lon, h.lat)}
-                className="w-full text-left hover:bg-red-100/50 rounded px-1 py-1 transition-colors"
-              >
-                {/* Top line: rank, loss, routing tag */}
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
-                    <div className="text-[10px] text-red-400">
-                      {mode === 'ops'
-                        ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`
-                        : `${h.count} bldgs · avg $${h.avgLoss.toLocaleString()}`}
+            {hotspots.map((h) => {
+              const isEM = mode === 'ops' && subPersona === 'em';
+              const post = isEM ? shelterPosture(h.maxDepthFt) : null;
+              return (
+                <button
+                  key={h.rank}
+                  onClick={() => onFlyTo?.(h.lon, h.lat)}
+                  className="w-full text-left hover:bg-red-100/50 rounded px-1 py-1 transition-colors"
+                >
+                  {/* Top line: rank, loss, routing tag (CAT) or shelter posture (EM) */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
+                      <div className="text-[10px] text-red-400">
+                        {mode === 'ops'
+                          ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`
+                          : `${h.count} bldgs · avg $${h.avgLoss.toLocaleString()}`}
+                      </div>
                     </div>
-                  </div>
-                  <span
-                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 ${h.routing.classes}`}
-                    title={h.routing.description}
-                  >{h.routing.short}</span>
-                </div>
-
-                {/* Peril mix bar (B2) */}
-                <div className="mt-1 ml-6 flex items-center gap-1.5">
-                  <div className="flex-1 h-1.5 rounded-sm overflow-hidden bg-slate-200 flex" title={`${h.waterPct}% water · ${h.windPct}% wind`}>
-                    <div className="bg-indigo-500" style={{ width: `${h.waterPct}%` }} />
-                    <div className="bg-sky-400"    style={{ width: `${h.windPct}%` }} />
-                  </div>
-                  <span className="text-[9px] text-slate-500 tabular-nums shrink-0">
-                    🌊 {h.waterPct}% · 🌬️ {h.windPct}%
-                  </span>
-                </div>
-
-                {/* Adjuster recommendation (C1) — CAT-only vibe; shown in both modes for now */}
-                {h.recommend.adjusters > 0 && (
-                  <div className="mt-0.5 ml-6 text-[10px] text-slate-600">
-                    <span className="font-semibold">🚗 {h.recommend.label}</span>
-                    {(h.severity.severe + h.severity.major) > 0 && (
-                      <span className="text-slate-400"> · {h.severity.severe + h.severity.major} uninhabitable</span>
+                    {isEM && post ? (
+                      <span
+                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 ${post.classes}`}
+                        title={post.description}
+                      >{post.short}</span>
+                    ) : (
+                      <span
+                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 ${h.routing.classes}`}
+                        title={h.routing.description}
+                      >{h.routing.short}</span>
                     )}
                   </div>
-                )}
-              </button>
-            ))}
+
+                  {/* Peril mix bar (B2) — shown in both personas */}
+                  <div className="mt-1 ml-6 flex items-center gap-1.5">
+                    <div className="flex-1 h-1.5 rounded-sm overflow-hidden bg-slate-200 flex" title={`${h.waterPct}% water · ${h.windPct}% wind`}>
+                      <div className="bg-indigo-500" style={{ width: `${h.waterPct}%` }} />
+                      <div className="bg-sky-400"    style={{ width: `${h.windPct}%` }} />
+                    </div>
+                    <span className="text-[9px] text-slate-500 tabular-nums shrink-0">
+                      🌊 {h.waterPct}% · 🌬️ {h.windPct}%
+                    </span>
+                  </div>
+
+                  {/* Sub-line: adjuster recommendation (CAT) or shelter posture detail (EM) — E1 */}
+                  {isEM && post ? (
+                    <div className="mt-0.5 ml-6 text-[10px] text-slate-600">
+                      <span>{post.icon}</span>{' '}
+                      <span className="font-semibold">{post.label}</span>
+                      <span className="text-slate-400"> · max ~{Math.round(h.maxDepthFt)} ft</span>
+                    </div>
+                  ) : (
+                    h.recommend.adjusters > 0 && (
+                      <div className="mt-0.5 ml-6 text-[10px] text-slate-600">
+                        <span className="font-semibold">🚗 {h.recommend.label}</span>
+                        {(h.severity.severe + h.severity.major) > 0 && (
+                          <span className="text-slate-400"> · {h.severity.severe + h.severity.major} uninhabitable</span>
+                        )}
+                      </div>
+                    )
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1380,6 +1671,18 @@ function App() {
   useEffect(() => {
     try { window.localStorage.setItem('surgedps.mode', mode); } catch { /* ignore */ }
   }, [mode]);
+  // Ops Mode sub-persona toggle — Insurance CAT vs Emergency Manager
+  // (CAT_TEAM_PLAN §3, Phase 4 §16). Only meaningful when mode === 'ops'.
+  const [subPersona, setSubPersona] = useState<SubPersona>(() => {
+    if (typeof window === 'undefined') return 'cat';
+    try {
+      const stored = window.localStorage.getItem('surgedps.subpersona');
+      return stored === 'em' ? 'em' : 'cat';
+    } catch { return 'cat'; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem('surgedps.subpersona', subPersona); } catch { /* ignore */ }
+  }, [subPersona]);
   // Deployment Planner state (CAT_TEAM_PLAN §4b C3) — lifted to App
   // so the planner and CAT summary see the same numbers.
   const [teamSize, setTeamSize] = useState<number>(20);
@@ -3208,7 +3511,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);

@@ -20,6 +20,8 @@ import {
   planDeployment,
   timeToClearDays,
   formatTimeToClear,
+  worstShelterPosture,
+  shelterPosture,
 } from './catTeam';
 import type { RoutingTag, AdjusterRecommendation } from './catTeam';
 
@@ -268,6 +270,64 @@ ${areasHtml || '<p style="color:#64748b">No hotspots identified.</p>'}
 }
 
 // ───────────────────────────────────────────────────────────
+// §4c E4 — Public advisory draft (plain-text template)
+//
+// Intentionally template-filled rather than LLM-generated so the
+// output is predictable and the EM can sanity-check every field.
+// Exported so the Resource Staging panel can show it inline.
+// ───────────────────────────────────────────────────────────
+export function draftPublicAdvisory(args: {
+  storm: ReportStorm;
+  hotspots: ReportHotspot[];
+  estimatedPop: number;
+  criticalBreakdown: Array<{ icon: string; label: string; count: number }>;
+  shelterBedsNeeded?: number;
+  rescueTeams?: number;
+}): string {
+  const { storm, hotspots, estimatedPop, criticalBreakdown, shelterBedsNeeded, rescueTeams } = args;
+  const maxDepth = hotspots.length > 0 ? Math.max(...hotspots.map(h => h.maxDepthFt), 0) : 0;
+  const posture = worstShelterPosture(hotspots.map(h => h.maxDepthFt));
+  const area = storm.population?.county_name || 'the affected area';
+  const critList = criticalBreakdown.filter(c => c.count > 0);
+
+  const action =
+    posture.level === 'evacuate' ? 'EVACUATE IMMEDIATELY.'
+    : posture.level === 'shelter-upper' ? 'Move to upper floors and shelter in place.'
+    : 'Shelter in place until further notice.';
+
+  const lines: string[] = [];
+  lines.push(`⚠️ ${storm.name.toUpperCase()} (Cat ${storm.category}) — SITUATION UPDATE`);
+  lines.push(``);
+  lines.push(`Residents in surge zones across ${area}: ${action}`);
+  if (maxDepth > 0) {
+    lines.push(`Up to ~${Math.round(maxDepth)} ft of storm surge expected in the hardest-hit zones.`);
+  }
+  lines.push(`Approximately ${fmtCount(estimatedPop)} residents in potential surge zones.`);
+  if (critList.length > 0) {
+    const critText = critList.map(c => `${c.count} ${c.label.toLowerCase()}`).join(', ');
+    lines.push(`Critical facilities impacted: ${critText}.`);
+  } else {
+    lines.push(`No critical facilities confirmed impacted at this time.`);
+  }
+  if (shelterBedsNeeded && shelterBedsNeeded > 0) {
+    lines.push(`Sheltering capacity of ~${shelterBedsNeeded.toLocaleString()} beds being coordinated with partner agencies.`);
+  }
+  if (rescueTeams && rescueTeams > 0) {
+    lines.push(`Mutual-aid request in progress: ${rescueTeams} swift-water / US&R team${rescueTeams === 1 ? '' : 's'}.`);
+  }
+  lines.push(``);
+  lines.push(`If you are in a surge zone and unable to evacuate, move to the highest floor, stay away from windows, and call 911 only for life-threatening emergencies.`);
+  lines.push(`Next update in 6 hours.`);
+
+  return lines.join('\n');
+}
+
+// Compact one-line summary for the Resource Staging header.
+export function posturePillLabel(maxDepthFt: number): string {
+  return shelterPosture(maxDepthFt).label;
+}
+
+// ───────────────────────────────────────────────────────────
 // §4a B8 — Situation Report (Emergency Manager focus)
 // ───────────────────────────────────────────────────────────
 export function buildSitRep(args: {
@@ -309,16 +369,14 @@ export function buildSitRep(args: {
     </div>`;
   }).join('');
 
-  // Simple public advisory template (§4c E4 stub — Phase 4 will
-  // upgrade this to something the EM can actually post verbatim).
-  const advisory = `⚠️ ${storm.name.toUpperCase()} (Cat ${storm.category}) — SITUATION UPDATE
-Residents in surge zones across ${storm.population?.county_name || 'the affected area'}: ${
-  hotspots.some(h => h.maxDepthFt >= 6) ? 'EVACUATE IMMEDIATELY.' : 'shelter in place until further notice.'
-}
-Up to ${Math.round(Math.max(...hotspots.map(h => h.maxDepthFt), 0))} ft of storm surge expected.
-Approximately ${fmtCount(estimatedPop)} residents in potential surge zones.
-Critical facilities impacted: ${critList.map(c => `${c.count} ${c.label.toLowerCase()}`).join(', ') || 'none reported'}.
-Next update in 6 hours.`;
+  // Public advisory draft — §4c E4. Uses the shared helper so the
+  // Resource Staging panel renders the same copy the report ships.
+  const advisory = draftPublicAdvisory({
+    storm,
+    hotspots,
+    estimatedPop,
+    criticalBreakdown,
+  });
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Situation Report — ${esc(storm.name)} (${esc(storm.year ?? '')})</title>

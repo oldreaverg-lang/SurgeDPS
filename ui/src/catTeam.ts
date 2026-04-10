@@ -340,3 +340,191 @@ export function formatTimeToClear(days: number): string {
   if (weeks <= 1) return '~1 week';
   return `~${weeks} weeks`;
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Emergency Manager helpers (CAT_TEAM_PLAN §4c E1, E2, E3)
+//
+// These are intentionally conservative and transparent — the
+// thresholds are rules of thumb meant to start a conversation
+// with a real EM, not replace one.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+export type SubPersona = 'cat' | 'em';
+
+export type ShelterLevel = 'evacuate' | 'shelter-upper' | 'shelter-in-place';
+
+export type ShelterPosture = {
+  level: ShelterLevel;
+  label: string;        // "EVACUATE" / "SHELTER UPPER FLOORS" / "SHELTER IN PLACE"
+  short: string;        // compact variant for tight UI ("Evacuate", "Upper floors", "Shelter")
+  description: string;  // tooltip text
+  icon: string;         // emoji glyph
+  classes: string;      // Tailwind utility classes for the pill
+};
+
+// E1 — Shelter-in-place vs evacuate indicator.
+//
+// Thresholds per CAT_TEAM_PLAN §6 E1:
+//   >= 6 ft surge → Evacuate
+//   3-6 ft surge  → Shelter in place (upper floors)
+//   < 3 ft surge  → Shelter in place
+//
+// The original plan also gated "evacuate" on critical facility
+// count > 0, but we don't currently track that per hotspot. For
+// v1 we drop the critical-facility multiplier and rely on depth
+// alone — erring on the side of recommending evacuation at the
+// highest-depth areas, which is the safer default.
+export function shelterPosture(maxDepthFt: number): ShelterPosture {
+  if (maxDepthFt >= 6) {
+    return {
+      level: 'evacuate',
+      label: 'EVACUATE',
+      short: 'Evacuate',
+      description: `Max modeled surge ~${Math.round(maxDepthFt)} ft — life-safety evacuation recommended`,
+      icon: '🚨',
+      classes: 'bg-red-100 text-red-800 border border-red-300',
+    };
+  }
+  if (maxDepthFt >= 3) {
+    return {
+      level: 'shelter-upper',
+      label: 'SHELTER UPPER FLOORS',
+      short: 'Upper floors',
+      description: `Max modeled surge ~${Math.round(maxDepthFt)} ft — shelter on upper floors, avoid ground level`,
+      icon: '⚠️',
+      classes: 'bg-amber-100 text-amber-800 border border-amber-300',
+    };
+  }
+  return {
+    level: 'shelter-in-place',
+    label: 'SHELTER IN PLACE',
+    short: 'Shelter',
+    description: `Max modeled surge ~${Math.round(Math.max(0, maxDepthFt))} ft — shelter in place, monitor updates`,
+    icon: '🏠',
+    classes: 'bg-emerald-100 text-emerald-800 border border-emerald-300',
+  };
+}
+
+// Aggregate shelter posture across an ordered list of hotspots —
+// returns the "worst" (most severe) posture, i.e. if *any* area
+// warrants evacuation the storm-wide posture is "evacuate".
+export function worstShelterPosture(maxDepthsFt: number[]): ShelterPosture {
+  const max = maxDepthsFt.length > 0 ? Math.max(...maxDepthsFt, 0) : 0;
+  return shelterPosture(max);
+}
+
+// ───────────────────────────────────────────────────────────
+// E2, E3 — Resource staging + mutual aid sizing
+//
+// Inputs come straight out of what the CAT side already
+// computes (severityCounts, estimatedPop, hotspots). We keep
+// everything as rounded rule-of-thumb so an EM can sanity-check
+// against their own playbook without feeling misled.
+// ───────────────────────────────────────────────────────────
+
+export type StagingPlan = {
+  // E3 — mutual aid sizing
+  rescueTeams: number;          // swift-water / urban SAR teams to request
+  shelterBedsNeeded: number;    // cots needed for displaced population
+  displacedPop: number;         // estimated displaced residents (rounded)
+  // E2 — staging suggestions (narrative strings, tunable per deployment)
+  generatorsRecommended: number;
+  topStagingArea: string | null; // lat/lon-derived short label, or null
+  // Derived context
+  worstPosture: ShelterPosture;
+  notes: string[];               // short human-readable explanation lines
+};
+
+// Rule-of-thumb constants (deliberately conservative — see Risks §9).
+//
+// Rescue teams: FEMA US&R / swift-water rule of thumb is roughly
+//   1 team per ~150 severely impacted residents requiring rescue.
+//   Teams are typically 6-person squads over a 12-hour op period.
+// Shelter beds: 1 bed per displaced resident + 10% buffer.
+// Generators: 1 per ~2 top priority areas (very rough — meant as
+//   a starting point, not a procurement number).
+const RESCUE_RESIDENTS_PER_TEAM = 150;
+const SHELTER_BUFFER = 1.10;
+const GENERATORS_PER_AREA = 0.5;
+
+export function stagingPlan(
+  hotspots: Array<{ rank: number; lat: number; lon: number; maxDepthFt: number; count: number; severity: SeverityCounts }>,
+  estimatedPop: number,
+  severityCounts: SeverityCounts,
+  totalBuildings: number,
+): StagingPlan {
+  const sev = {
+    severe:   severityCounts.severe   ?? 0,
+    major:    severityCounts.major    ?? 0,
+    moderate: severityCounts.moderate ?? 0,
+    minor:    severityCounts.minor    ?? 0,
+    none:     severityCounts.none     ?? 0,
+  };
+
+  // Displaced population — estimate the fraction of residents whose
+  // building is likely uninhabitable (severe + major), then apply to
+  // the surge-zone population estimate. If we don't have building
+  // totals, fall back to a naive 20% of surge-zone pop.
+  const uninhabitable = sev.severe + sev.major;
+  const allBuildings = Math.max(1, totalBuildings);
+  const uninhabFrac = uninhabitable / allBuildings;
+  const displacedRaw = uninhabFrac > 0
+    ? Math.round(estimatedPop * uninhabFrac)
+    : Math.round(estimatedPop * 0.2);
+  const displacedPop = Math.max(0, displacedRaw);
+
+  // Rescue teams — primarily a function of people in the worst
+  // depth bands, proxied by uninhabitable building count times the
+  // HAZUS-ish ~2.5 residents-per-household factor.
+  const rescueResidents = Math.round(uninhabitable * 2.5);
+  const rescueTeams = Math.max(
+    0,
+    Math.ceil(rescueResidents / RESCUE_RESIDENTS_PER_TEAM),
+  );
+
+  // Shelter beds with buffer, rounded to nearest 50 for field realism.
+  const shelterBedsRaw = Math.ceil(displacedPop * SHELTER_BUFFER);
+  const shelterBedsNeeded = shelterBedsRaw > 0
+    ? Math.max(50, Math.round(shelterBedsRaw / 50) * 50)
+    : 0;
+
+  // Generators — proportional to number of priority areas, min 1 if
+  // any area warrants evacuation.
+  const priorityAreaCount = hotspots.length;
+  const worstPosture = worstShelterPosture(hotspots.map(h => h.maxDepthFt));
+  const baseGens = Math.ceil(priorityAreaCount * GENERATORS_PER_AREA);
+  const generatorsRecommended = worstPosture.level === 'evacuate'
+    ? Math.max(2, baseGens)
+    : Math.max(0, baseGens);
+
+  // Staging area — pick the #1 hotspot and describe it by coord.
+  // A future revision could reverse-geocode to a parish/city name.
+  const top = hotspots[0];
+  const topStagingArea = top
+    ? `near #${top.rank} (~${top.lat.toFixed(2)}°N, ${Math.abs(top.lon).toFixed(2)}°W)`
+    : null;
+
+  const notes: string[] = [];
+  if (rescueTeams > 0) {
+    notes.push(`${rescueTeams} swift-water/US&R team${rescueTeams === 1 ? '' : 's'} sized for ~${rescueResidents.toLocaleString()} at-risk residents.`);
+  }
+  if (shelterBedsNeeded > 0) {
+    notes.push(`${shelterBedsNeeded.toLocaleString()} shelter beds sized for ~${displacedPop.toLocaleString()} estimated displaced + ${Math.round((SHELTER_BUFFER - 1) * 100)}% buffer.`);
+  }
+  if (generatorsRecommended > 0) {
+    notes.push(`${generatorsRecommended} portable generator${generatorsRecommended === 1 ? '' : 's'} — stage at nearest unflooded EOC/hospital outside the surge footprint.`);
+  }
+  if (notes.length === 0) {
+    notes.push('No staging needs computed — no significant uninhabitable damage in modeled areas.');
+  }
+
+  return {
+    rescueTeams,
+    shelterBedsNeeded,
+    displacedPop,
+    generatorsRecommended,
+    topStagingArea,
+    worstPosture,
+    notes,
+  };
+}
