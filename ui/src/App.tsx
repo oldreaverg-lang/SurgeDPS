@@ -2042,7 +2042,10 @@ function App() {
 
   // ── PDA (Preliminary Damage Assessment) export ──
   const handleExportPDA = useCallback(() => {
-    if (!allBuildings?.features?.length || !activeStorm) return;
+    if (!allBuildings?.features?.length || !activeStorm) {
+      setCellError('Load a storm with damage data before exporting a PDA Report.');
+      return;
+    }
 
     // FEMA PDA categories
     const PDA_MAP: Record<string, string> = { minor: 'Affected', moderate: 'Minor Damage', major: 'Major Damage', severe: 'Destroyed' };
@@ -2187,7 +2190,7 @@ function App() {
 
   // ── CSV export of visible buildings ──
   const handleExportCSV = useCallback(() => {
-    if (!allBuildings?.features?.length) { setToastSuccess('No building data loaded — select a storm and load cells first.'); return; }
+    if (!allBuildings?.features?.length) { setCellError('No building data loaded — select a storm and load cells first.'); return; }
     const totalLoss = allBuildings.features.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
     const nsiCount  = allBuildings.features.filter((f: any) => f.properties?.source === 'NSI').length;
     const osmCount  = allBuildings.features.filter((f: any) => f.properties?.source === 'OSM').length;
@@ -2438,12 +2441,15 @@ ${fieldFlag ? `
 
   // ── Batch Claims Package Export ──
   const handleExportClaimsPackage = useCallback(() => {
-    if (!allBuildings?.features?.length || !activeStorm) return;
+    if (!allBuildings?.features?.length || !activeStorm) {
+      setCellError('Load a storm with damage data before exporting a Claims Package.');
+      return;
+    }
     const damaged = allBuildings.features.filter((f: any) => {
       const cat = f.properties?.damage_category;
       return cat && cat !== 'none';
     });
-    if (!damaged.length) { setToastSuccess('No damaged buildings to include in claims package.'); return; }
+    if (!damaged.length) { setCellError('No damaged buildings to include in claims package.'); return; }
 
     const now = new Date();
     const totalLoss = damaged.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
@@ -2948,7 +2954,7 @@ ${fieldFlag ? `
     // destination. Works offline, no extra dependencies.
     const w = window.open('', '_blank');
     if (!w) {
-      setToastSuccess('Pop-ups blocked — allow pop-ups for this site to export as PDF.');
+      setCellError('Pop-ups blocked — allow pop-ups for this site to export as PDF.');
       return false;
     }
     w.document.open();
@@ -2965,7 +2971,7 @@ ${fieldFlag ? `
   // ── CAT Deployment Report export (CAT_TEAM_PLAN §4b C4, §11 Q5) ──
   const handleGenerateCatReport = useCallback((format: 'html' | 'pdf' = 'html') => {
     if (!activeStorm || !hotspots.length) {
-      setToastSuccess('Load a storm with damage data before generating a CAT Report.');
+      setCellError('Load a storm with damage data before generating a CAT Report.');
       return;
     }
     const html = buildCatDeploymentReport({
@@ -2987,7 +2993,7 @@ ${fieldFlag ? `
   // ── Situation Report export (CAT_TEAM_PLAN §4a B8, §11 Q5) ──
   const handleGenerateSitRep = useCallback((format: 'html' | 'pdf' = 'html') => {
     if (!activeStorm || !hotspots.length) {
-      setToastSuccess('Load a storm with damage data before generating a SitRep.');
+      setCellError('Load a storm with damage data before generating a SitRep.');
       return;
     }
     const html = buildSitRep({
