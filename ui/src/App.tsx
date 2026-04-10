@@ -121,6 +121,52 @@ const byDPS = (a: StormInfo, b: StormInfo) => (b.dps_score || 0) - (a.dps_score 
 const csvField = (v: any) => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s; };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Mode-aware formatting helpers (CAT_TEAM_PLAN §7 — false-precision cleanup)
+//   Analyst Mode keeps the precise number the tool has always shown.
+//   Ops Mode rounds aggressively and uses plain-language bands, because
+//   CAT/EM users trust "~$80M" more than "$81.3M" from a model.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export type DisplayMode = 'analyst' | 'ops';
+
+function formatLossOps(usd: number, mode: DisplayMode): string {
+  if (!isFinite(usd) || usd <= 0) return '—';
+  if (mode === 'analyst') {
+    if (usd >= 1e9) return `$${(usd / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })}B`;
+    if (usd >= 1e6) return `$${(usd / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}M`;
+    if (usd >= 1e3) return `$${(usd / 1e3).toLocaleString(undefined, { maximumFractionDigits: 0 })}K`;
+    return `$${Math.round(usd).toLocaleString()}`;
+  }
+  // Ops Mode: round to a "confident" bucket so we don't oversell model precision.
+  if (usd >= 1e9) {
+    const b = usd / 1e9;
+    if (b >= 10) return `~$${Math.round(b)}B`;
+    return `~$${(Math.round(b * 2) / 2).toFixed(1)}B`; // nearest 0.5B
+  }
+  if (usd >= 1e8) return `~$${Math.round(usd / 1e8) * 100}M`; // nearest $100M
+  if (usd >= 1e7) return `~$${Math.round(usd / 1e7) * 10}M`;  // nearest $10M
+  if (usd >= 1e6) return `~$${Math.round(usd / 1e6)}M`;       // nearest $1M
+  if (usd >= 1e5) return `~$${Math.round(usd / 1e5) * 100}K`; // nearest $100K
+  return '<$1M';
+}
+
+function formatCountOps(n: number, mode: DisplayMode): string {
+  if (!isFinite(n) || n <= 0) return '0';
+  if (mode === 'analyst') return Math.round(n).toLocaleString();
+  // Ops Mode: round big counts to avoid false precision
+  if (n >= 100_000) return `~${Math.round(n / 1000).toLocaleString()}k`;
+  if (n >= 10_000)  return `~${(Math.round(n / 100) / 10).toFixed(1)}k`;
+  if (n >= 1_000)   return `~${Math.round(n / 100) * 100}`;
+  if (n >= 100)     return `~${Math.round(n / 10) * 10}`;
+  return Math.round(n).toLocaleString();
+}
+
+function formatDepthOps(ft: number | null | undefined, mode: DisplayMode): string {
+  if (ft == null || !isFinite(ft)) return '—';
+  if (mode === 'analyst') return `${ft.toFixed(1)} ft`;
+  return `~${Math.round(ft)} ft`;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Haversine distance (km) — used by comparable loss & wind model
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -446,7 +492,7 @@ const CONFIDENCE_STYLES: Record<string, { bg: string; text: string; label: strin
   unvalidated: { bg: 'bg-gray-100', text: 'text-gray-500', label: 'Unvalidated' },
 };
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -463,6 +509,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   criticalBreakdown: Array<{ icon: string; label: string; count: number }>;
   hotspots: Array<{ rank: number; loss: number; count: number; lat: number; lon: number; avgLoss: number }>;
   onFlyTo?: (lon: number, lat: number) => void;
+  mode: DisplayMode;
+  onModeChange: (m: DisplayMode) => void;
 }) {
   // Auto-expand on desktop, collapsed by default on mobile
   const [expanded, setExpanded] = useState(false);
@@ -498,7 +546,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         {/* Loss summary — visible only when collapsed */}
         {!expanded && totals.loss > 0 && (
           <span className="text-red-600 font-black text-sm shrink-0">
-            ${(totals.loss / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 })}M
+            {formatLossOps(totals.loss, mode)}
           </span>
         )}
 
@@ -517,6 +565,40 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           aria-label={expanded ? 'Collapse panel' : 'Expand panel'}
         >{expanded ? '▲' : '▼'}</button>
       </div>
+
+      {/* ── Mode toggle — Analyst | Ops (CAT_TEAM_PLAN §3) ── */}
+      {expanded && (
+        <div className="px-3 pb-2 -mt-1">
+          <div
+            role="tablist"
+            aria-label="Display mode"
+            className="inline-flex w-full items-center rounded-md bg-slate-100 p-0.5 text-[10px] font-bold uppercase tracking-wider"
+          >
+            <button
+              role="tab"
+              aria-selected={mode === 'analyst'}
+              onClick={() => onModeChange('analyst')}
+              className={`flex-1 px-2 py-1 rounded transition-colors ${
+                mode === 'analyst'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+              title="Analyst Mode — precise dollar losses and technical detail"
+            >Analyst</button>
+            <button
+              role="tab"
+              aria-selected={mode === 'ops'}
+              onClick={() => onModeChange('ops')}
+              className={`flex-1 px-2 py-1 rounded transition-colors ${
+                mode === 'ops'
+                  ? 'bg-white text-orange-700 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+              title="Ops Mode — deployment-focused with confidence bands and rounded numbers"
+            >Ops</button>
+          </div>
+        </div>
+      )}
 
       {/* ── Expandable detail content ── */}
       {expanded && (
@@ -543,13 +625,50 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         </div>
       </div>
 
-      {/* R5: Confidence badge */}
+      {/* R5: Confidence badge + sub-component pips (CAT_TEAM_PLAN B5) */}
       {(() => {
         const cs = CONFIDENCE_STYLES[confidence.level] || CONFIDENCE_STYLES.unvalidated;
         const tip = confidence.level === 'high' ? 'Strong building data coverage in the affected area'
           : confidence.level === 'medium' ? 'Moderate building data — some gaps possible'
           : confidence.level === 'low' ? 'Limited building data — estimates may be incomplete'
           : 'Model estimate only — building data not yet loaded';
+
+        // Derive sub-component confidence from the data we already have.
+        // Surge: SLOSH MoMs is always high-quality for historical storms we ship.
+        // Buildings: mirrors the existing badge level.
+        // Population: high if we have a county count, medium if only a label, low otherwise.
+        const surgeLevel: 'high' | 'medium' | 'low' = 'high';
+        const buildingsLevel: 'high' | 'medium' | 'low' =
+          confidence.level === 'high' ? 'high'
+            : confidence.level === 'medium' ? 'medium'
+            : confidence.level === 'low' ? 'low'
+            : 'low';
+        const popLevel: 'high' | 'medium' | 'low' =
+          storm.population?.population != null ? 'high'
+            : storm.population?.pop_label ? 'medium'
+            : 'low';
+
+        const pipColor = (lv: 'high' | 'medium' | 'low') =>
+          lv === 'high' ? 'bg-emerald-500'
+            : lv === 'medium' ? 'bg-amber-400'
+            : 'bg-rose-400';
+        const pipFill = (lv: 'high' | 'medium' | 'low') =>
+          lv === 'high' ? 5 : lv === 'medium' ? 3 : 2;
+
+        const Pip = ({ label, lv, title }: { label: string; lv: 'high' | 'medium' | 'low'; title: string }) => (
+          <div className="flex items-center gap-1.5 text-[10px] text-slate-600" title={title}>
+            <span className="font-semibold w-[52px]">{label}</span>
+            <div className="flex gap-0.5">
+              {[0,1,2,3,4].map(i => (
+                <span
+                  key={i}
+                  className={`w-1.5 h-2 rounded-sm ${i < pipFill(lv) ? pipColor(lv) : 'bg-slate-200'}`}
+                />
+              ))}
+            </div>
+          </div>
+        );
+
         return (
           <div className={`${cs.bg} rounded-lg px-3 py-2 mb-3`}>
             <div className="flex items-center justify-between">
@@ -557,6 +676,11 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
               <span className={`text-[10px] ${cs.text}`}>{confidence.count.toLocaleString()} buildings</span>
             </div>
             <p className={`text-[10px] mt-0.5 ${cs.text} opacity-75`}>{tip}</p>
+            <div className="mt-1.5 pt-1.5 border-t border-white/60 grid grid-cols-1 gap-0.5">
+              <Pip label="Surge"     lv={surgeLevel}     title="SLOSH maximum-of-maximums modeling for this event" />
+              <Pip label="Buildings" lv={buildingsLevel} title="Building inventory coverage in the loaded grid cells" />
+              <Pip label="Populatn." lv={popLevel}       title="County-level population data availability for the affected area" />
+            </div>
           </div>
         );
       })()}
@@ -582,18 +706,25 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       {/* Scoreboard */}
       {totals.buildings > 0 && (
         <div className="bg-gray-100/50 rounded-xl p-3 text-center border border-gray-200/60 shadow-sm mb-3">
-          <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-0.5">Total Modeled Loss</div>
+          <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-0.5">
+            {mode === 'ops' ? 'Modeled Loss (rounded)' : 'Total Modeled Loss'}
+          </div>
           <div className="text-2xl font-black text-red-600 tracking-tighter">
-            ${totals.loss > 0 ? (totals.loss / 1e6).toLocaleString(undefined, { maximumFractionDigits: 1 }) + 'M' : '...'}
+            {totals.loss > 0 ? formatLossOps(totals.loss, mode) : '...'}
           </div>
           <div className="text-xs text-gray-500 mt-0.5">
-            Across {totals.buildings.toLocaleString()} properties
+            Across {formatCountOps(totals.buildings, mode)} properties
           </div>
           {(estimatedPop > 0 || storm.population?.population) && (
             <div className="text-[10px] text-gray-400 mt-0.5">
               {storm.population?.population
-                ? `${storm.population.county_name} county pop: ${storm.population.population.toLocaleString()} · ~${estimatedPop.toLocaleString()} in surge zone`
-                : `~${estimatedPop.toLocaleString()} estimated residents in surge zone`}
+                ? `${storm.population.county_name} county pop: ${formatCountOps(storm.population.population, mode)} · ~${formatCountOps(estimatedPop, mode)} in surge zone`
+                : `~${formatCountOps(estimatedPop, mode)} estimated residents in surge zone`}
+            </div>
+          )}
+          {mode === 'ops' && (
+            <div className="mt-1 text-[9px] text-gray-400 italic">
+              Rounded for deployment planning — see Analyst Mode for precise figures.
             </div>
           )}
         </div>
@@ -638,7 +769,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         <div className="bg-amber-50 rounded-lg px-3 py-2 mb-3 border border-amber-300">
           <div className="text-[10px] text-amber-800 font-bold uppercase tracking-wider">Nuisance Flood Warning</div>
           <div className="text-xs text-amber-700 mt-0.5">
-            Avg. depth of {(totals.totalDepth / totals.buildings).toFixed(1)} ft across {totals.buildings.toLocaleString()} buildings — widespread shallow flooding can cause significant aggregate damage even when individual losses appear modest.
+            Avg. depth of {formatDepthOps(totals.totalDepth / totals.buildings, mode)} across {formatCountOps(totals.buildings, mode)} buildings — widespread shallow flooding can cause significant aggregate damage even when individual losses appear modest.
           </div>
         </div>
       )}
@@ -656,8 +787,12 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
               >
                 <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold text-red-700">${(h.loss / 1e6 >= 1 ? (h.loss / 1e6).toFixed(1) + 'M' : (h.loss / 1e3).toFixed(0) + 'K')}</div>
-                  <div className="text-[10px] text-red-400">{h.count} bldgs · avg ${h.avgLoss.toLocaleString()}</div>
+                  <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
+                  <div className="text-[10px] text-red-400">
+                    {mode === 'ops'
+                      ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`
+                      : `${h.count} bldgs · avg $${h.avgLoss.toLocaleString()}`}
+                  </div>
                 </div>
               </button>
             ))}
@@ -837,6 +972,17 @@ function App() {
     }, 800);
   }, []);
   const [confidence, setConfidence] = useState<{ level: string; count: number }>({ level: 'unvalidated', count: 0 });
+  // Analyst vs Ops display mode (CAT_TEAM_PLAN §3). Persisted best-effort in localStorage.
+  const [mode, setMode] = useState<DisplayMode>(() => {
+    if (typeof window === 'undefined') return 'analyst';
+    try {
+      const stored = window.localStorage.getItem('surgedps.mode');
+      return stored === 'ops' ? 'ops' : 'analyst';
+    } catch { return 'analyst'; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem('surgedps.mode', mode); } catch { /* ignore */ }
+  }, [mode]);
   const [eli, setEli] = useState<{ value: number; tier: string }>({ value: 0, tier: 'unavailable' });
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
   const [manifest, setManifest] = useState<Record<string, any>>({});
@@ -2544,7 +2690,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
