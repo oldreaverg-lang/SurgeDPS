@@ -403,6 +403,19 @@ class BuildingDamage:
     ihp_eligible: Optional[bool] = None    # estimated IHP eligibility
     ihp_category: Optional[str] = None     # "minor"/"moderate"/"major"/"severe"
     ihp_est_amount: Optional[float] = None # estimated IHP payout (USD)
+    # ── Rainfall flood damage (separate peril) ──
+    rainfall_depth_m: Optional[float] = None    # rainfall-induced flood depth
+    rainfall_loss_usd: Optional[float] = None   # rainfall-only loss
+    # ── Confidence & Uncertainty ──
+    confidence: Optional[str] = None             # "high" | "medium" | "low"
+    confidence_score: Optional[float] = None     # 0.0–1.0 composite
+    value_confidence: Optional[str] = None       # "high" | "medium" | "low"
+    value_method: Optional[str] = None           # how replacement value was estimated
+    value_low_usd: Optional[float] = None        # 20th percentile replacement
+    value_high_usd: Optional[float] = None       # 80th percentile replacement
+    foundation_confidence: Optional[str] = None  # "high" | "medium" | "low"
+    foundation_type: Optional[str] = None        # "slab" | "crawlspace" | "elevated"
+    prob_elevated: Optional[float] = None        # P(foundation > 2ft)
     # ── Pass-through metadata from building source (NSI/OSM) ──
     # These fields survive the damage pipeline so the frontend CSV export
     # can include them for insurance adjusters and emergency managers.
@@ -478,6 +491,9 @@ def estimate_building_damage(
     county_cost_per_sqft: Optional[float] = None,
     wind_speed_mph: Optional[float] = None,
     building_resilience: float = 0.60,
+    state_fips: Optional[str] = None,
+    flood_zone: Optional[str] = None,
+    rainfall_depth_m: Optional[float] = None,
 ) -> BuildingDamage:
     """
     Estimate flood damage for a single building.
@@ -519,8 +535,30 @@ def estimate_building_damage(
 
     # Adjust for first finished floor height
     # NSI found_ht is the elevation above grade — use it when available
-    ffh = (first_floor_ht_ft if first_floor_ht_ft is not None
-           else DEFAULT_FFH_FT.get(building_type, 1.0))
+    _fdn_confidence = "low"
+    _fdn_type = "unknown"
+    _prob_elevated = None
+    if first_floor_ht_ft is not None:
+        ffh = first_floor_ht_ft
+        _fdn_confidence = "high"  # NSI data
+        _fdn_type = "elevated" if ffh >= 2.0 else "slab"
+    else:
+        # Enhanced fallback: probabilistic foundation estimation
+        try:
+            from damage_model.foundation_estimator import estimate_foundation_height
+            fe = estimate_foundation_height(
+                building_type=building_type,
+                state_fips=state_fips,
+                flood_zone=flood_zone,
+                med_yr_blt=med_yr_blt,
+                lat=lat, lon=lon,
+            )
+            ffh = fe.best_estimate_ft
+            _fdn_confidence = fe.confidence
+            _fdn_type = fe.foundation_type
+            _prob_elevated = fe.prob_elevated
+        except Exception:
+            ffh = DEFAULT_FFH_FT.get(building_type, 1.0)
     depth_above_floor_ft = depth_ft - ffh
 
     # Look up damage percentages from HAZUS depth-damage curves
@@ -545,21 +583,46 @@ def estimate_building_damage(
     total_pct = (struct_pct + r * content_pct) / (1 + r)
 
     # ── Replacement value ───────────────────────────────────────────
+    _val_confidence = "low"
+    _val_method = "default"
+    _val_low = _val_high = None
     if val_struct is not None:
         # NSI path: use actual tabulated replacement costs
         struct_value = float(val_struct)
         content_value = float(val_cont) if val_cont is not None else struct_value * r
+        _val_confidence = "high"
+        _val_method = "NSI tabulated"
+        _val_low = struct_value * 0.90   # NSI has ~±10% uncertainty
+        _val_high = struct_value * 1.10
     else:
-        # Fallback path: sqft × $/sqft with per-building cost variation
-        # Use Census ACS county-level cost if available, else type default
-        area = sqft or DEFAULT_SQFT.get(building_type, 1400)
-        if county_cost_per_sqft is not None:
-            base_cost = county_cost_per_sqft
-        else:
-            base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
-        cost_per_sqft = base_cost * _cost_multiplier(building_id)
-        struct_value = area * cost_per_sqft
-        content_value = struct_value * r
+        # Enhanced fallback: use PropertyValuation for layered estimate
+        try:
+            from damage_model.property_estimator import estimate_replacement_value
+            pv = estimate_replacement_value(
+                building_type=building_type,
+                sqft=sqft,
+                county_cost_per_sqft=county_cost_per_sqft,
+                med_yr_blt=med_yr_blt,
+                state_fips=state_fips,
+                building_id=building_id,
+            )
+            struct_value = pv.mid_usd
+            content_value = struct_value * r
+            _val_confidence = pv.confidence
+            _val_method = pv.method
+            _val_low = pv.low_usd
+            _val_high = pv.high_usd
+        except Exception:
+            # Final fallback: original simple estimation
+            area = sqft or DEFAULT_SQFT.get(building_type, 1400)
+            if county_cost_per_sqft is not None:
+                base_cost = county_cost_per_sqft
+            else:
+                base_cost = DEFAULT_COST_PER_SQFT.get(building_type, 150)
+            cost_per_sqft = base_cost * _cost_multiplier(building_id)
+            struct_value = area * cost_per_sqft
+            content_value = struct_value * r
+            _val_method = "flat $/sqft fallback"
 
     replacement = struct_value + content_value
     loss = (struct_pct / 100 * struct_value) + (content_pct / 100 * content_value)
@@ -652,6 +715,48 @@ def estimate_building_damage(
         else:
             combined_loss = round(loss + INTERACTION * wind_loss, 0)
 
+    # ── Rainfall flood damage ────────────────────────────────────
+    # Adds rainfall-induced flooding as a separate damage layer.
+    # This captures inland rain flooding missed by the surge model
+    # (critical for storms like Harvey where 80%+ of damage was rain).
+    _rainfall_loss = None
+    if rainfall_depth_m is not None and rainfall_depth_m > 0.01:
+        rain_depth_ft = rainfall_depth_m * 3.28084
+        rain_above_floor = rain_depth_ft - ffh
+        rain_struct_pct = get_damage_pct(rain_above_floor, building_type, "structure")
+        rain_content_pct = get_damage_pct(rain_above_floor, building_type, "contents")
+        _rainfall_loss = round(
+            (rain_struct_pct / 100 * struct_value)
+            + (rain_content_pct / 100 * content_value), 0
+        )
+        # Add to surge loss if rainfall depth exceeds surge depth
+        # (compound flooding handled by taking max at each building)
+        if _rainfall_loss > loss:
+            loss = _rainfall_loss
+
+    # ── Composite confidence score ─────────────────────────────
+    # Combines data quality signals from all inputs into a single
+    # adjuster-facing confidence label: "high" | "medium" | "low"
+    _conf_score = 0.0
+    # Value data quality (0.35 weight)
+    _vq = {"high": 0.35, "medium": 0.20, "low": 0.05}.get(_val_confidence, 0.05)
+    _conf_score += _vq
+    # Foundation data quality (0.30 weight)
+    _fq = {"high": 0.30, "medium": 0.15, "low": 0.05}.get(_fdn_confidence, 0.05)
+    _conf_score += _fq
+    # Depth source quality (0.20 weight — surge depth always present)
+    _conf_score += 0.15  # parametric surge = medium
+    # Wind data (0.15 weight)
+    if wind_speed_mph is not None:
+        _conf_score += 0.10
+    # Classify
+    if _conf_score >= 0.65:
+        _confidence = "high"
+    elif _conf_score >= 0.35:
+        _confidence = "medium"
+    else:
+        _confidence = "low"
+
     return BuildingDamage(
         building_id=building_id,
         lon=lon,
@@ -680,6 +785,19 @@ def estimate_building_damage(
         ihp_eligible=ihp_eligible,
         ihp_category=ihp_category,
         ihp_est_amount=ihp_est_amount,
+        # ── Rainfall ──
+        rainfall_depth_m=rainfall_depth_m,
+        rainfall_loss_usd=_rainfall_loss,
+        # ── Confidence & Uncertainty ──
+        confidence=_confidence,
+        confidence_score=round(_conf_score, 2),
+        value_confidence=_val_confidence,
+        value_method=_val_method,
+        value_low_usd=round(_val_low, 0) if _val_low else None,
+        value_high_usd=round(_val_high, 0) if _val_high else None,
+        foundation_confidence=_fdn_confidence,
+        foundation_type=_fdn_type,
+        prob_elevated=round(_prob_elevated, 2) if _prob_elevated is not None else None,
     )
 
 
@@ -691,6 +809,9 @@ def estimate_damage_from_raster(
     storm_id: Optional[str] = None,
     landfall_lat: Optional[float] = None,
     landfall_lon: Optional[float] = None,
+    max_wind_kt: Optional[float] = None,
+    storm_speed_kt: Optional[float] = None,
+    storm_heading_deg: Optional[float] = None,
 ) -> DamageEstimate:
     """
     Estimate damage for all buildings by sampling flood depth at each location.
@@ -703,6 +824,9 @@ def estimate_damage_from_raster(
         storm_id: Storm identifier for IBTrACS wind field lookup (e.g. "michael_2018")
         landfall_lat: Landfall latitude for wind field snapshot selection
         landfall_lon: Landfall longitude for wind field snapshot selection
+        max_wind_kt: Max sustained wind (knots) for rainfall estimation
+        storm_speed_kt: Forward speed (knots) for rainfall estimation
+        storm_heading_deg: Storm heading (degrees from N) for rainfall estimation
 
     Returns:
         DamageEstimate with per-building and aggregated loss data
@@ -755,6 +879,17 @@ def estimate_damage_from_raster(
     except Exception as exc:
         logger.info("[Census] County cost lookup failed (using defaults): %s", exc)
 
+    # ── State FIPS for property/foundation estimation ──
+    cell_state_fips = None
+    try:
+        from damage_model.property_estimator import get_state_fips_from_coords
+        if sample_coords:
+            cell_state_fips = get_state_fips_from_coords(avg_lat, avg_lon)
+            if cell_state_fips:
+                logger.info("[StateFIPS] Cell in state FIPS %s", cell_state_fips)
+    except Exception:
+        pass
+
     # ── Wind field from IBTrACS quadrant radii (Phase 2) ──
     # Loads the landfall-nearest IBTrACS snapshot and creates an asymmetric
     # Holland parametric wind model.  Wind speed at each building is queried
@@ -775,6 +910,41 @@ def estimate_damage_from_raster(
                 )
         except Exception as exc:
             logger.info("[WindField] Wind field init failed (wind damage disabled): %s", exc)
+
+    # ── Rainfall estimation parameters ──
+    # Extract storm parameters from wind snapshot if available, else from args
+    _rain_center_lat = landfall_lat
+    _rain_center_lon = landfall_lon
+    _rain_max_wind_kt = max_wind_kt
+    _rain_speed_kt = storm_speed_kt
+    _rain_heading_deg = storm_heading_deg or 0.0
+
+    if wind_snapshot is not None:
+        _rain_center_lat = _rain_center_lat or wind_snapshot.lat
+        _rain_center_lon = _rain_center_lon or wind_snapshot.lon
+        _rain_max_wind_kt = _rain_max_wind_kt or wind_snapshot.max_wind_kt
+        if _rain_speed_kt is None and wind_snapshot.storm_speed_ms > 0:
+            _rain_speed_kt = wind_snapshot.storm_speed_ms / 0.514444  # m/s → kt
+        _rain_heading_deg = _rain_heading_deg or wind_snapshot.storm_dir_deg
+
+    _rainfall_available = False
+    _estimate_rain = None
+    if (_rain_center_lat is not None and _rain_center_lon is not None
+            and _rain_max_wind_kt is not None and _rain_max_wind_kt > 0
+            and _rain_speed_kt is not None and _rain_speed_kt > 0):
+        try:
+            from flood_model.rainfall import estimate_rainfall_at_point
+            _estimate_rain = estimate_rainfall_at_point
+            _rainfall_available = True
+            logger.info(
+                "[Rainfall] Parametric rainfall active — Vmax=%.0f kt, "
+                "speed=%.1f kt, heading=%.0f°",
+                _rain_max_wind_kt, _rain_speed_kt, _rain_heading_deg,
+            )
+        except ImportError:
+            logger.info("[Rainfall] rainfall module not available")
+    else:
+        logger.info("[Rainfall] Insufficient storm params for rainfall estimation")
 
     # Open depth raster
     with rasterio.open(depth_raster_path) as src:
@@ -822,13 +992,45 @@ def estimate_damage_from_raster(
             # small non-zero depths to every grid point (noise floor ~0.05 m)
             # so without this check all buildings in the cell get some loss.
             # We resolve foundation height here using the same priority order
-            # as estimate_building_damage(), then skip buildings that are dry.
+            # as estimate_building_damage(), then skip buildings that are dry
+            # (unless rainfall adds enough depth to matter).
             depth_ft = depth_m * 3.28084
-            ffh = (float(found_ht) if found_ht is not None
-                   else DEFAULT_FFH_FT.get(btype, 1.0))
-            if depth_ft < ffh - 0.1:
-                # Surge doesn't reach the first floor — building is not flooded.
-                # Allow 0.1 ft buffer: water at floor level causes moisture/mold damage.
+            if found_ht is not None:
+                ffh = float(found_ht)
+            else:
+                try:
+                    from damage_model.foundation_estimator import estimate_foundation_height
+                    _fe = estimate_foundation_height(
+                        building_type=btype, state_fips=cell_state_fips,
+                        flood_zone=props.get("flood_zone"),
+                        med_yr_blt=int(props["med_yr_blt"]) if props.get("med_yr_blt") is not None else None,
+                        lat=lat, lon=lon,
+                    )
+                    ffh = _fe.best_estimate_ft
+                except Exception:
+                    ffh = DEFAULT_FFH_FT.get(btype, 1.0)
+
+            # ── Per-building rainfall depth ─────────────────────────────
+            bldg_rain_depth_m = None
+            if _rainfall_available and _estimate_rain is not None:
+                try:
+                    bldg_rain_depth_m = _estimate_rain(
+                        point_lat=lat, point_lon=lon,
+                        center_lat=_rain_center_lat, center_lon=_rain_center_lon,
+                        max_wind_kt=_rain_max_wind_kt,
+                        storm_speed_kt=_rain_speed_kt,
+                        heading_deg=_rain_heading_deg,
+                    )
+                    if bldg_rain_depth_m is not None and bldg_rain_depth_m < 0.01:
+                        bldg_rain_depth_m = None  # below noise threshold
+                except Exception:
+                    bldg_rain_depth_m = None
+
+            # Combined check: surge OR rainfall must reach the floor
+            rain_depth_ft = (bldg_rain_depth_m or 0.0) * 3.28084
+            effective_depth_ft = max(depth_ft, rain_depth_ft)
+            if effective_depth_ft < ffh - 0.1:
+                # Neither surge nor rainfall reaches the first floor.
                 continue
 
             # ── Wind speed from asymmetric Holland model ──
@@ -851,6 +1053,9 @@ def estimate_damage_from_raster(
                 occtype=str(props["occtype"]) if props.get("occtype") else None,
                 county_cost_per_sqft=county_cost_per_sqft,
                 wind_speed_mph=bldg_wind_mph,
+                state_fips=cell_state_fips,
+                flood_zone=props.get("flood_zone"),
+                rainfall_depth_m=bldg_rain_depth_m,
             )
             # Carry source metadata through so the frontend CSV export can use it
             damage.source       = props.get("source")
