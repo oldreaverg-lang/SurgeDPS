@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SurgeDPS Pipeline Validation Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1" crossorigin="anonymous"></script>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-card: #1e293b;
+            --bg-header: #0c1524;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #6366f1;
+            --accent-light: #818cf8;
+            --positive: #22c55e;
+            --negative: #ef4444;
+            --warning: #f59e0b;
+            --neutral: #64748b;
+            --border: #334155;
+            --gap: 16px;
+            --radius: 10px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.5; }
+        .dashboard { max-width: 1440px; margin: 0 auto; padding: var(--gap); }
+        .header { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%); padding: 24px 28px; border-radius: var(--radius); margin-bottom: var(--gap); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+        .header h1 { font-size: 22px; font-weight: 700; color: #fff; }
+        .header .subtitle { font-size: 13px; color: #a5b4fc; margin-top: 2px; }
+        .header .badge { background: rgba(99,102,241,0.3); color: #c7d2fe; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(99,102,241,0.4); }
+        .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }
+        .kpi-card { background: var(--bg-card); border-radius: var(--radius); padding: 18px 22px; border: 1px solid var(--border); }
+        .kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }
+        .kpi-value { font-size: 26px; font-weight: 800; }
+        .kpi-detail { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+        .kpi-value.good { color: var(--positive); }
+        .kpi-value.warn { color: var(--warning); }
+        .kpi-value.bad { color: var(--negative); }
+        .kpi-value.neutral { color: var(--accent-light); }
+        .chart-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }
+        .card { background: var(--bg-card); border-radius: var(--radius); padding: 20px 24px; border: 1px solid var(--border); }
+        .card h3 { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+        .card .card-sub { font-size: 11px; color: var(--text-muted); margin-bottom: 16px; }
+        .card canvas { max-height: 280px; }
+        .issues-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }
+        .issue-card { background: var(--bg-card); border-radius: var(--radius); padding: 18px 22px; border-left: 4px solid var(--warning); border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+        .issue-card.high { border-left-color: var(--negative); }
+        .issue-card.medium { border-left-color: var(--warning); }
+        .issue-card.low { border-left-color: var(--positive); }
+        .issue-card.fixed { border-left-color: var(--positive); opacity: 0.7; }
+        .issue-sev { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+        .issue-sev.high { color: var(--negative); }
+        .issue-sev.medium { color: var(--warning); }
+        .issue-sev.low { color: var(--positive); }
+        .issue-sev.fixed { color: var(--positive); }
+        .issue-card h4 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+        .issue-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+        .issue-card .fix { font-size: 11px; color: var(--accent-light); margin-top: 8px; font-weight: 500; }
+        .table-section { background: var(--bg-card); border-radius: var(--radius); padding: 20px 24px; border: 1px solid var(--border); overflow-x: auto; margin-bottom: var(--gap); }
+        .table-section h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        thead th { text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+        tbody td { padding: 10px 12px; border-bottom: 1px solid rgba(51,65,85,0.5); }
+        tbody tr:hover { background: rgba(99,102,241,0.05); }
+        .pass { color: var(--positive); font-weight: 700; }
+        .fail { color: var(--negative); font-weight: 700; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 28px 0 14px 0; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        .footer { text-align: center; padding: 20px; font-size: 11px; color: var(--text-muted); }
+        @media (max-width: 768px) { .chart-row, .issues-grid { grid-template-columns: 1fr; } .kpi-row { grid-template-columns: repeat(2, 1fr); } }
+        @media print { body { background: #fff; color: #000; } .card, .kpi-card, .issue-card, .table-section { border: 1px solid #ddd; background: #fff; } }
+    </style>
+</head>
+<body>
+<div class="dashboard">
+    <div class="header">
+        <div>
+            <h1>SurgeDPS Pipeline Validation</h1>
+            <div class="subtitle">Data quality audit using validate-data, statistical-analysis, and explore-data skills</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+            <span class="badge">7 Issues Found</span>
+            <span class="badge">2 Fixed This Session</span>
+            <span class="badge" style="background:rgba(34,197,94,0.2);color:#86efac;border-color:rgba(34,197,94,0.3)">Overall: Share with Caveats</span>
+        </div>
+    </div>
+
+    <!-- KPI ROW -->
+    <div class="kpi-row">
+        <div class="kpi-card"><div class="kpi-label">Surge Model Error</div><div class="kpi-value warn">±13.5%</div><div class="kpi-detail">Mean absolute vs 6 reference storms</div></div>
+        <div class="kpi-card"><div class="kpi-label">Benchmark Pass Rate</div><div class="kpi-value warn">3 / 5</div><div class="kpi-detail">Per-building loss vs NFIP claims data</div></div>
+        <div class="kpi-card"><div class="kpi-label">Aggregate Storm Accuracy</div><div class="kpi-value warn">1 / 3</div><div class="kpi-detail">Total loss within real-world range</div></div>
+        <div class="kpi-card"><div class="kpi-label">Pipeline Bugs Fixed</div><div class="kpi-value good">2</div><div class="kpi-detail">med_yr_blt/num_story pass-through + mask</div></div>
+        <div class="kpi-card"><div class="kpi-label">Data Sources</div><div class="kpi-value neutral">3</div><div class="kpi-detail">NSI (0.4-1.0) → OSM (0.2-0.45) → MSFT (0.1)</div></div>
+        <div class="kpi-card"><div class="kpi-label">Building Adjusters</div><div class="kpi-value good">3</div><div class="kpi-detail">Foundation, era, multi-story (now active)</div></div>
+    </div>
+
+    <!-- CHARTS ROW 1: Surge Model -->
+    <div class="section-title">1. Surge Model Calibration</div>
+    <div class="chart-row">
+        <div class="card">
+            <h3>Predicted vs Observed Peak Surge</h3>
+            <div class="card-sub">6 reference storms • bars = observed, line = modeled</div>
+            <canvas id="surgeChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Model Error Distribution</h3>
+            <div class="card-sub">% error per storm (negative = underestimate)</div>
+            <canvas id="errorChart"></canvas>
+        </div>
+    </div>
+
+    <!-- CHARTS ROW 2: Depth-Damage -->
+    <div class="section-title">2. Depth-Damage Curves</div>
+    <div class="chart-row">
+        <div class="card">
+            <h3>Structure Damage by Building Type</h3>
+            <div class="card-sub">HAZUS FIA curves — % of replacement cost vs flood depth above first floor</div>
+            <canvas id="structChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Building Adjuster Impact</h3>
+            <div class="card-sub">How NSI attributes shift the base HAZUS damage estimate</div>
+            <canvas id="adjusterChart"></canvas>
+        </div>
+    </div>
+
+    <!-- CHARTS ROW 3: Aggregate -->
+    <div class="section-title">3. Aggregate Storm Loss Validation</div>
+    <div class="chart-row">
+        <div class="card">
+            <h3>Modeled vs Real-World Total Surge Losses</h3>
+            <div class="card-sub">Bars = real-world range (low–high), diamonds = model estimate</div>
+            <canvas id="aggChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Loss Sensitivity to Depth Uncertainty</h3>
+            <div class="card-sub">How ±30% depth error propagates to per-building loss ($250K home, 1ft foundation)</div>
+            <canvas id="sensitivityChart"></canvas>
+        </div>
+    </div>
+
+    <!-- BENCHMARK TABLE -->
+    <div class="section-title">4. Per-Building Benchmark Results</div>
+    <div class="table-section">
+        <h3>Known Claim Scenarios vs Model Output</h3>
+        <table>
+            <thead>
+                <tr><th>Scenario</th><th>Depth</th><th>Type</th><th>Val Struct</th><th>Found Ht</th><th>Modeled Loss</th><th>Expected Range</th><th>Result</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1-story home, 3ft surge, slab</td><td>3.0 ft</td><td>RES1-1SNB</td><td>$250,000</td><td>1.0 ft</td><td>$102,075</td><td>$40K – $90K</td><td class="fail">OVER ✗</td></tr>
+                <tr><td>1-story home, 6ft surge, slab</td><td>6.0 ft</td><td>RES1-1SNB</td><td>$250,000</td><td>1.0 ft</td><td>$171,325</td><td>$100K – $200K</td><td class="pass">PASS ✓</td></tr>
+                <tr><td>V-zone elevated, 6ft surge, 4ft fdn</td><td>6.0 ft</td><td>RES1-1SNB</td><td>$350,000</td><td>4.0 ft</td><td>$77,700*</td><td>$25K – $100K</td><td class="pass">PASS ✓*</td></tr>
+                <tr><td>Commercial strip mall, 4ft surge</td><td>4.0 ft</td><td>COM</td><td>$1,500,000</td><td>0.0 ft</td><td>$618,975*</td><td>$200K – $600K</td><td class="fail">OVER ✗</td></tr>
+                <tr><td>Pre-1960 home, 4ft surge</td><td>4.0 ft</td><td>RES1-1SNB</td><td>$180,000</td><td>0.5 ft</td><td>$100,404</td><td>$50K – $130K</td><td class="pass">PASS ✓</td></tr>
+            </tbody>
+        </table>
+        <p style="font-size:11px;color:var(--text-muted);margin-top:10px">* Post-fix values (med_yr_blt/num_story now passed through). Pre-fix: V-zone was $117K, Commercial was $668K.</p>
+    </div>
+
+    <!-- ISSUES -->
+    <div class="section-title">5. Issues Found & Remediation Status</div>
+    <div class="issues-grid">
+        <div class="issue-card fixed">
+            <div class="issue-sev fixed">✓ FIXED — HIGH</div>
+            <h4>Issue 3: med_yr_blt/num_story Never Passed to Damage Calc</h4>
+            <p>estimate_damage_from_raster() called estimate_building_damage() without passing med_yr_blt, num_story, or occtype. The construction era adjustment (+7pp for pre-1970) and multi-story contents reduction were silently never applied.</p>
+            <div class="fix">Fixed: Added 3 missing parameters to the function call.</div>
+        </div>
+        <div class="issue-card fixed">
+            <div class="issue-sev fixed">✓ FIXED — LOW</div>
+            <h4>Issue 7: Inundation Mask Boundary</h4>
+            <p>Buildings where surge exactly equaled foundation height got zero damage. Water at floor level causes moisture and mold damage in reality.</p>
+            <div class="fix">Fixed: Changed threshold from depth_ft <= ffh to depth_ft < ffh - 0.1</div>
+        </div>
+        <div class="issue-card high">
+            <div class="issue-sev high">OPEN — HIGH</div>
+            <h4>Issue 1: OSM Buildings Have No Replacement Values</h4>
+            <p>When NSI is unavailable, loss = sqft × flat $150/sqft × random ±40% multiplier. The multiplier is seeded by building ID — pure noise, not data. Census ACS median home values by county would be a far better fallback.</p>
+            <div class="fix">Recommended: Query Census ACS API for county-level median home values.</div>
+        </div>
+        <div class="issue-card high">
+            <div class="issue-sev high">OPEN — HIGH</div>
+            <h4>Issue 2: No Depth Uncertainty Propagation</h4>
+            <p>Surge depth treated as exact truth, but the parametric model has ±13.5% mean error on peak surge. Per-building depth is even noisier. Loss estimates should be confidence intervals, not point estimates.</p>
+            <div class="fix">Recommended: Report [low, best, high] loss using ±30% depth sampling.</div>
+        </div>
+        <div class="issue-card medium">
+            <div class="issue-sev medium">OPEN — MEDIUM</div>
+            <h4>Issue 4: Contents-to-Structure Ratio Fixed at 50%</h4>
+            <p>HAZUS default 50% is wrong for many commercial types. Restaurants ~75%, wholesale ~100%, heavy industrial ~150%. NSI val_cont covers most cases but fallback is inaccurate.</p>
+            <div class="fix">Recommended: Use occupancy-specific ratios from HAZUS Table 5.7.</div>
+        </div>
+        <div class="issue-card medium">
+            <div class="issue-sev medium">OPEN — MEDIUM</div>
+            <h4>Issue 5: No Wind Damage in Loss Calculation</h4>
+            <p>Frontend shows wind vs. water attribution visually, but actual loss is 100% flood-based. Wind can be 30–60% of total loss for Cat 3+. Critical for coverage determination.</p>
+            <div class="fix">Recommended: Add HAZUS hurricane wind-damage curves; report wind/flood losses separately.</div>
+        </div>
+        <div class="issue-card medium">
+            <div class="issue-sev medium">OPEN — MEDIUM</div>
+            <h4>Issue 6: Damage Categories Don't Match FEMA IHP</h4>
+            <p>Our minor/moderate/major/severe thresholds (10/30/50%) are approximations. FEMA IHP uses different eligibility thresholds based on loss amount, not percentage.</p>
+            <div class="fix">Recommended: Add FEMA IHP eligibility estimate based on loss dollar amount.</div>
+        </div>
+    </div>
+
+    <div class="footer">
+        SurgeDPS Pipeline Validation Dashboard — Generated April 9, 2026 — Data skills: validate-data, statistical-analysis, explore-data, build-dashboard
+    </div>
+</div>
+
+<script>
+const COLORS = ['#6366f1','#f59e0b','#22c55e','#ef4444','#06b6d4','#ec4899','#8b5cf6'];
+
+// ═══════════════════════════════════════════
+// 1. SURGE MODEL CHART
+// ═══════════════════════════════════════════
+const surgeStorms = ['Sandy\n2012','Katrina\n2005','Ike\n2008','Harvey\n2017','Michael\n2018','Charley\n2004'];
+const surgeObs =    [9.0, 25.0, 15.0, 10.0, 11.0, 7.0];
+const surgeModel =  [8.2, 26.0, 13.4, 13.9, 10.6, 5.9];
+
+new Chart(document.getElementById('surgeChart'), {
+    type: 'bar',
+    data: {
+        labels: surgeStorms,
+        datasets: [
+            { label: 'Observed (ft)', data: surgeObs, backgroundColor: '#6366f180', borderColor: '#6366f1', borderWidth: 2, borderRadius: 4 },
+            { label: 'Modeled (ft)', data: surgeModel, backgroundColor: '#f59e0b80', borderColor: '#f59e0b', borderWidth: 2, borderRadius: 4 },
+        ]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } } },
+        scales: {
+            x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
+            y: { ticks: { color: '#94a3b8', callback: v => v + ' ft' }, grid: { color: '#1e293b' }, beginAtZero: true }
+        }
+    }
+});
+
+// ERROR CHART
+const surgeErrors = [-9.3, 4.0, -10.5, 39.2, -3.2, -15.1];
+new Chart(document.getElementById('errorChart'), {
+    type: 'bar',
+    data: {
+        labels: surgeStorms,
+        datasets: [{
+            label: '% Error',
+            data: surgeErrors,
+            backgroundColor: surgeErrors.map(e => Math.abs(e) > 20 ? '#ef444480' : Math.abs(e) > 10 ? '#f59e0b80' : '#22c55e80'),
+            borderColor: surgeErrors.map(e => Math.abs(e) > 20 ? '#ef4444' : Math.abs(e) > 10 ? '#f59e0b' : '#22c55e'),
+            borderWidth: 2, borderRadius: 4,
+        }]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false },
+            tooltip: { callbacks: { label: ctx => `${ctx.parsed.y > 0 ? '+' : ''}${ctx.parsed.y.toFixed(1)}%` } }
+        },
+        scales: {
+            x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
+            y: { ticks: { color: '#94a3b8', callback: v => (v > 0 ? '+' : '') + v + '%' }, grid: { color: '#1e293b' } }
+        }
+    }
+});
+
+// ═══════════════════════════════════════════
+// 2. DEPTH-DAMAGE CURVES
+// ═══════════════════════════════════════════
+const depths = [-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,10,12,14,16,18,20,22,24];
+const structRES1 = [0,0,0,0,10,18,25,31,37,42,46,50,53,58,62,65,67,69,70,71,72];
+const structRES2 = [0,0,0,0,8,14,20,25,29,33,36,39,42,47,52,56,59,62,64,66,68];
+const structCOM  = [0,0,0,0,5,10,15,20,25,30,35,39,43,50,55,59,62,65,67,69,70];
+
+new Chart(document.getElementById('structChart'), {
+    type: 'line',
+    data: {
+        labels: depths,
+        datasets: [
+            { label: 'RES1-1SNB (1-story)', data: structRES1, borderColor: '#6366f1', backgroundColor: '#6366f120', borderWidth: 2.5, fill: true, tension: 0.3, pointRadius: 2 },
+            { label: 'RES1-2SNB (2-story)', data: structRES2, borderColor: '#22c55e', borderWidth: 2, tension: 0.3, pointRadius: 2 },
+            { label: 'COM (commercial)', data: structCOM, borderColor: '#f59e0b', borderWidth: 2, tension: 0.3, pointRadius: 2 },
+        ]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } } },
+        scales: {
+            x: { title: { display: true, text: 'Depth Above First Floor (ft)', color: '#64748b' }, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+            y: { title: { display: true, text: 'Structure Damage %', color: '#64748b' }, ticks: { color: '#94a3b8', callback: v => v + '%' }, grid: { color: '#1e293b' }, min: 0, max: 80 }
+        }
+    }
+});
+
+// ADJUSTER IMPACT
+const adjLabels = ['Base HAZUS', '+Foundation\n(4ft elev)', '+Era (pre-1970)', '+Era (post-2000)', '+Multi-story\n(2-story)'];
+const adjStruct = [40.0, 25.0, 47.0, 36.0, 40.0];
+const adjCont   = [47.0, 32.0, 54.0, 43.0, 32.0];
+
+new Chart(document.getElementById('adjusterChart'), {
+    type: 'bar',
+    data: {
+        labels: adjLabels,
+        datasets: [
+            { label: 'Structure %', data: adjStruct, backgroundColor: '#6366f1aa', borderColor: '#6366f1', borderWidth: 1, borderRadius: 4 },
+            { label: 'Contents %', data: adjCont, backgroundColor: '#f59e0baa', borderColor: '#f59e0b', borderWidth: 1, borderRadius: 4 },
+        ]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } } },
+        scales: {
+            x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
+            y: { ticks: { color: '#94a3b8', callback: v => v + '%' }, grid: { color: '#1e293b' }, min: 0, max: 60 }
+        }
+    }
+});
+
+// ═══════════════════════════════════════════
+// 3. AGGREGATE CHART
+// ═══════════════════════════════════════════
+const aggStorms = ['Ian (2022)', 'Katrina (2005)', 'Harvey (2017)'];
+const aggLow =  [8, 50, 5];
+const aggHigh = [18, 80, 15];
+const aggModel = [8.1, 35.5, 2.9];
+
+new Chart(document.getElementById('aggChart'), {
+    type: 'bar',
+    data: {
+        labels: aggStorms,
+        datasets: [
+            { label: 'Real-World Low ($B)', data: aggLow, backgroundColor: '#22c55e40', borderColor: '#22c55e', borderWidth: 2, borderRadius: 4 },
+            { label: 'Real-World High ($B)', data: aggHigh, backgroundColor: '#22c55e20', borderColor: '#22c55e80', borderWidth: 2, borderRadius: 4 },
+            { label: 'Model Estimate ($B)', data: aggModel, backgroundColor: '#ef444480', borderColor: '#ef4444', borderWidth: 2, borderRadius: 4, type: 'bar' },
+        ]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } },
+            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y}B` } }
+        },
+        scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+            y: { ticks: { color: '#94a3b8', callback: v => '$' + v + 'B' }, grid: { color: '#1e293b' }, beginAtZero: true }
+        }
+    }
+});
+
+// SENSITIVITY CHART
+const sensDepths = [1,2,3,4,5,6,7,8,10,12];
+const sensLow =  [];
+const sensMid =  [];
+const sensHigh = [];
+// Approximate: loss = struct_pct% × 250K + cont_pct% × 125K; pct from RES1-1SNB curve
+const sCurve = [18,25,31,37,42,46,50,53,58,62];
+const cCurve = [22,32,40,47,53,58,62,65,70,74];
+for (let i = 0; i < sensDepths.length; i++) {
+    const midLoss = (sCurve[i]/100*250000 + cCurve[i]/100*125000);
+    sensMid.push(Math.round(midLoss/1000));
+    // ±30% depth shifts the curve position
+    const loIdx = Math.max(0, i - 1);
+    const hiIdx = Math.min(sensDepths.length - 1, i + 1);
+    sensLow.push(Math.round((sCurve[loIdx]/100*250000 + cCurve[loIdx]/100*125000)/1000));
+    sensHigh.push(Math.round((sCurve[hiIdx]/100*250000 + cCurve[hiIdx]/100*125000)/1000));
+}
+
+new Chart(document.getElementById('sensitivityChart'), {
+    type: 'line',
+    data: {
+        labels: sensDepths.map(d => d + 'ft'),
+        datasets: [
+            { label: 'High (+30% depth)', data: sensHigh, borderColor: '#ef4444', backgroundColor: '#ef444410', borderWidth: 1.5, borderDash: [4,4], tension: 0.3, pointRadius: 2, fill: '+1' },
+            { label: 'Best Estimate', data: sensMid, borderColor: '#6366f1', borderWidth: 2.5, tension: 0.3, pointRadius: 3 },
+            { label: 'Low (-30% depth)', data: sensLow, borderColor: '#22c55e', backgroundColor: '#22c55e10', borderWidth: 1.5, borderDash: [4,4], tension: 0.3, pointRadius: 2 },
+        ]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', usePointStyle: true } },
+            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y}K` } }
+        },
+        scales: {
+            x: { title: { display: true, text: 'Surge Depth Above Floor', color: '#64748b' }, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+            y: { title: { display: true, text: 'Per-Building Loss ($K)', color: '#64748b' }, ticks: { color: '#94a3b8', callback: v => '$' + v + 'K' }, grid: { color: '#1e293b' }, beginAtZero: true }
+        }
+    }
+});
+</script>
+</body>
+</html>

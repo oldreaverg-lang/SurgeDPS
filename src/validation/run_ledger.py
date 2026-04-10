@@ -27,7 +27,8 @@ from typing import Dict, List, Optional
 
 # Persistent storage on Railway volume
 _BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-_LEDGER_DIR = os.path.join(_BASE_DIR, 'tmp_integration', 'validation')
+_PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(_BASE_DIR, 'tmp_integration'))
+_LEDGER_DIR = os.path.join(_PERSISTENT_DIR, 'validation')
 _LEDGER_PATH = os.path.join(_LEDGER_DIR, 'run_ledger.json')
 os.makedirs(_LEDGER_DIR, exist_ok=True)
 

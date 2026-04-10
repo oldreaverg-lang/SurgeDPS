@@ -35,12 +35,15 @@ COPY data/ ./data/
 # Copy built React frontend from stage 1
 COPY --from=frontend-builder /app/ui/dist/ ./ui/dist/
 
-# Persistent data — mount a Railway volume at /app/tmp_integration
+# Persistent data — mount a Railway volume at /app/persistent
 # Contains: cells/ (surge grid cache), validation/ (run ledger),
 # census/ (population cache), forecasts/ (NHC track cache),
 # geocode/ (reverse geocoding cache), monitor_state.json
-# Railway volume mount point: /app/tmp_integration
-RUN mkdir -p tmp_integration/cells tmp_integration/validation \
+# Set PERSISTENT_DATA_DIR=/app/persistent in Railway env vars
+# Falls back to /app/tmp_integration when env var is not set
+RUN mkdir -p persistent/cells persistent/validation \
+    persistent/census persistent/forecasts persistent/geocode \
+    tmp_integration/cells tmp_integration/validation \
     tmp_integration/census tmp_integration/forecasts tmp_integration/geocode
 
 # Railway injects PORT at runtime; default to 8000 for local dev

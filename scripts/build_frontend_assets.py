@@ -22,7 +22,7 @@ from tile_gen.pmtiles_builder import generate_tiles_for_layer
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 UI_PUBLIC_DIR = os.path.join(BASE_DIR, 'ui', 'public')
-TMP_DIR = os.path.join(BASE_DIR, 'tmp_integration')
+TMP_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(BASE_DIR, 'tmp_integration'))
 
 # Galveston Bounding Box
 LON_MIN, LAT_MIN = -95.0, 29.2

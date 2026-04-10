@@ -59,7 +59,8 @@ _SESSION.headers.update({"User-Agent": "SurgeDPS/1.0 (surgedps.com)"})
 
 # Cache on Railway volume
 _BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-_FORECAST_CACHE_DIR = os.path.join(_BASE_DIR, 'tmp_integration', 'forecasts')
+_PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(_BASE_DIR, 'tmp_integration'))
+_FORECAST_CACHE_DIR = os.path.join(_PERSISTENT_DIR, 'forecasts')
 os.makedirs(_FORECAST_CACHE_DIR, exist_ok=True)
 
 

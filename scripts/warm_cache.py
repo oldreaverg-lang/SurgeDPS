@@ -32,7 +32,8 @@ from tile_gen.pmtiles_builder import raster_to_geojson
 from data_ingest.building_fetcher import fetch_buildings
 from damage_model.depth_damage import estimate_damage_from_raster
 
-CACHE_DIR = os.path.join(BASE_DIR, 'tmp_integration', 'cells')
+PERSISTENT_DIR = os.environ.get('PERSISTENT_DATA_DIR', os.path.join(BASE_DIR, 'tmp_integration'))
+CACHE_DIR = os.path.join(PERSISTENT_DIR, 'cells')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Season accordion cutoff — must match api_server.py

@@ -1,0 +1,15 @@
+PRELIMINARY DAMAGE ASSESSMENT SUMMARY
+Storm: Hurricane Katrina (2005) — Category 3 at landfall
+Surge model: cubic-v4-coastal
+Cell: 0,0 (center — Pass Christian / Long Beach, MS)
+Source: SurgeDPS (stormdps.com/surgedps) — MODELED ESTIMATE, NOT FIELD VERIFIED
+
+Max Wind: 110 kt (127 mph) | Min Pressure: 920 mb
+Total Structures Assessed: 3,215
+Total Structures Damaged: 3,215
+Total Modeled Loss: $572.2M
+
+DAMAGE CATEGORY SUMMARY (FEMA PDA FORMAT)
+Jurisdiction,Affected,Minor Damage,Major Damage,Destroyed,Total Damaged,Estimated Loss
+Pass Christian / Long Beach, MS,7,1,938,2269,3215,$572,167,024
+TOTAL,7,1,938,2269,3215,$572,167,024
