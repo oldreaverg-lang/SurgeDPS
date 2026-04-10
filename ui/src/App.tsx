@@ -19,6 +19,20 @@ import {
 } from './catTeam';
 import type { RoutingTag, AdjusterRecommendation, SubPersona, StagingPlan } from './catTeam';
 import { buildCatDeploymentReport, buildSitRep, draftPublicAdvisory } from './catReports';
+import {
+  readBetaLayersEnabled,
+  writeBetaLayersEnabled,
+  fetchRainfallOverlay,
+  fetchShelterCapacity,
+  fetchVendorCoverage,
+  fetchTimeToAccess,
+} from './betaLayers';
+import type {
+  RainfallOverlay,
+  ShelterCapacityLayer,
+  VendorCoverageLayer,
+  TimeToAccessLayer,
+} from './betaLayers';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PMTiles Protocol (cloud-native vector tiles for flood polygons)
@@ -1015,6 +1029,141 @@ function ResourceStagingPanel({
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Phase 5 — Beta Data Layers panel
+//
+// Placeholder surface area for the four Phase 5 data layers.
+// Each sub-panel calls its stub fetcher in betaLayers.ts, which
+// currently returns { available: false, notes: '...' }. Once the
+// backend ships, the stub becomes a real fetch and the panels
+// light up without further UI changes.
+//
+// Persona gating (per CAT_TEAM_PLAN §8):
+//   Rainfall overlay (B7)  — both CAT and EM
+//   Shelter capacity (E5)  — EM only
+//   Vendor coverage (C6)   — CAT only
+//   Time-to-access (E6)    — EM only
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function BetaSection({ title, badge, notes }: { title: string; badge: string; notes: string }) {
+  return (
+    <div className="rounded-md border border-dashed border-purple-300 bg-white/70 px-2 py-1.5 mb-1.5">
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <span className="text-[10px] font-bold text-purple-900">{title}</span>
+        <span className="ml-auto text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded-sm bg-purple-100 text-purple-800 border border-purple-200">
+          {badge}
+        </span>
+      </div>
+      <div className="text-[9px] text-slate-600 italic leading-snug">
+        {notes}
+      </div>
+      <div className="text-[8px] text-purple-500 mt-0.5 uppercase tracking-wider font-bold">
+        Data layer pending
+      </div>
+    </div>
+  );
+}
+
+function BetaDataLayersPanel({
+  storm,
+  hotspots,
+  subPersona,
+}: {
+  storm: StormInfo;
+  hotspots: Hotspot[];
+  subPersona: SubPersona;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [rainfall, setRainfall] = useState<RainfallOverlay | null>(null);
+  const [shelters, setShelters] = useState<ShelterCapacityLayer | null>(null);
+  const [vendors, setVendors] = useState<VendorCoverageLayer | null>(null);
+  const [access, setAccess] = useState<TimeToAccessLayer | null>(null);
+
+  const stormId = (storm as any)?.id || (storm as any)?.storm_id || storm.name || 'unknown';
+
+  // Fetch on storm or persona change. The stubs return quickly so there's
+  // no need for loading indicators today — add them when real fetches land.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [r, s, v, a] = await Promise.all([
+        fetchRainfallOverlay(stormId),
+        subPersona === 'em' ? fetchShelterCapacity(stormId, { lat: (storm as any).landfall?.lat ?? 0, lon: (storm as any).landfall?.lon ?? 0 }) : Promise.resolve(null),
+        subPersona === 'cat' ? fetchVendorCoverage(stormId) : Promise.resolve(null),
+        subPersona === 'em' ? fetchTimeToAccess(stormId, hotspots.map(h => h.rank)) : Promise.resolve(null),
+      ]);
+      if (cancelled) return;
+      setRainfall(r);
+      setShelters(s as ShelterCapacityLayer | null);
+      setVendors(v as VendorCoverageLayer | null);
+      setAccess(a as TimeToAccessLayer | null);
+    })();
+    return () => { cancelled = true; };
+  }, [stormId, subPersona, hotspots.length]);
+
+  return (
+    <div className="rounded-xl p-2.5 mb-3 border border-purple-200 bg-purple-50/60">
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-[10px] font-bold uppercase tracking-wider text-purple-800">
+          🧪 Beta data layers
+        </span>
+        <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-purple-900 bg-purple-100">
+          Preview
+        </span>
+        <span className="text-purple-600 text-xs">{expanded ? '▲' : '▼'}</span>
+      </button>
+
+      {expanded && (
+        <div className="mt-2">
+          {/* B7 — Rainfall overlay (both personas) */}
+          {rainfall && (
+            <BetaSection
+              title="Rainfall overlay (B7)"
+              badge="both"
+              notes={rainfall.notes}
+            />
+          )}
+
+          {/* E5 — Shelter capacity (EM only) */}
+          {subPersona === 'em' && shelters && (
+            <BetaSection
+              title="Shelter capacity (E5)"
+              badge="EM"
+              notes={shelters.notes}
+            />
+          )}
+
+          {/* C6 — Vendor coverage (CAT only) */}
+          {subPersona === 'cat' && vendors && (
+            <BetaSection
+              title="Vendor coverage (C6)"
+              badge="CAT"
+              notes={vendors.notes}
+            />
+          )}
+
+          {/* E6 — Time-to-access (EM only) */}
+          {subPersona === 'em' && access && (
+            <BetaSection
+              title="Time-to-access (E6)"
+              badge="EM"
+              notes={access.notes}
+            />
+          )}
+
+          <div className="text-[9px] text-purple-500 mt-1 italic leading-snug">
+            These layers are scaffolding only — real data ships as each backend
+            endpoint lands. See PHASE5_DATA_CONTRACTS.md.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Dashboard Panel (right overlay on map)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1043,7 +1192,7 @@ interface Hotspot {
   routing: RoutingTag;
 }
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange, betaLayersEnabled }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -1070,6 +1219,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   windowDays: number;
   onTeamSizeChange: (n: number) => void;
   onWindowDaysChange: (n: number) => void;
+  betaLayersEnabled: boolean;
 }) {
   // Auto-expand on desktop, collapsed by default on mobile
   const [expanded, setExpanded] = useState(false);
@@ -1252,6 +1402,15 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           estimatedPop={estimatedPop}
           severityCounts={severityCounts}
           criticalBreakdown={criticalBreakdown}
+        />
+      )}
+
+      {/* Phase 5 — Beta data layers (CAT_TEAM_PLAN §8) — gated by More-menu flag, Ops only */}
+      {mode === 'ops' && betaLayersEnabled && (
+        <BetaDataLayersPanel
+          storm={storm}
+          hotspots={hotspots}
+          subPersona={subPersona}
         />
       )}
 
@@ -1683,6 +1842,12 @@ function App() {
   useEffect(() => {
     try { window.localStorage.setItem('surgedps.subpersona', subPersona); } catch { /* ignore */ }
   }, [subPersona]);
+  // Phase 5 — Beta data layers flag (CAT_TEAM_PLAN §8 Phase 5).
+  // Single shared toggle that unlocks the B7/E5/C6/E6 placeholder
+  // panels. Real data hooks live in ui/src/betaLayers.ts and return
+  // empty shapes until the backend endpoints ship.
+  const [betaLayersEnabled, setBetaLayersEnabled] = useState<boolean>(() => readBetaLayersEnabled());
+  useEffect(() => { writeBetaLayersEnabled(betaLayersEnabled); }, [betaLayersEnabled]);
   // Deployment Planner state (CAT_TEAM_PLAN §4b C3) — lifted to App
   // so the planner and CAT summary see the same numbers.
   const [teamSize, setTeamSize] = useState<number>(20);
@@ -3491,6 +3656,12 @@ ${fieldFlag ? `
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors flex items-center gap-2"
                         title="Export claims documentation package with peril attribution and triage data for all damaged buildings"
                       >📄 Claims Package (.csv)</button>
+                      <div className="border-t border-gray-200" />
+                      <button
+                        onClick={() => { setBetaLayersEnabled(v => !v); setMoreMenuOpen(false); }}
+                        className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center gap-2 ${betaLayersEnabled ? 'bg-purple-50 text-purple-900 hover:bg-purple-100' : 'text-gray-700 hover:bg-gray-100'}`}
+                        title="Toggle Phase 5 beta data layers (Rainfall, Shelter capacity, Vendor coverage, Time-to-access). These panels show the UX shape; real data is pending backend integration."
+                      >🧪 Beta layers {betaLayersEnabled ? '✓' : ''}</button>
                     </div>
                   </>
                 )}
@@ -3511,7 +3682,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
