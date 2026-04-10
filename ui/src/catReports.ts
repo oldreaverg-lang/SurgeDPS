@@ -115,10 +115,46 @@ const SHARED_STYLES = `
   .tag-uncovered { background: #fecaca; color: #991b1b; }
   .confidence-note { background: #fefce8; border: 1px solid #fde68a; border-radius: 6px; padding: 10px 14px; margin: 16px 0; font-size: 12px; color: #713f12; }
   .disclaimer { background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 12px 16px; margin-top: 28px; font-size: 12px; color: #7f1d1d; }
+  .disclaimer-top { background: #fee2e2; border: 2px solid #dc2626; border-radius: 8px; padding: 14px 18px; margin: 12px 0 20px; font-size: 13px; color: #7f1d1d; }
+  .disclaimer-top strong.banner { display: block; font-size: 15px; letter-spacing: 0.5px; color: #991b1b; margin-bottom: 4px; text-transform: uppercase; }
+  .about { background: #f1f5f9; border-left: 4px solid #64748b; border-radius: 4px; padding: 10px 14px; margin: 0 0 20px; font-size: 12px; color: #334155; line-height: 1.55; }
+  .about strong { color: #0f172a; }
   .footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8; text-align: center; }
+  @media print {
+    .disclaimer-top { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
   ul.contacts { padding-left: 18px; font-size: 13px; line-height: 1.7; }
   @media print { body { margin: 0; padding: 16px; } .no-print { display: none; } }
 `;
+
+// Prominent page-1 disclaimer banner, shared across both report types.
+// Legal exposure guard — every export gets this at the top, not just the
+// bottom, so non-technical readers can't miss it. (CAT_TEAM_PLAN §9)
+const DISCLAIMER_TOP = `
+<div class="disclaimer-top">
+  <strong class="banner">⚠ Modeled estimate — not field verified</strong>
+  This document is an automated forecast based on SLOSH storm-surge modeling
+  and building-inventory estimates. It is intended to <strong>support</strong> —
+  not replace — field inspection, direct communication with affected
+  residents, and the judgment of professional CAT managers and emergency
+  management authorities. Numbers are rounded, conservative, and should be
+  treated as a starting point for planning conversations, not a binding
+  deployment or evacuation order.
+</div>`;
+
+// Friendly "About this report" blurb — CAT_TEAM_PLAN §9 calls out SurgeDPS
+// as an educational resource for students curious about disaster response.
+// Sits below the disclaimer, above the first content heading.
+const ABOUT_BLURB = `
+<div class="about">
+  <strong>About this report.</strong> SurgeDPS combines historical storm
+  tracks, SLOSH surge modeling, and public building footprints to help
+  insurance CAT teams and emergency managers ask better questions before
+  and after a storm. If you're a student exploring disaster response as a
+  career path, think of this document as a starting point for the
+  conversations the pros actually have — not the final word on any
+  particular storm.
+</div>`;
 
 const urgencyClass = (headline: string): string => {
   if (headline === 'Deploy immediately') return 'urgency-immediate';
@@ -197,6 +233,9 @@ export function buildCatDeploymentReport(args: {
   Generated ${now.toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })} at ${now.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' })} |
   Reference: <strong>${esc(refId)}</strong>
 </p>
+
+${DISCLAIMER_TOP}
+${ABOUT_BLURB}
 
 <h2>Deployment Recommendation</h2>
 <p><span class="urgency ${urgencyClass(wl.headline)}">${esc(wl.headline)}</span></p>
@@ -387,6 +426,9 @@ export function buildSitRep(args: {
   Generated ${now.toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })} at ${now.toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' })} |
   Reference: <strong>${esc(refId)}</strong>
 </p>
+
+${DISCLAIMER_TOP}
+${ABOUT_BLURB}
 
 <h2 class="em">Situation Overview</h2>
 <p><span class="urgency ${urgencyClass(wl.headline)}">${esc(wl.headline)}</span></p>
