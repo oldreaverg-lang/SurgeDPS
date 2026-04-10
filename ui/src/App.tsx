@@ -1121,7 +1121,7 @@ function BetaDataLayersPanel({
     (async () => {
       const [r, s, v, a] = await Promise.all([
         fetchRainfallOverlay(stormId),
-        subPersona === 'em' ? fetchShelterCapacity(stormId, { lat: (storm as any).landfall?.lat ?? 0, lon: (storm as any).landfall?.lon ?? 0 }) : Promise.resolve(null),
+        subPersona === 'em' ? fetchShelterCapacity(stormId, { lat: (storm as any).landfall_lat ?? 0, lon: (storm as any).landfall_lon ?? 0 }) : Promise.resolve(null),
         subPersona === 'cat' ? fetchVendorCoverage(stormId) : Promise.resolve(null),
         subPersona === 'em' ? fetchTimeToAccess(stormId, hotspots.map(h => h.rank)) : Promise.resolve(null),
       ]);
@@ -2929,7 +2929,10 @@ ${fieldFlag ? `
   //    format.) We don't bundle a client-side HTML→PDF library
   //    because the browser's built-in print-to-PDF already works
   //    with the @media print styles in catReports.ts.
-  const deliverReport = useCallback((html: string, baseName: string, format: 'html' | 'pdf') => {
+  // Returns true on success, false if the PDF pop-up was blocked
+  // (so the caller knows not to overwrite the "pop-ups blocked"
+  // error toast with its own success toast).
+  const deliverReport = useCallback((html: string, baseName: string, format: 'html' | 'pdf'): boolean => {
     if (format === 'html') {
       const blob = new Blob([html], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
@@ -2938,7 +2941,7 @@ ${fieldFlag ? `
       a.download = `${baseName}.html`;
       a.click();
       URL.revokeObjectURL(url);
-      return;
+      return true;
     }
     // PDF path: open the report in a new tab and trigger the
     // browser print dialog. The user picks "Save as PDF" as the
@@ -2946,7 +2949,7 @@ ${fieldFlag ? `
     const w = window.open('', '_blank');
     if (!w) {
       setToastSuccess('Pop-ups blocked — allow pop-ups for this site to export as PDF.');
-      return;
+      return false;
     }
     w.document.open();
     w.document.write(html);
@@ -2956,6 +2959,7 @@ ${fieldFlag ? `
     const fireprint = () => { try { w.focus(); w.print(); } catch { /* ignore */ } };
     if (w.document.readyState === 'complete') setTimeout(fireprint, 350);
     else w.addEventListener('load', () => setTimeout(fireprint, 200));
+    return true;
   }, []);
 
   // ── CAT Deployment Report export (CAT_TEAM_PLAN §4b C4, §11 Q5) ──
@@ -2975,7 +2979,8 @@ ${fieldFlag ? `
       windowDays,
     });
     const baseName = `cat_report_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}`;
-    deliverReport(html, baseName, format);
+    const ok = deliverReport(html, baseName, format);
+    if (!ok) return; // deliverReport has already set an error toast
     setToastSuccess(format === 'pdf' ? 'CAT Report opened — save as PDF from the print dialog' : 'CAT Deployment Report downloaded');
   }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, teamSize, windowDays, deliverReport]);
 
@@ -2995,7 +3000,8 @@ ${fieldFlag ? `
       criticalBreakdown,
     });
     const baseName = `sitrep_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}`;
-    deliverReport(html, baseName, format);
+    const ok = deliverReport(html, baseName, format);
+    if (!ok) return; // deliverReport has already set an error toast
     setToastSuccess(format === 'pdf' ? 'SitRep opened — save as PDF from the print dialog' : 'Situation Report downloaded');
   }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, criticalBreakdown, deliverReport]);
 
