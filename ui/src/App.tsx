@@ -3448,18 +3448,33 @@ ${fieldFlag ? `
                   type="line"
                   paint={{ 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.7 }}
                 />
+                {/* County labels — append " County" / " Parish" (Louisiana)
+                    so the label reads as a full jurisdiction name instead of
+                    just a word. Larger size + heavier halo so it stays legible
+                    on top of the surge grid, which otherwise washes out the
+                    pastel fill. STATE "22" = Louisiana FIPS. */}
                 <Layer
                   id="county-labels"
                   type="symbol"
                   minzoom={6}
                   layout={{
-                    'text-field': ['get', 'NAME'],
-                    'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
-                    'text-size': ['interpolate', ['linear'], ['zoom'], 6, 9, 10, 12],
+                    'text-field': ['concat',
+                      ['get', 'NAME'],
+                      ['case', ['==', ['get', 'STATE'], '22'], ' Parish', ' County'],
+                    ],
+                    'text-font': ['Open Sans Semibold', 'Arial Unicode MS Regular'],
+                    'text-size': ['interpolate', ['linear'], ['zoom'], 6, 11, 10, 15, 14, 18],
                     'text-anchor': 'center',
-                    'text-max-width': 8,
+                    'text-max-width': 10,
+                    'text-letter-spacing': 0.02,
+                    'text-transform': 'uppercase',
                   }}
-                  paint={{ 'text-color': '#e2e8f0', 'text-halo-color': '#0f172a', 'text-halo-width': 1 }}
+                  paint={{
+                    'text-color': '#ffffff',
+                    'text-halo-color': '#0f172a',
+                    'text-halo-width': 2,
+                    'text-halo-blur': 0.5,
+                  }}
                 />
               </Source>
             )
