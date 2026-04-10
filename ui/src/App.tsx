@@ -9,8 +9,13 @@ import {
   workloadSummary,
   aggregatePerilMix,
   perilHeadline,
+  planDeployment,
+  suggestTeamSize,
+  timeToClearDays,
+  formatTimeToClear,
 } from './catTeam';
 import type { RoutingTag, AdjusterRecommendation } from './catTeam';
+import { buildCatDeploymentReport, buildSitRep } from './catReports';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PMTiles Protocol (cloud-native vector tiles for flood polygons)
@@ -506,6 +511,9 @@ function CatDeploymentSummary({
   severityCounts,
   hotspots,
   mode,
+  teamSize,
+  onGenerateCatReport,
+  onGenerateSitRep,
 }: {
   storm: StormInfo;
   totals: { buildings: number; loss: number; totalDepth: number };
@@ -513,6 +521,9 @@ function CatDeploymentSummary({
   severityCounts: Record<string, number>;
   hotspots: Hotspot[];
   mode: DisplayMode;
+  teamSize: number;
+  onGenerateCatReport: () => void;
+  onGenerateSitRep: () => void;
 }) {
   if (mode !== 'ops') return null;
   if (totals.buildings <= 0) return null;
@@ -592,23 +603,190 @@ function CatDeploymentSummary({
         </div>
       )}
 
-      {/* Action buttons (placeholders until Phase 3 C4/B8 ships exports) */}
+      {/* Time to Clear — storm-wide single-line summary (C5) */}
+      {(() => {
+        const ttc = timeToClearDays(hotspots, teamSize);
+        if (!isFinite(ttc) || ttc <= 0) return null;
+        return (
+          <div className="text-[10px] text-slate-600 mb-2 italic">
+            <span className="font-semibold not-italic">Time to clear:</span>{' '}
+            {formatTimeToClear(ttc)} with a {teamSize}-adjuster team
+          </div>
+        );
+      })()}
+
+      {/* Action buttons — CAT Report (C4) & SitRep (B8) */}
       <div className="flex gap-1.5">
         <button
-          disabled
-          title="Phase 3 — CAT Deployment Report export (coming soon)"
-          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-300 text-orange-700 bg-white/60 cursor-not-allowed opacity-60"
+          onClick={onGenerateCatReport}
+          title="Download CAT Deployment Report (HTML)"
+          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-400 text-orange-800 bg-white hover:bg-orange-50 transition-colors"
         >Generate CAT Report ↓</button>
         <button
-          disabled
-          title="Phase 4 — Situation Report export (coming soon)"
-          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-slate-300 text-slate-600 bg-white/60 cursor-not-allowed opacity-60"
+          onClick={onGenerateSitRep}
+          title="Download Situation Report (HTML)"
+          className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-400 text-emerald-800 bg-white hover:bg-emerald-50 transition-colors"
         >Generate SitRep ↓</button>
       </div>
 
       <div className="text-[9px] text-slate-400 mt-1.5 italic">
         Modeled estimate — not field verified. Rounded for deployment planning.
       </div>
+    </div>
+  );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Deployment Planner (CAT_TEAM_PLAN §4b C3)
+//
+// Interactive "X adjusters over Y days" simulator. Lets the CAT
+// lead drag team size / window and see per-area coverage update
+// live. Pure presentation layer — all the math lives in
+// planDeployment() / suggestTeamSize() in catTeam.ts.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function DeploymentPlanner({
+  hotspots,
+  teamSize,
+  windowDays,
+  onTeamSizeChange,
+  onWindowDaysChange,
+}: {
+  hotspots: Hotspot[];
+  teamSize: number;
+  windowDays: number;
+  onTeamSizeChange: (n: number) => void;
+  onWindowDaysChange: (n: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  if (hotspots.length === 0) return null;
+
+  const plan = planDeployment(hotspots, teamSize, windowDays);
+
+  const statusPill = (status: 'covered' | 'partial' | 'uncovered') => {
+    if (status === 'covered')   return 'bg-green-100 text-green-800 border border-green-200';
+    if (status === 'partial')   return 'bg-amber-100 text-amber-800 border border-amber-200';
+    return 'bg-red-100 text-red-800 border border-red-200';
+  };
+
+  const barColor =
+    plan.coverage_pct >= 100 ? 'bg-green-500'
+    : plan.coverage_pct >= 60 ? 'bg-amber-500'
+    : 'bg-red-500';
+
+  return (
+    <div className="rounded-xl p-2.5 mb-3 border border-purple-200 bg-purple-50/40">
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700">
+          Deployment Planner
+        </span>
+        <span className="ml-auto text-[10px] text-purple-600 font-semibold">
+          {plan.coverage_pct}% coverage
+        </span>
+        <span className="text-purple-500 text-xs">{expanded ? '▲' : '▼'}</span>
+      </button>
+
+      {expanded && (
+        <>
+          {/* Team size slider */}
+          <div className="mt-2">
+            <div className="flex justify-between text-[10px] text-slate-600">
+              <span className="font-semibold">Adjusters</span>
+              <span className="tabular-nums font-bold text-slate-800">{teamSize}</span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={80}
+              value={teamSize}
+              onChange={e => onTeamSizeChange(Number(e.target.value))}
+              className="w-full accent-purple-600"
+            />
+          </div>
+
+          {/* Window slider */}
+          <div className="mt-1">
+            <div className="flex justify-between text-[10px] text-slate-600">
+              <span className="font-semibold">Window (days)</span>
+              <span className="tabular-nums font-bold text-slate-800">{windowDays}</span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={14}
+              value={windowDays}
+              onChange={e => onWindowDaysChange(Number(e.target.value))}
+              className="w-full accent-purple-600"
+            />
+          </div>
+
+          {/* Coverage bar */}
+          <div className="mt-2 mb-1.5">
+            <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+              <div
+                className={`h-full ${barColor} transition-all`}
+                style={{ width: `${plan.coverage_pct}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-[9px] text-slate-500 mt-1 tabular-nums">
+              <span>
+                {plan.required_adjuster_days.toFixed(0)} adj-days needed
+              </span>
+              <span>
+                {plan.capacity_adjuster_days} capacity
+              </span>
+            </div>
+          </div>
+
+          {/* Shortfall or full coverage indicator */}
+          {plan.shortfall_days > 0 ? (
+            <div className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 mb-1.5">
+              <span className="font-bold">Shortfall:</span>{' '}
+              {plan.shortfall_days.toFixed(0)} adjuster-days not covered
+            </div>
+          ) : (
+            <div className="text-[10px] text-green-700 bg-green-50 border border-green-200 rounded px-2 py-1 mb-1.5">
+              <span className="font-bold">✓ Full coverage</span> within {windowDays}-day window
+            </div>
+          )}
+
+          {/* Per-area list */}
+          <div className="space-y-1 mb-1.5">
+            {plan.areas.map(a => (
+              <div key={a.rank} className="flex items-center gap-1.5 text-[10px]">
+                <span className="font-bold text-slate-500 w-5 shrink-0">#{a.rank}</span>
+                <div className="flex-1 h-1.5 rounded-sm bg-slate-200 overflow-hidden">
+                  <div
+                    className={`h-full ${
+                      a.status === 'covered' ? 'bg-green-500'
+                      : a.status === 'partial' ? 'bg-amber-500'
+                      : 'bg-red-400'
+                    }`}
+                    style={{ width: `${a.coverage_pct}%` }}
+                  />
+                </div>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 ${statusPill(a.status)}`}>
+                  {a.coverage_pct}%
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Suggest team size button */}
+          <button
+            onClick={() => {
+              const n = suggestTeamSize(hotspots, windowDays);
+              if (n > 0) onTeamSizeChange(Math.min(80, n));
+            }}
+            className="w-full text-[10px] font-bold px-2 py-1 rounded-md border border-purple-400 text-purple-800 bg-white hover:bg-purple-50 transition-colors"
+            title="Solve for the smallest team that fully covers all areas within the current window"
+          >
+            Suggest team size for full coverage
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -642,7 +820,7 @@ interface Hotspot {
   routing: RoutingTag;
 }
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -661,6 +839,12 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   onFlyTo?: (lon: number, lat: number) => void;
   mode: DisplayMode;
   onModeChange: (m: DisplayMode) => void;
+  onGenerateCatReport: () => void;
+  onGenerateSitRep: () => void;
+  teamSize: number;
+  windowDays: number;
+  onTeamSizeChange: (n: number) => void;
+  onWindowDaysChange: (n: number) => void;
 }) {
   // Auto-expand on desktop, collapsed by default on mobile
   const [expanded, setExpanded] = useState(false);
@@ -783,7 +967,21 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         severityCounts={severityCounts}
         hotspots={hotspots}
         mode={mode}
+        teamSize={teamSize}
+        onGenerateCatReport={onGenerateCatReport}
+        onGenerateSitRep={onGenerateSitRep}
       />
+
+      {/* Deployment Planner (CAT_TEAM_PLAN §4b C3) — shown in Ops Mode */}
+      {mode === 'ops' && (
+        <DeploymentPlanner
+          hotspots={hotspots}
+          teamSize={teamSize}
+          windowDays={windowDays}
+          onTeamSizeChange={onTeamSizeChange}
+          onWindowDaysChange={onWindowDaysChange}
+        />
+      )}
 
       {/* R5: Confidence badge + sub-component pips (CAT_TEAM_PLAN B5) */}
       {(() => {
@@ -1182,6 +1380,10 @@ function App() {
   useEffect(() => {
     try { window.localStorage.setItem('surgedps.mode', mode); } catch { /* ignore */ }
   }, [mode]);
+  // Deployment Planner state (CAT_TEAM_PLAN §4b C3) — lifted to App
+  // so the planner and CAT summary see the same numbers.
+  const [teamSize, setTeamSize] = useState<number>(20);
+  const [windowDays, setWindowDays] = useState<number>(5);
   const [eli, setEli] = useState<{ value: number; tier: string }>({ value: 0, tier: 'unavailable' });
   const [validatedDps, setValidatedDps] = useState<{ value: number; adj: number; reason: string }>({ value: 0, adj: 0, reason: '' });
   const [manifest, setManifest] = useState<Record<string, any>>({});
@@ -2219,6 +2421,57 @@ ${fieldFlag ? `
     mapRef.current?.flyTo({ center: [lon, lat], zoom: 16, duration: 2000 });
   }, []);
 
+  // ── CAT Deployment Report export (CAT_TEAM_PLAN §4b C4) ──
+  const handleGenerateCatReport = useCallback(() => {
+    if (!activeStorm || !hotspots.length) {
+      setToastSuccess('Load a storm with damage data before generating a CAT Report.');
+      return;
+    }
+    const html = buildCatDeploymentReport({
+      storm: activeStorm as any,
+      totals: impactTotals,
+      severityCounts,
+      hotspots,
+      estimatedPop,
+      confidence,
+      teamSize,
+      windowDays,
+    });
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cat_report_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setToastSuccess('CAT Deployment Report downloaded');
+  }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, teamSize, windowDays]);
+
+  // ── Situation Report export (CAT_TEAM_PLAN §4a B8) ──
+  const handleGenerateSitRep = useCallback(() => {
+    if (!activeStorm || !hotspots.length) {
+      setToastSuccess('Load a storm with damage data before generating a SitRep.');
+      return;
+    }
+    const html = buildSitRep({
+      storm: activeStorm as any,
+      totals: impactTotals,
+      severityCounts,
+      hotspots,
+      estimatedPop,
+      confidence,
+      criticalBreakdown,
+    });
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sitrep_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setToastSuccess('Situation Report downloaded');
+  }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, criticalBreakdown]);
+
   // Refs to avoid stale closures in loadCell callback
   const loadingCellsRef = useRef(loadingCells);
   loadingCellsRef.current = loadingCells;
@@ -2955,7 +3208,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);

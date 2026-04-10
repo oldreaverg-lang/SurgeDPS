@@ -210,3 +210,133 @@ export function perilHeadline(mix: PerilMix): string {
   if (mix.windPct  >= 70) return `Wind-dominant event (${mix.windPct}% wind / ${mix.waterPct}% water)`;
   return `Mixed peril event (${mix.windPct}% wind / ${mix.waterPct}% water)`;
 }
+
+// ───────────────────────────────────────────────────────────
+// §4b C3 — Deployment Planner ("X adjusters → Y days")
+// §4b C5 — Time-to-Clear helpers
+//
+// Given a ranked list of hotspot areas (each with a severity mix
+// that translates to a number of adjuster-days via recommendAdjusters),
+// allocate a finite team budget (teamSize × windowDays) across the
+// areas in priority order and report which areas are fully covered,
+// partially covered, or not reachable within the window.
+// ───────────────────────────────────────────────────────────
+
+export type PlannerArea = {
+  rank: number;
+  label?: string;               // optional display name ("#1", "Parish A", etc.)
+  severity: SeverityCounts;     // drives adjuster-day cost
+};
+
+export type AreaCoverage = {
+  rank: number;
+  label: string;
+  required_days: number;        // adjuster-days needed for this area
+  allocated_days: number;       // adjuster-days we assigned
+  coverage_pct: number;         // 0–100
+  status: 'covered' | 'partial' | 'uncovered';
+};
+
+export type DeploymentPlan = {
+  team_size: number;
+  window_days: number;
+  capacity_adjuster_days: number;  // team_size * window_days
+  required_adjuster_days: number;  // sum over all areas
+  utilization_pct: number;         // min(100, capacity_used / capacity * 100)
+  full_coverage: boolean;          // every area status === 'covered'
+  coverage_pct: number;            // areas covered / total areas (whole number)
+  areas: AreaCoverage[];
+  shortfall_days: number;          // max(0, required - capacity)
+};
+
+/**
+ * Allocate team capacity to areas in priority order.
+ * Pure function — safe to call on every slider tick.
+ */
+export function planDeployment(
+  areas: PlannerArea[],
+  teamSize: number,
+  windowDays: number,
+): DeploymentPlan {
+  const capacity = Math.max(0, teamSize) * Math.max(0, windowDays);
+  let remaining = capacity;
+  let requiredTotal = 0;
+  let fullyCoveredCount = 0;
+
+  const resolved: AreaCoverage[] = areas.map(a => {
+    const required = adjusterDaysNeeded(a.severity);
+    requiredTotal += required;
+    const allocated = Math.min(required, remaining);
+    remaining -= allocated;
+    const coverage_pct = required > 0 ? Math.round((allocated / required) * 100) : 100;
+    let status: AreaCoverage['status'];
+    if (required <= 0.001) status = 'covered';
+    else if (allocated >= required - 0.001) status = 'covered';
+    else if (allocated > 0) status = 'partial';
+    else status = 'uncovered';
+    if (status === 'covered') fullyCoveredCount += 1;
+    return {
+      rank: a.rank,
+      label: a.label ?? `#${a.rank}`,
+      required_days: required,
+      allocated_days: allocated,
+      coverage_pct,
+      status,
+    };
+  });
+
+  const utilization_pct = capacity > 0 ? Math.min(100, Math.round((Math.min(capacity, requiredTotal) / capacity) * 100)) : 0;
+  const full_coverage = resolved.length > 0 && resolved.every(a => a.status === 'covered');
+  const coverage_pct = resolved.length > 0 ? Math.round((fullyCoveredCount / resolved.length) * 100) : 0;
+  const shortfall_days = Math.max(0, requiredTotal - capacity);
+
+  return {
+    team_size: teamSize,
+    window_days: windowDays,
+    capacity_adjuster_days: capacity,
+    required_adjuster_days: requiredTotal,
+    utilization_pct,
+    full_coverage,
+    coverage_pct,
+    areas: resolved,
+    shortfall_days,
+  };
+}
+
+/**
+ * Back-solve: given a fixed window, how many adjusters do we need
+ * to fully cover every area in `areas`? Rounded up to a whole
+ * adjuster. Returns 0 if there is no work required.
+ */
+export function suggestTeamSize(areas: PlannerArea[], windowDays: number): number {
+  const d = Math.max(1, windowDays);
+  const total = areas.reduce((s, a) => s + adjusterDaysNeeded(a.severity), 0);
+  if (total <= 0) return 0;
+  return Math.max(1, Math.ceil(total / d));
+}
+
+/**
+ * Storm-wide time-to-clear in days for a given team size.
+ * Returns Infinity if teamSize <= 0.
+ */
+export function timeToClearDays(areas: PlannerArea[], teamSize: number): number {
+  if (teamSize <= 0) return Infinity;
+  const total = areas.reduce((s, a) => s + adjusterDaysNeeded(a.severity), 0);
+  if (total <= 0) return 0;
+  return total / teamSize;
+}
+
+/**
+ * Pretty-print a day count as "~3 days" / "~1 week" / "~2 weeks".
+ * Ops Mode never shows fractions of a day.
+ */
+export function formatTimeToClear(days: number): string {
+  if (!isFinite(days)) return '—';
+  if (days <= 0) return 'No work';
+  const d = Math.ceil(days);
+  if (d <= 1) return '~1 day';
+  if (d <= 10) return `~${d} days`;
+  const weeks = Math.round(d / 7);
+  if (weeks <= 1) return '~1 week';
+  return `~${weeks} weeks`;
+}
