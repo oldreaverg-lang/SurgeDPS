@@ -77,14 +77,6 @@ const floodLayerStyle = {
     'fill-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.35, 13, 0.3, 15, 0.15, 17, 0.08],
   },
 };
-const LEGEND_ITEMS = [
-  { color: '#ffffb2', label: '< 1 ft' },
-  { color: '#fecc5c', label: '1 – 3 ft' },
-  { color: '#fd8d3c', label: '3 – 6 ft' },
-  { color: '#f03b20', label: '6 – 10 ft' },
-  { color: '#bd0026', label: '> 10 ft' },
-];
-
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Building Type Lookup (Hazus codes → human-readable)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
