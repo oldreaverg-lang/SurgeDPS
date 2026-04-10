@@ -687,17 +687,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         </div>
       </div>
 
-      {/* Legend */}
-      <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Surge Depth</div>
-      <div className="space-y-1.5">
-        {LEGEND_ITEMS.map((item, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <span className="w-4 h-4 rounded shadow-inner border border-gray-200 shrink-0" style={{ backgroundColor: item.color, opacity: 0.35 }}></span>
-            <span className="text-xs font-medium text-gray-600">{item.label}</span>
-          </div>
-        ))}
-      </div>
-      <hr className="my-3 border-gray-200" />
+      {/* Legend — Building Damage only (surge depth available via color layer + per-building popups) */}
       <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1.5">Building Damage</div>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-[#4ade80] border border-gray-300"></span> No Damage</div>
@@ -836,10 +826,15 @@ function App() {
         if (attrs) {
           const ts = attrs.SRC_DATE ?? attrs.SRC_DATE2 ?? attrs.SAMP_DATE;
           if (ts) {
-            const d = new Date(parseInt(ts));
-            if (!isNaN(d.getTime())) {
-              setImageryDate(d.toLocaleDateString('en-US', { year: 'numeric', month: 'short' }));
-              return;
+            const epoch = parseInt(ts);
+            // Guard: ESRI returns 0 or negative for missing dates → shows "Dec 1969"
+            // Valid satellite imagery dates are after 2000 (epoch > 946684800000)
+            if (!isNaN(epoch) && epoch > 946684800000) {
+              const d = new Date(epoch);
+              if (!isNaN(d.getTime())) {
+                setImageryDate(d.toLocaleDateString('en-US', { year: 'numeric', month: 'short' }));
+                return;
+              }
             }
           }
         }
@@ -1304,7 +1299,7 @@ function App() {
   <tr><td>Foundation Height</td><td>${foundHt != null ? foundHt.toFixed(1) + ' ft above grade' : 'Not available'}</td></tr>
   <tr><td>Building ID</td><td>${p.building_id || 'N/A'} (${p.source || 'Unknown'} inventory)</td></tr>
   <tr><td>Data Reliability</td><td>${qualityLabel}${p.data_quality != null ? ` (${p.data_quality.toFixed(2)})` : ''}</td></tr>
-  <tr><td>Google Street View</td><td><a href="https://maps.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank">Open in Street View ↗</a></td></tr>
+  <tr><td>Google Maps</td><td><a href="https://www.google.com/maps/@${lat},${lon},19z/data=!3m1!1e1" target="_blank">Satellite View ↗</a> · <a href="https://maps.google.com/maps?q=&layer=c&cbll=${lat},${lon}" target="_blank">Street View ↗</a></td></tr>
 </table>
 
 <h2>Damage Assessment</h2>
@@ -2269,14 +2264,14 @@ ${fieldFlag ? `
                     return (
                     <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property Damage</h3>
                     <a
-                      href={`https://maps.google.com/maps?q=&layer=c&cbll=${popupInfo.lat},${popupInfo.lng}`}
+                      href={`https://www.google.com/maps/@${popupInfo.lat},${popupInfo.lng},19z/data=!3m1!1e1`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      title="Open in Google Street View"
+                      title="Open in Google Maps (satellite view — Street View may be unavailable on military bases)"
                       className="flex items-center gap-1 text-[11px] text-indigo-700 font-semibold mb-1.5 pb-1 border-b border-gray-100 hover:text-indigo-500 transition-colors group"
                     >
                       <span className="truncate">{hoverAddress ?? `${popupInfo.lat.toFixed(5)}, ${popupInfo.lng.toFixed(5)}`}</span>
-                      <span className="shrink-0 opacity-60 group-hover:opacity-100 transition-opacity" title="Street View">↗</span>
+                      <span className="shrink-0 opacity-60 group-hover:opacity-100 transition-opacity" title="Google Maps">↗</span>
                     </a>
                     <div className="text-xs space-y-1">
                       <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(p.building_type)}</span></p>
