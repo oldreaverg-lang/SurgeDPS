@@ -138,13 +138,23 @@ export function rollupByCounty(
     c.rollup.centerLat = (minY + maxY) / 2;
   }
 
+  // Drop counties whose bbox never finite-ized (invalid or missing geometry).
+  // Without this guard the bbox prefilter `lon < +Inf` is always true and the
+  // ray-cast fallback returns false → the county silently reports zero
+  // buildings even though the data passed through.
+  const validCounties = countyData.filter((c: any) => {
+    const ok = Number.isFinite(c.bbox[0]) && Number.isFinite(c.bbox[2]);
+    if (!ok) console.warn('[jurisdictions] dropping county with invalid geometry:', c.rollup.name);
+    return ok;
+  });
+
   for (const b of buildings.features) {
     const coords = b.geometry?.coordinates;
     if (!coords) continue;
     const [lon, lat] = coords;
     const p = b.properties || {};
 
-    for (const c of countyData) {
+    for (const c of validCounties) {
       const [minX, minY, maxX, maxY] = c.bbox;
       if (lon < minX || lon > maxX || lat < minY || lat > maxY) continue;
       if (!pointInGeometry(lon, lat, c.geom)) continue;
@@ -171,7 +181,7 @@ export function rollupByCounty(
 
   // Finalize: displaced persons for each county
   const rows: CountyRollup[] = [];
-  for (const c of countyData) {
+  for (const c of validCounties) {
     if (c.rollup.buildings === 0) continue;
     // Displaced = residential (~70% of footprint in most coastal counties)
     // major+severe × avg household. Conservative — EM can verify.
@@ -198,12 +208,13 @@ export function rollupToCentroidGeoJSON(rows: CountyRollup[]): any {
     else if (r.major > 0) worst = 'major';
     else if (r.moderate > 0) worst = 'moderate';
     else if (r.minor > 0) worst = 'minor';
+    const safeName = r.name || 'Unknown';
     return {
       type: 'Feature' as const,
       geometry: { type: 'Point' as const, coordinates: [r.centerLon, r.centerLat] },
       properties: {
         geoid: r.geoid,
-        name: r.name,
+        name: safeName,
         state: r.state,
         buildings: r.buildings,
         loss: r.loss,
@@ -214,7 +225,7 @@ export function rollupToCentroidGeoJSON(rows: CountyRollup[]): any {
         criticalFacilities: r.criticalFacilities,
         estDisplaced: r.estDisplaced,
         worstCategory: worst,
-        label: `${r.name}  ${r.buildings.toLocaleString()}`,
+        label: `${safeName}  ${r.buildings.toLocaleString()}`,
       },
     };
   });

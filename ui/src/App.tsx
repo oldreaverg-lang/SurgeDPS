@@ -1936,18 +1936,30 @@ function App() {
     setCountiesError(null);
     try {
       const mod = await import('./assets/counties-coastal.json');
-      const data: any = (mod as any).default ?? mod;
-      if (!data?.features?.length) throw new Error('Empty counties dataset');
+      const raw: any = (mod as any).default ?? mod;
+      if (!raw?.features?.length) throw new Error('Empty counties dataset');
+      // CLONE before mutating — dynamic imports are cached at the module
+      // level, so writing into raw.features would pollute the singleton
+      // for any other importer. Shallow-clone features + properties; the
+      // geometry arrays are passed by reference (safe, we never mutate them).
+      const data = {
+        type: 'FeatureCollection' as const,
+        features: raw.features.map((f: any) => ({
+          type: 'Feature' as const,
+          geometry: f.geometry,
+          properties: { ...(f.properties || {}) },
+        })),
+      };
       // Assign a stable categorical color index to every feature so the
-      // county-fill layer can render a distinct-color choropleth (four-color-
-      // map style). Uses a simple hash of GEOID mod 8 — not a true greedy
-      // graph-coloring, so occasional same-color neighbors are possible, but
-      // with 8 cool pastels the jurisdictions read at a glance.
+      // county-fill layer can render a distinct-color choropleth. Uses a
+      // djb-style hash of GEOID forced to unsigned 32-bit (>>> 0) so the
+      // Math.abs edge case on INT32_MIN can't collapse to 0. With 8 cool
+      // pastels the jurisdictions read at a glance.
       for (const f of data.features) {
         const g: string = f.properties?.GEOID || f.properties?.NAME || '';
         let h = 0;
         for (let i = 0; i < g.length; i++) h = (h * 31 + g.charCodeAt(i)) | 0;
-        f.properties.colorIdx = Math.abs(h) % 8;
+        f.properties.colorIdx = (h >>> 0) % 8;
       }
       setCountiesGeoJSON(data);
       countiesLoadedRef.current = true;
@@ -2101,19 +2113,21 @@ function App() {
   useEffect(() => { if (cellError) { const t = setTimeout(() => { setCellError(null); setRetryStormId(null); }, 8000); return () => clearTimeout(t); } }, [cellError]);
   useEffect(() => { if (toastSuccess) { const t = setTimeout(() => setToastSuccess(null), 3000); return () => clearTimeout(t); } }, [toastSuccess]);
 
-  // Load counties on first enable OR as soon as buildings are loaded (needed
-  // for the low-zoom county-aggregate bubble layer, which is on regardless of
-  // the overlay toggle). The GeoJSON is bundled so there's no network
-  // dependency — a successful load sticks until the tab reloads.
+  // Load counties on first enable OR as soon as the first cell loads (needed
+  // for the low-zoom county-aggregate bubble layer, which runs regardless of
+  // the overlay toggle). Only depends on a *flag* for "buildings exist" so
+  // the effect doesn't re-run on every cell load — the ref short-circuits
+  // re-imports, but the work is still wasteful.
+  const hasBuildings = !!allBuildings?.features?.length;
   useEffect(() => {
-    if (showCounties || allBuildings?.features?.length) {
+    if (showCounties || hasBuildings) {
       loadCounties();
     }
     if (!showCounties) {
       setCountiesError(null);
       setCountiesLoading(false);
     }
-  }, [showCounties, allBuildings, loadCounties]);
+  }, [showCounties, hasBuildings, loadCounties]);
 
   // Fetch FEMA flood zones when showFloodZones is enabled; clear when disabled.
   useEffect(() => {
@@ -3332,7 +3346,7 @@ ${fieldFlag ? `
   const onHover = useCallback((event: any) => {
     const { features, lngLat: { lng, lat } } = event;
     if (!features || !features.length) { setHoverInfo(null); return; }
-    for (const [layerId, type] of [['grid-available-fill', 'grid'], ['grid-ready-fill', 'grid'], ['damage-clusters', 'cluster'], ['damage-points', 'damage'], ['flood-depth-layer', 'flood']] as const) {
+    for (const [layerId, type] of [['grid-available-fill', 'grid'], ['grid-ready-fill', 'grid'], ['damage-clusters', 'cluster'], ['damage-points', 'damage'], ['flood-depth-layer', 'flood'], ['county-aggregate-circle', 'county']] as const) {
       const f = features.find((f: any) => f.layer.id === layerId);
       if (f) { setHoverInfo({ lng, lat, type, feature: f }); return; }
     }
@@ -3342,6 +3356,17 @@ ${fieldFlag ? `
   const onClick = useCallback((event: any) => {
     // Close any open menus when map is clicked
     setMoreMenuOpen(false);
+    // County aggregate bubble click → fly in to zoom 9 (above the minzoom
+    // threshold for individual-building bubbles) so the user can drill down.
+    const countyBubble = event.features?.find((f: any) => f.layer.id === 'county-aggregate-circle');
+    if (countyBubble && mapRef.current) {
+      mapRef.current.flyTo({
+        center: [event.lngLat.lng, event.lngLat.lat],
+        zoom: 9,
+        duration: 900,
+      });
+      return;
+    }
     // Cluster click → zoom in
     const cluster = event.features?.find((f: any) => f.layer.id === 'damage-clusters');
     if (cluster && mapRef.current) {
@@ -3403,8 +3428,8 @@ ${fieldFlag ? `
           ref={mapRef}
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
           mapStyle={BASEMAPS[basemap]}
-          interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
-          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' ? 'pointer' : ''}
+          interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', 'county-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
+          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' || hoverInfo?.type === 'county' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
           onMoveEnd={e => {
             setZoom(e.viewState.zoom);

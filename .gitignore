@@ -3,9 +3,22 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
-.env
 .venv/
 venv/
+
+# Secrets — cover every .env variant anywhere in the tree (root, ui/, src/,
+# scripts/, whatever). .env.example is the only exception so templates can
+# still be committed. Also block stray private keys / credential files.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+secrets/
+credentials.json
 
 # Node
 ui/node_modules/

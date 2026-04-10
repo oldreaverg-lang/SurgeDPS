@@ -1,0 +1,66 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# .dockerignore — shrink build context AND block secrets from
+# landing in the image. Railway builds from git so git hygiene
+# is the primary defense, but any local `docker build` uses the
+# working directory verbatim — this file is the second line.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Secrets — match the .gitignore policy
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+.aws/
+.ssh/
+
+# VCS / CI
+.git
+.gitignore
+.github/
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node (frontend deps are installed inside the frontend build stage)
+ui/node_modules/
+ui/dist/
+node_modules/
+
+# Generated / cache / tmp
+tmp_integration/
+dist/
+build/
+*.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Test + docs (not needed in runtime image)
+tests/
+test/
+*.md
+docs/
+
+# Office temp / backup artifacts
+.~lock.*
+*.xlsx
+*.docx
