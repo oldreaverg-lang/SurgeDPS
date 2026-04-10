@@ -331,14 +331,48 @@ Rationale: CAT managers routinely **mistrust** precise numbers from models ("if 
 
 ---
 
-## 11. Open questions for Ryan
+## 11. Open questions for Ryan — **resolved**
 
-1. Do we ship the Ops/Analyst toggle in the header, or as a setting in the ☰ menu? I'd argue header — discoverability.
-2. Are the adjuster-per-severity ratios in §C1 reasonable, or should we pull numbers from an actual CAT manager contact first?
-3. Is the EM persona a real target or aspirational for a future pitch deck? That decides whether Phase 4 is v1 or v2.
-4. Rainfall overlay (B7) — are we comfortable depending on MRMS / StormDPS backend integration, or should SurgeDPS stand alone?
-5. Should the "CAT Report" PDF be a hard PDF (via the `pdf` skill) or an HTML print-friendly like the current Claims Doc? (I recommend HTML for v1 — faster, matches existing pattern.)
+1. **Ops/Analyst toggle placement.** _Resolved: keep it inline in the DashboardPanel_ (the right-overlay "tablist under the storm header" location it ships in today). Discoverability trade-off accepted — the toggle sits right next to the data it controls, and Analyst Mode stays the quiet default so first-time visitors aren't surprised by ops jargon.
+
+2. **Adjuster-per-severity throughput ratios.** _Parked pending a real CAT manager gut check._ Ryan met someone doing this work at St. Joseph Peninsula State Park and will reach out with a one-page questionnaire (`We met at THSTONEPENINSULASTATEPARK.txt` in the repo root). Shipped ratios are deliberately halved from the rule-of-thumb starting point (severe 7, major 12, moderate 20, minor 30 per adjuster-day) to bias toward over-deployment rather than under. Revisit after feedback. Future enhancement: make the ratios editable in the Deployment Planner so individual shops can tune to their own throughput.
+
+3. **EM persona status.** _Aspirational for v1._ Ryan holds a degree in emergency management / public safety telecommunications but lacks in-field experience, so Phase 4 is built on informed guesses rather than interviews. Feature set ships behind the Ops Mode sub-persona toggle; formal validation pending a May meeting with the nearby CDP office and FEMA contacts.
+
+4. **Rainfall overlay dependency.** _Accepted — SurgeDPS depends on StormDPS._ Rainfall forecasts belong in StormDPS (pre-landfall). SurgeDPS consumes them post-landfall as a data layer only. If MRMS/StormDPS integration turns out to be inadequate, we expand scope; otherwise SurgeDPS stays narrowly post-storm. Scaffolding for the rainfall overlay ships behind the Phase 5 beta-layers flag (see `PHASE5_DATA_CONTRACTS.md`).
+
+5. **CAT Report format: PDF or HTML?** _Resolved: user picks at download time._ Each report button is now a split control — the main button downloads `.html`, the adjacent `PDF` button opens the same report in a new tab and triggers the browser print dialog so the user can "Save as PDF". No new dependencies; the `@media print` styles already in `catReports.ts` render cleanly at print quality.
 
 ---
 
-**Next step on your go:** Start with Phase 1 (mode toggle + false-precision cleanup + confidence pips) since it's low-risk and immediately visible, then move to B1/B2 for the CAT Deployment Summary panel as the first big feature.
+## Architectural notes carried forward from §§9–11 follow-ups
+
+- **Modes are per-device, not per-user.** localStorage keys
+  (`surgedps.mode`, `surgedps.subpersona`, `surgedps.betaDataLayers`)
+  are designed to swap for a backend user-preferences endpoint in one
+  pass once enterprise auth becomes a real pitch surface.
+
+- **No mobile optimization backlog.** SurgeDPS's audience is CAT teams
+  and emergency managers on laptops + hotspots in operations centers.
+  The stranded resident who might have wanted a mobile-first UI has no
+  internet during the event and needed StormDPS three days earlier.
+  Responsive audit is deliberately **removed** from the backlog.
+
+- **StormDPS ↔ SurgeDPS data flow is one-way live, two-way retrospective.**
+  StormDPS → DPS score → public / ops teams is the live path. SurgeDPS
+  → StormDPS is a slow self-healing loop: post-storm observations feed
+  a retrospective reconciliation export (future: nightly CSV with
+  `forecast_dps_score`, `observed_surge_max`, `observed_loss_modeled`,
+  `forecast_error`) so StormDPS's model improves over time. Park until
+  SurgeDPS has been run against its first live storm.
+
+- **Disclaimer prominence (§9).** "MODELED ESTIMATE — NOT FIELD
+  VERIFIED" is a red-bordered banner on page 1 of every exported CAT
+  Report and SitRep, not just in the footer. Print styles force the
+  color to render in PDF output. The reports also carry a friendly
+  "About this report" blurb framing SurgeDPS as a starting point for
+  students exploring disaster response as a career path.
+
+---
+
+**Plan status:** Phases 1–5 + §9/§11 follow-ups all shipped on `main`. Open backlog items are all deliberate parks pending real-world validation (CAT manager feedback, May EM interviews, StormDPS integration).

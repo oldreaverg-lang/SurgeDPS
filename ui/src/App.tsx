@@ -541,8 +541,8 @@ function CatDeploymentSummary({
   mode: DisplayMode;
   subPersona: SubPersona;
   teamSize: number;
-  onGenerateCatReport: () => void;
-  onGenerateSitRep: () => void;
+  onGenerateCatReport: (format: 'html' | 'pdf') => void;
+  onGenerateSitRep: (format: 'html' | 'pdf') => void;
 }) {
   if (mode !== 'ops') return null;
   if (totals.buildings <= 0) return null;
@@ -686,33 +686,67 @@ function CatDeploymentSummary({
         );
       })()}
 
-      {/* Action buttons — primary export reflects the active persona */}
+      {/* Action buttons — primary export reflects the active persona.
+          Each button is split: main action = HTML download, adjacent
+          compact button = Save as PDF (opens print dialog). §11 Q5. */}
       <div className="flex gap-1.5">
         {isEM ? (
           <>
-            <button
-              onClick={onGenerateSitRep}
-              title="Download Situation Report (HTML)"
-              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-500 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
-            >Generate SitRep ↓</button>
-            <button
-              onClick={onGenerateCatReport}
-              title="Download CAT Deployment Report (HTML)"
-              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-300 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
-            >CAT Report ↓</button>
+            <div className="flex-1 flex">
+              <button
+                onClick={() => onGenerateSitRep('html')}
+                title="Download Situation Report (HTML)"
+                className="flex-1 text-[10px] font-bold px-2 py-1 rounded-l-md border border-emerald-500 text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
+              >SitRep ↓</button>
+              <button
+                onClick={() => onGenerateSitRep('pdf')}
+                title="Save Situation Report as PDF (opens print dialog)"
+                aria-label="Save SitRep as PDF"
+                className="text-[9px] font-bold px-1.5 py-1 rounded-r-md border-t border-r border-b border-emerald-500 text-emerald-700 bg-white hover:bg-emerald-50 transition-colors"
+              >PDF</button>
+            </div>
+            <div className="flex-1 flex">
+              <button
+                onClick={() => onGenerateCatReport('html')}
+                title="Download CAT Deployment Report (HTML)"
+                className="flex-1 text-[10px] font-bold px-2 py-1 rounded-l-md border border-orange-300 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
+              >CAT ↓</button>
+              <button
+                onClick={() => onGenerateCatReport('pdf')}
+                title="Save CAT Report as PDF (opens print dialog)"
+                aria-label="Save CAT Report as PDF"
+                className="text-[9px] font-bold px-1.5 py-1 rounded-r-md border-t border-r border-b border-orange-300 text-orange-700 bg-white hover:bg-orange-50 transition-colors"
+              >PDF</button>
+            </div>
           </>
         ) : (
           <>
-            <button
-              onClick={onGenerateCatReport}
-              title="Download CAT Deployment Report (HTML)"
-              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-orange-500 text-white bg-orange-600 hover:bg-orange-700 transition-colors"
-            >Generate CAT Report ↓</button>
-            <button
-              onClick={onGenerateSitRep}
-              title="Download Situation Report (HTML)"
-              className="flex-1 text-[10px] font-bold px-2 py-1 rounded-md border border-emerald-300 text-emerald-700 bg-white hover:bg-emerald-50 transition-colors"
-            >SitRep ↓</button>
+            <div className="flex-1 flex">
+              <button
+                onClick={() => onGenerateCatReport('html')}
+                title="Download CAT Deployment Report (HTML)"
+                className="flex-1 text-[10px] font-bold px-2 py-1 rounded-l-md border border-orange-500 text-white bg-orange-600 hover:bg-orange-700 transition-colors"
+              >CAT Report ↓</button>
+              <button
+                onClick={() => onGenerateCatReport('pdf')}
+                title="Save CAT Report as PDF (opens print dialog)"
+                aria-label="Save CAT Report as PDF"
+                className="text-[9px] font-bold px-1.5 py-1 rounded-r-md border-t border-r border-b border-orange-500 text-white bg-orange-600 hover:bg-orange-700 transition-colors"
+              >PDF</button>
+            </div>
+            <div className="flex-1 flex">
+              <button
+                onClick={() => onGenerateSitRep('html')}
+                title="Download Situation Report (HTML)"
+                className="flex-1 text-[10px] font-bold px-2 py-1 rounded-l-md border border-emerald-300 text-emerald-700 bg-white hover:bg-emerald-50 transition-colors"
+              >SitRep ↓</button>
+              <button
+                onClick={() => onGenerateSitRep('pdf')}
+                title="Save SitRep as PDF (opens print dialog)"
+                aria-label="Save SitRep as PDF"
+                className="text-[9px] font-bold px-1.5 py-1 rounded-r-md border-t border-r border-b border-emerald-300 text-emerald-700 bg-white hover:bg-emerald-50 transition-colors"
+              >PDF</button>
+            </div>
           </>
         )}
       </div>
@@ -1213,8 +1247,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   onModeChange: (m: DisplayMode) => void;
   subPersona: SubPersona;
   onSubPersonaChange: (p: SubPersona) => void;
-  onGenerateCatReport: () => void;
-  onGenerateSitRep: () => void;
+  onGenerateCatReport: (format: 'html' | 'pdf') => void;
+  onGenerateSitRep: (format: 'html' | 'pdf') => void;
   teamSize: number;
   windowDays: number;
   onTeamSizeChange: (n: number) => void;
@@ -2889,8 +2923,43 @@ ${fieldFlag ? `
     mapRef.current?.flyTo({ center: [lon, lat], zoom: 16, duration: 2000 });
   }, []);
 
-  // ── CAT Deployment Report export (CAT_TEAM_PLAN §4b C4) ──
-  const handleGenerateCatReport = useCallback(() => {
+  // ── Shared helper: deliver a report HTML string as either a
+  //    downloadable .html file or an auto-print window the user can
+  //    "Save as PDF" from. (CAT_TEAM_PLAN §11 Q5 — user-selectable
+  //    format.) We don't bundle a client-side HTML→PDF library
+  //    because the browser's built-in print-to-PDF already works
+  //    with the @media print styles in catReports.ts.
+  const deliverReport = useCallback((html: string, baseName: string, format: 'html' | 'pdf') => {
+    if (format === 'html') {
+      const blob = new Blob([html], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${baseName}.html`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    // PDF path: open the report in a new tab and trigger the
+    // browser print dialog. The user picks "Save as PDF" as the
+    // destination. Works offline, no extra dependencies.
+    const w = window.open('', '_blank');
+    if (!w) {
+      setToastSuccess('Pop-ups blocked — allow pop-ups for this site to export as PDF.');
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    // Delay the print() call until the new window has laid the
+    // content out. Too-early calls print a blank page in Safari.
+    const fireprint = () => { try { w.focus(); w.print(); } catch { /* ignore */ } };
+    if (w.document.readyState === 'complete') setTimeout(fireprint, 350);
+    else w.addEventListener('load', () => setTimeout(fireprint, 200));
+  }, []);
+
+  // ── CAT Deployment Report export (CAT_TEAM_PLAN §4b C4, §11 Q5) ──
+  const handleGenerateCatReport = useCallback((format: 'html' | 'pdf' = 'html') => {
     if (!activeStorm || !hotspots.length) {
       setToastSuccess('Load a storm with damage data before generating a CAT Report.');
       return;
@@ -2905,18 +2974,13 @@ ${fieldFlag ? `
       teamSize,
       windowDays,
     });
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `cat_report_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}.html`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setToastSuccess('CAT Deployment Report downloaded');
-  }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, teamSize, windowDays]);
+    const baseName = `cat_report_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}`;
+    deliverReport(html, baseName, format);
+    setToastSuccess(format === 'pdf' ? 'CAT Report opened — save as PDF from the print dialog' : 'CAT Deployment Report downloaded');
+  }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, teamSize, windowDays, deliverReport]);
 
-  // ── Situation Report export (CAT_TEAM_PLAN §4a B8) ──
-  const handleGenerateSitRep = useCallback(() => {
+  // ── Situation Report export (CAT_TEAM_PLAN §4a B8, §11 Q5) ──
+  const handleGenerateSitRep = useCallback((format: 'html' | 'pdf' = 'html') => {
     if (!activeStorm || !hotspots.length) {
       setToastSuccess('Load a storm with damage data before generating a SitRep.');
       return;
@@ -2930,15 +2994,10 @@ ${fieldFlag ? `
       confidence,
       criticalBreakdown,
     });
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `sitrep_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}.html`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setToastSuccess('Situation Report downloaded');
-  }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, criticalBreakdown]);
+    const baseName = `sitrep_${activeStorm.storm_id}_${new Date().toISOString().slice(0,10)}`;
+    deliverReport(html, baseName, format);
+    setToastSuccess(format === 'pdf' ? 'SitRep opened — save as PDF from the print dialog' : 'Situation Report downloaded');
+  }, [activeStorm, hotspots, impactTotals, severityCounts, estimatedPop, confidence, criticalBreakdown, deliverReport]);
 
   // Refs to avoid stale closures in loadCell callback
   const loadingCellsRef = useRef(loadingCells);

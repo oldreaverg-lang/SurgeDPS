@@ -1,0 +1,76 @@
+Hey —
+
+We met at St. Joseph Peninsula State Park on my last camping trip. You
+mentioned you do CAT work after hurricanes. I've been building a free,
+public-data storm surge tool called SurgeDPS (the post-landfall sibling
+to StormDPS, which forecasts storm destructive potential before
+landfall). Short version: SurgeDPS takes a storm, runs SLOSH
+maximum-of-maximums surge over public building footprints, and gives
+CAT leads and emergency managers a first-pass read on damage hotspots,
+peril mix, and deployment sizing — all from free .gov APIs, no
+proprietary data.
+
+The piece I'd love your gut check on is the adjuster-per-day
+throughput table. I picked conservative numbers deliberately (rule: an
+honest underestimate that sends a 15-person team is better than an
+optimistic estimate that sends 10 and falls behind by day 3), but
+they're rule-of-thumb only until a real CAT manager tells me they're
+plausible.
+
+Here are the current numbers SurgeDPS uses to size a deployment. They
+represent how many inspections one adjuster can complete per 8-hour
+day for each severity tier, and they drive the "X adjusters × Y days"
+recommendation and the time-to-clear estimate.
+
+    Severity   Per-adjuster-day   Raw rule-of-thumb I started from
+    --------   ----------------   ---------------------------------
+    Severe              7                       15
+    Major              12                       25
+    Moderate           20                       40
+    Minor              30                       60
+
+"Severe" means the building is likely uninhabitable — collapse, major
+structural damage, or 6+ ft of surge through the first floor. "Major"
+is significant structural damage but the shell is intact. "Moderate"
+is mostly contents, drywall, flooring, mechanicals. "Minor" is nuisance
+flooding, cosmetic, roof tab loss.
+
+The numbers in the first column are what SurgeDPS ships with today
+(deliberately halved from the rule-of-thumb column so it biases toward
+sending more hands, not fewer). For context, the tool combines them
+with the severity mix in the worst-hit areas to produce a line that
+reads like "Deploy 24 adjusters × 5 days, 83% coverage" and flags a
+shortfall if the window isn't long enough.
+
+The questions I'd love your read on:
+
+  1. Are the halved numbers (7 / 12 / 20 / 30) in the right neighborhood
+     for a real CAT deployment, or way off in either direction?
+
+  2. Do CAT managers you've worked with actually think in terms of
+     "inspections per day" like this, or is the mental model different?
+     (Claims per week? Claims per adjuster for the whole event?)
+
+  3. Is there an intermediate tier I'm missing — e.g., "total loss
+     walk-away" that shouldn't count against inspection throughput at
+     all because it's a visual confirmation, not a full inspection?
+
+  4. After a bad CAT, when teams are running long days or sharing
+     workload with IA and staff adjusters, do these numbers move much?
+
+  5. Anything else a tool like this should be surfacing that a CAT
+     lead would actually want to see on day 1?
+
+No rush, no pressure — if it's easier to just say "numbers look low"
+or "numbers look high" and move on, that's hugely useful too. I'm
+trying to avoid the trap of shipping made-up numbers with false
+precision, and a 30-second gut check from someone who's actually done
+the work is worth more than a week of Googling.
+
+Happy to show you what the output looks like if you're curious — the
+tool is free and public-facing. If you'd rather we keep this offline,
+that's fine too.
+
+Thanks for any time you can spare.
+
+— Ryan
