@@ -3403,7 +3403,7 @@ ${fieldFlag ? `
   const onHover = useCallback((event: any) => {
     const { features, lngLat: { lng, lat } } = event;
     if (!features || !features.length) { setHoverInfo(null); return; }
-    for (const [layerId, type] of [['grid-available-fill', 'grid'], ['grid-ready-fill', 'grid'], ['damage-clusters', 'cluster'], ['damage-points', 'damage'], ['population-points', 'population'], ['flood-depth-layer', 'flood'], ['city-aggregate-circle', 'city'], ['county-aggregate-circle', 'county']] as const) {
+    for (const [layerId, type] of [['grid-available-fill', 'grid'], ['grid-ready-fill', 'grid'], ['damage-clusters', 'cluster'], ['damage-points', 'damage'], ['population-points', 'population'], ['city-aggregate-circle', 'city'], ['county-aggregate-circle', 'county']] as const) {
       const f = features.find((f: any) => f.layer.id === layerId);
       if (f) { setHoverInfo({ lng, lat, type, feature: f }); return; }
     }
@@ -3501,7 +3501,7 @@ ${fieldFlag ? `
           ref={mapRef}
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
           mapStyle={BASEMAPS[basemap]}
-          interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', 'population-points', 'county-aggregate-circle', 'city-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
+          interactiveLayerIds={['damage-points', 'damage-clusters', 'population-points', 'county-aggregate-circle', 'city-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
           cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' || hoverInfo?.type === 'population' || hoverInfo?.type === 'county' || hoverInfo?.type === 'city' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
           onMoveEnd={e => {

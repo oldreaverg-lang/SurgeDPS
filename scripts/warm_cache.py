@@ -224,9 +224,23 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
             buildings_data = json.load(f)
 
         # 4. HAZUS damage model
+        # CRITICAL: must pass the SAME storm parameters the live API passes
+        # (api_server.py /load_cell). Without them the damage model short-
+        # circuits to surge-only — no parametric wind field, no parametric
+        # rainfall — and pre-cached cells end up systematically different
+        # from live-computed cells. Visible as a hard rectangular boundary
+        # where pre-cached cells meet live-loaded cells.
         damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
         if buildings_data.get('features'):
-            estimate_damage_from_raster(raster_path, buildings_path, damage_path)
+            estimate_damage_from_raster(
+                raster_path, buildings_path, damage_path,
+                storm_id=storm.storm_id,
+                landfall_lat=storm.landfall_lat,
+                landfall_lon=storm.landfall_lon,
+                max_wind_kt=storm.max_wind_kt,
+                storm_speed_kt=storm.speed_kt,
+                storm_heading_deg=storm.heading_deg,
+            )
             # Stamp the surge model version so stale-cache detection works
             try:
                 with open(damage_path) as f:

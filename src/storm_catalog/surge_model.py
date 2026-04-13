@@ -35,7 +35,10 @@ import numpy as np
 
 # Increment whenever the surge formula changes so warm_cache.py can detect
 # and regenerate stale cells automatically.
-SURGE_MODEL_VERSION = "cubic-v4-coastal"
+# v5: warm_cache now passes storm params (wind + parametric rainfall),
+#     matching the live /load_cell pipeline — fixes rectangular discontinuity
+#     at the boundary between pre-cached and live-loaded cells.
+SURGE_MODEL_VERSION = "cubic-v5-wind-rain"
 
 
 def estimate_peak_surge_ft(
