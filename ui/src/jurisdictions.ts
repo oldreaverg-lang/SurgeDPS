@@ -145,7 +145,13 @@ export interface CountyRollup {
 }
 
 const CRITICAL_OCCTYPES = new Set(['GOV1','GOV2','EDU1','EDU2','MED1','MED2','COM8','COM9','COM10']);
-const AVG_HOUSEHOLD = 2.5;
+// Census 2020 ACS 5-year US avg persons/household.
+const AVG_HOUSEHOLD = 2.53;
+// Share of residentially-damaged households that actually vacate. Empirical:
+// FEMA TSA check-ins / (major+severe residential) from Harvey + Ian runs out
+// to roughly 0.5–0.7. We use 0.7 as an upper-bound planning figure, applied
+// consistently to both the county and city rollups so their totals reconcile.
+const DISPLACEMENT_HAIRCUT = 0.7;
 
 /**
  * Given a FeatureCollection of building points and a FeatureCollection of
@@ -234,7 +240,7 @@ export function rollupByCounty(
     if (c.rollup.buildings === 0) continue;
     // Displaced = residential (~70% of footprint in most coastal counties)
     // major+severe × avg household. Conservative — EM can verify.
-    c.rollup.estDisplaced = Math.round((c.rollup.severe + c.rollup.major) * 0.7 * AVG_HOUSEHOLD);
+    c.rollup.estDisplaced = Math.round((c.rollup.severe + c.rollup.major) * DISPLACEMENT_HAIRCUT * AVG_HOUSEHOLD);
     rows.push(c.rollup);
   }
 
@@ -324,6 +330,7 @@ export function rollupByCity(
     sumLon: number;
     sumLat: number;
     count: number;
+    resMajorSevere: number;
   }> = {};
 
   for (const b of buildings.features) {
@@ -383,6 +390,7 @@ export function rollupByCity(
           pop: bestCity?.pop ?? 0,
         },
         sumLon: 0, sumLat: 0, count: 0,
+        resMajorSevere: 0,
       };
     }
 
@@ -402,7 +410,7 @@ export function rollupByCity(
     if (CRITICAL_OCCTYPES.has(occ)) rollup.criticalFacilities += 1;
 
     const isRes = (p.building_type || '').startsWith('RES');
-    if (isRes && (cat === 'major' || cat === 'severe')) rollup.estDisplaced += Math.round(AVG_HOUSEHOLD);
+    if (isRes && (cat === 'major' || cat === 'severe')) buckets[key].resMajorSevere += 1;
 
     // For unincorporated buckets, drift centroid toward actual building cluster
     if (!bestCity) {
@@ -412,14 +420,16 @@ export function rollupByCity(
     }
   }
 
-  // Finalize unincorporated centroids
+  // Finalize unincorporated centroids + displacement
   const rows: CityRollup[] = [];
-  for (const { rollup, sumLon, sumLat, count } of Object.values(buckets)) {
+  for (const { rollup, sumLon, sumLat, count, resMajorSevere } of Object.values(buckets)) {
     if (rollup.buildings === 0) continue;
     if (rollup.name === 'Unincorporated' && count > 0) {
       rollup.centerLon = sumLon / count;
       rollup.centerLat = sumLat / count;
     }
+    // Same formula as rollupByCounty: residential major+severe × haircut × hh.
+    rollup.estDisplaced = Math.round(resMajorSevere * DISPLACEMENT_HAIRCUT * AVG_HOUSEHOLD);
     rows.push(rollup);
   }
 
