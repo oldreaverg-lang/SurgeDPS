@@ -4032,7 +4032,7 @@ ${fieldFlag ? `
                       {isPop ? (
                         <>
                           <p className="flex justify-between"><span className="text-gray-500">Est. displaced:</span> <span className="font-bold text-indigo-600">{(p.estDisplaced ?? 0).toLocaleString()}</span></p>
-                          {p.pop > 0 && <p className="flex justify-between"><span className="text-gray-500">City population:</span> <span className="font-medium">{p.pop.toLocaleString()}</span></p>}
+                          {p.pop > 0 && <p className="flex justify-between"><span className="text-gray-500">City population<span className="text-gray-400"> · 2020 Census</span>:</span> <span className="font-medium">{p.pop.toLocaleString()}</span></p>}
                           {pct != null && <p className="flex justify-between"><span className="text-gray-500">Displacement rate:</span> <span className={`font-bold ${pct >= 25 ? 'text-red-600' : pct >= 5 ? 'text-orange-600' : 'text-gray-700'}`}>{pct}%</span></p>}
                           <p className="flex justify-between"><span className="text-gray-500">Buildings exposed:</span> <span className="font-medium">{(p.buildings ?? 0).toLocaleString()}</span></p>
                         </>
@@ -4041,7 +4041,7 @@ ${fieldFlag ? `
                           <p className="flex justify-between"><span className="text-gray-500">Buildings:</span> <span className="font-medium">{(p.buildings ?? 0).toLocaleString()}</span></p>
                           <p className="flex justify-between"><span className="text-gray-500">Est. loss:</span> <span className="font-bold text-red-600">${((p.loss ?? 0) / 1e6).toFixed(1)}M</span></p>
                           {p.criticalFacilities > 0 && <p className="flex justify-between"><span className="text-gray-500">Critical:</span> <span className="font-medium">{p.criticalFacilities}</span></p>}
-                          {p.pop > 0 && <p className="flex justify-between"><span className="text-gray-500">Population:</span> <span className="font-medium">{p.pop.toLocaleString()}</span></p>}
+                          {p.pop > 0 && <p className="flex justify-between"><span className="text-gray-500">Population<span className="text-gray-400"> · 2020 Census</span>:</span> <span className="font-medium">{p.pop.toLocaleString()}</span></p>}
                         </>
                       )}
                       <p className="text-gray-400 text-[10px] mt-0.5">Click to zoom in</p>
@@ -4280,6 +4280,12 @@ ${fieldFlag ? `
                         >📄 Generate Claims Report</button>
                         </>
                       )}
+                      <p
+                        className="text-[9px] text-gray-400 mt-1 pt-1 border-t border-gray-100 text-center"
+                        title="Per-building valuations from USACE National Structure Inventory v2 (released Oct 2023). Depth-damage and wind fragility curves from FEMA HAZUS 5.1 (2020). Replacement values are not inflation-adjusted and may underestimate current rebuild costs."
+                      >
+                        NSI v2 (2023) · HAZUS 5.1 (2020)
+                      </p>
                     </div></>
                     );
                   })()
