@@ -31,7 +31,7 @@ from storm_catalog.surge_model import generate_surge_raster, SURGE_MODEL_VERSION
 from tile_gen.pmtiles_builder import raster_to_geojson
 from data_ingest.building_fetcher import fetch_buildings
 from damage_model.depth_damage import estimate_damage_from_raster
-from damage_model.peril_timeseries import estimate_damage_timeseries_from_raster
+# peril_timeseries import deferred along with the lazy-ticks endpoint.
 
 from persistent_paths import CELLS_DIR, PERSISTENT_DATA_DIR as PERSISTENT_DIR
 CACHE_DIR = str(CELLS_DIR)  # backward compat — some functions use os.path.join
@@ -232,17 +232,13 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
         # from live-computed cells. Visible as a hard rectangular boundary
         # where pre-cached cells meet live-loaded cells.
         damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
-        ticks_path  = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
         if buildings_data.get('features'):
-            # Time-series peril pipeline: runs HAZUS per tick (6 h steps to
-            # 72 h by default) for surge/rainfall/cumulative and emits both
-            # cell_..._ticks.json (peril slider bundle) and the final-tick
-            # damage.geojson for backwards compatibility.
-            estimate_damage_timeseries_from_raster(
+            # Final-tick HAZUS only. Per-tick bundle is lazy — generated on
+            # first /cell_ticks request from the frontend slider.
+            estimate_damage_from_raster(
                 depth_raster_path=raster_path,
                 buildings_geojson_path=buildings_path,
-                ticks_output_path=ticks_path,
-                final_geojson_path=damage_path,
+                output_path=damage_path,
                 storm_id=storm.storm_id,
                 landfall_lat=storm.landfall_lat,
                 landfall_lon=storm.landfall_lon,

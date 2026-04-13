@@ -38,11 +38,12 @@ import numpy as np
 # v5: warm_cache now passes storm params (wind + parametric rainfall),
 #     matching the live /load_cell pipeline — fixes rectangular discontinuity
 #     at the boundary between pre-cached and live-loaded cells.
-# v6-peril-ts: switched cell generation to the time-series peril pipeline.
-#     Pre-cached cells must now carry cell_..._ticks.json alongside the
-#     final-tick damage.geojson, so all v5 cells get regenerated on next
-#     load_cell call.
-SURGE_MODEL_VERSION = "cubic-v6-peril-ts"
+# v6-peril-ts: (reverted) moved cell generation to time-series peril pipeline;
+#     activate path blew past the frontend's 5-min timeout on cold Harvey.
+# v7-legacy-hotpath: reverted activate to legacy estimate_damage_from_raster.
+#     Per-tick bundle generation deferred to a lazy endpoint + background
+#     job. Bumping version to force any half-baked v6 cells to regenerate.
+SURGE_MODEL_VERSION = "cubic-v7-legacy-hotpath"
 
 
 def estimate_peak_surge_ft(
