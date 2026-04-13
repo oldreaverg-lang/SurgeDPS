@@ -33,7 +33,7 @@ import type {
   VendorCoverageLayer,
   TimeToAccessLayer,
 } from './betaLayers';
-import { rollupByCounty, rollupToCentroidGeoJSON, rollupByCity, cityRollupToCentroidGeoJSON } from './jurisdictions';
+import { rollupByCounty, rollupToCentroidGeoJSON, rollupByCity, cityRollupToCentroidGeoJSON, AVG_HOUSEHOLD, DISPLACEMENT_HAIRCUT } from './jurisdictions';
 import type { CountyRollup, CityEntry } from './jurisdictions';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1389,7 +1389,7 @@ function JurisdictionsPanel({
   );
 }
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange, betaLayersEnabled, countyRollup, countiesGeoJSON }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange, betaLayersEnabled, countyRollup, countiesGeoJSON, totalDisplaced, showCounties }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -1419,6 +1419,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   betaLayersEnabled: boolean;
   countyRollup: CountyRollup[] | null;
   countiesGeoJSON: any;
+  totalDisplaced: number;
+  showCounties: boolean;
 }) {
   // Auto-expand on desktop, collapsed by default on mobile
   const [expanded, setExpanded] = useState(false);
@@ -1433,9 +1435,11 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   // Authoritative displaced count from the jurisdictions rollup (if present),
   // so the Ops panel reconciles with the city/county bubbles and Analyst
   // tab totals instead of the legacy pop-fraction estimate in stagingPlan().
+  // Falls back to `totalDisplaced` (computed in App from allBuildings) when
+  // the county rollup hasn't been computed yet (countiesGeoJSON is lazy-loaded).
   const rollupDisplaced = countyRollup
     ? countyRollup.reduce((s, r) => s + r.estDisplaced, 0)
-    : 0;
+    : totalDisplaced;
 
   if (!storm) return null;
 
@@ -1616,7 +1620,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
       {/* Jurisdictions (per-county rollup) — shown whenever the Counties overlay is on
           and we have damage data. EM uses this to allocate resources per jurisdiction;
           CAT uses it to see which counties carry the biggest loss share. */}
-      {mode === 'ops' && countyRollup && countyRollup.length > 0 && (
+      {mode === 'ops' && showCounties && countyRollup && countyRollup.length > 0 && (
         <JurisdictionsPanel
           rollup={countyRollup}
           subPersona={subPersona}
@@ -3093,6 +3097,22 @@ ${fieldFlag ? `
     return counts;
   }, [allBuildings]);
 
+  // Total displaced — computed directly from allBuildings so the Ops panel
+  // has a reconciled number before countiesGeoJSON lazy-loads and before
+  // the rollupByCounty point-in-polygon pass finishes. Same formula as
+  // rollupByCounty: residential major/severe × haircut × avg household.
+  const totalDisplaced = useMemo(() => {
+    if (!allBuildings?.features?.length) return 0;
+    let resMajorSevere = 0;
+    for (const f of allBuildings.features) {
+      const p = f.properties || {};
+      const cat = p.damage_category;
+      const isRes = (p.building_type || '').startsWith('RES');
+      if (isRes && (cat === 'major' || cat === 'severe')) resMajorSevere++;
+    }
+    return Math.round(resMajorSevere * DISPLACEMENT_HAIRCUT * AVG_HOUSEHOLD);
+  }, [allBuildings]);
+
   // Per-county jurisdictional rollup — only computed when the Counties
   // overlay is on. EM uses this to allocate rescue teams/shelter beds
   // per jurisdiction since counties are independently managed.
@@ -4417,7 +4437,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} countyRollup={showCounties ? countyRollup : null} countiesGeoJSON={countiesGeoJSON} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} countyRollup={countyRollup} countiesGeoJSON={countiesGeoJSON} totalDisplaced={totalDisplaced} showCounties={showCounties} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);

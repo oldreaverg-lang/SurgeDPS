@@ -151,7 +151,7 @@ export const AVG_HOUSEHOLD = 2.53;
 // FEMA TSA check-ins / (major+severe residential) from Harvey + Ian runs out
 // to roughly 0.5–0.7. We use 0.7 as an upper-bound planning figure, applied
 // consistently to both the county and city rollups so their totals reconcile.
-const DISPLACEMENT_HAIRCUT = 0.7;
+export const DISPLACEMENT_HAIRCUT = 0.7;
 
 /**
  * Given a FeatureCollection of building points and a FeatureCollection of
