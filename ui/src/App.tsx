@@ -34,7 +34,7 @@ import type {
   TimeToAccessLayer,
 } from './betaLayers';
 import { rollupByCounty, rollupToCentroidGeoJSON, rollupByCity, cityRollupToCentroidGeoJSON } from './jurisdictions';
-import type { CountyRollup, CityRollup, CityEntry } from './jurisdictions';
+import type { CountyRollup, CityEntry } from './jurisdictions';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PMTiles Protocol (cloud-native vector tiles for flood polygons)
