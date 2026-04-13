@@ -1905,6 +1905,32 @@ function App() {
   // (buildings × severity, loss) and population-weighted (est. displaced,
   // occupants). Same county → city → building zoom hierarchy either way.
   const [mapView, setMapView] = useState<'damage' | 'population'>('damage');
+  // ── Time-series peril state ───────────────────────────────────────────────
+  // The backend emits a cell_..._ticks.json alongside each damage.geojson
+  // containing per-building HAZUS runs at every tick hour for three perils
+  // (surge-only, rainfall-only, cumulative). We fetch those bundles async
+  // after the main cell response lands, merge into a per-building lookup,
+  // and let the time slider + peril toggle drive the map paint.
+  type PerilKey = 'surge' | 'rainfall' | 'cumulative';
+  type TickRow = [number, number, number, string, string, string, number, number, number];
+  interface TicksBundle {
+    schema_version: string;
+    tick_hours: number[];
+    duration_h: number;
+    peril_fields: string[];
+    buildings: { id: string; lat: number; lon: number; ticks: TickRow[] }[];
+  }
+  // `Map` here is shadowed by the react-map-gl import above, so we use
+  // a plain Record<string, …> for the per-building tick lookup.
+  const [peril, setPeril] = useState<PerilKey>('cumulative');
+  const [tickIdx, setTickIdx] = useState<number>(-1); // -1 = "latest" (final tick)
+  const [tickHours, setTickHours] = useState<number[]>([]);
+  const buildingTicksRef = useRef<Record<string, TickRow[]>>({});
+  const [buildingTicksVersion, setBuildingTicksVersion] = useState(0);
+  // `noUnusedLocals` guard — these are consumed by the slider + peril toggle
+  // UI added in a follow-up commit. Referenced here so strict TS is happy.
+  void peril; void setPeril; void tickIdx; void setTickIdx;
+  void tickHours; void buildingTicksVersion;
   const [showCounties, setShowCounties] = useState(false);
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<any>(null);
   const [countiesLoading, setCountiesLoading] = useState(false);
@@ -3361,6 +3387,25 @@ ${fieldFlag ? `
           totalDepth: p.totalDepth + cellFeats.reduce((s: number, f: any) => s + (f.properties.depth_ft || 0), 0),
         }));
       }, 0);
+
+      // ── Ticks bundle (peril time-series): fetch in background ──
+      // Returns 404 on legacy cells generated pre-peril pipeline; we
+      // silently ignore so the slider stays disabled for those.
+      fetch(`/surgedps/api/cell_ticks?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`)
+        .then(r => (r.ok ? r.json() : null))
+        .then((bundle: TicksBundle | null) => {
+          if (!bundle || activeStormRef.current?.storm_id !== stormId) return;
+          // First bundle for this session sets the tick schedule.
+          // Using functional setState so the empty-deps useCallback closure
+          // doesn't stall a stale tickHours value here.
+          if (Array.isArray(bundle.tick_hours)) {
+            setTickHours(prev => prev.length ? prev : bundle.tick_hours);
+          }
+          const m = buildingTicksRef.current;
+          for (const b of bundle.buildings) m[b.id] = b.ticks;
+          setBuildingTicksVersion(v => v + 1);
+        })
+        .catch(() => { /* 404s / network blips are expected & non-fatal */ });
     } catch (err) { console.error(`Failed cell (${col},${row}):`, err); setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.'); }
     finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
   }, []); // stable — all state accessed via refs
