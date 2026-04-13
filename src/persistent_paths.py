@@ -41,21 +41,46 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # ── Base directory ──────────────────────────────────────────────────────────
+# Railway volume convention: both SurgeDPS and StormDPS mount their
+# persistent volume at /app/persistent. Set this in Railway env vars:
+#
+#   PERSISTENT_DATA_DIR = /app/persistent
+#
+# The fallback (tmp_integration) is used for local dev only.
 _BASE_DIR = Path(__file__).resolve().parent.parent  # repo root
 _FALLBACK = str(_BASE_DIR / "tmp_integration")
 PERSISTENT_DATA_DIR = Path(os.environ.get("PERSISTENT_DATA_DIR", _FALLBACK))
 
 # ── Subdirectory definitions ────────────────────────────────────────────────
-CELLS_DIR = PERSISTENT_DATA_DIR / "cells"
+CELLS_DIR      = PERSISTENT_DATA_DIR / "cells"
 VALIDATION_DIR = PERSISTENT_DATA_DIR / "validation"
-CENSUS_DIR = PERSISTENT_DATA_DIR / "census"
-FORECASTS_DIR = PERSISTENT_DATA_DIR / "forecasts"
-GEOCODE_DIR = PERSISTENT_DATA_DIR / "geocode"
+CENSUS_DIR     = PERSISTENT_DATA_DIR / "census"
+FORECASTS_DIR  = PERSISTENT_DATA_DIR / "forecasts"
+GEOCODE_DIR    = PERSISTENT_DATA_DIR / "geocode"
+MRMS_DIR       = PERSISTENT_DATA_DIR / "mrms"       # MRMS QPE GeoTIFF cache
+# ── HAND/NWM (fluvial layer) ─────────────────────────────────────────────────
+# HAND rasters are downloaded once per HUC8 from NOAA OWP FIM and kept
+# permanently — they don't change between storms.  NWM discharge is
+# storm-specific and evicted with the cell cache.
+#
+#   hand_fim/
+#     {huc8}/
+#       hand_{huc8}.tif          ← HAND raster (m above nearest drainage)
+#       catchments_{huc8}.tif    ← NHDPlus catchment ID raster (reach → cell)
+#   nwm/
+#     {storm_id}/
+#       discharge_{col}_{row}.json  ← reach_id → discharge_cms dict
+HAND_DIR       = PERSISTENT_DATA_DIR / "hand_fim"
+NWM_CACHE_DIR  = PERSISTENT_DATA_DIR / "nwm"
+QPF_DIR        = PERSISTENT_DATA_DIR / "qpf"        # WPC QPF GeoTIFF + metadata cache
+ATLAS14_DIR    = PERSISTENT_DATA_DIR / "atlas14"    # NOAA PFDS frequency tables (permanent)
+
 MONITOR_STATE_FILE = PERSISTENT_DATA_DIR / "monitor_state.json"
-LEDGER_FILE = VALIDATION_DIR / "run_ledger.json"
+LEDGER_FILE        = VALIDATION_DIR / "run_ledger.json"
 
 # ── Create all directories on import ────────────────────────────────────────
-for _d in (CELLS_DIR, VALIDATION_DIR, CENSUS_DIR, FORECASTS_DIR, GEOCODE_DIR):
+for _d in (CELLS_DIR, VALIDATION_DIR, CENSUS_DIR, FORECASTS_DIR,
+           GEOCODE_DIR, MRMS_DIR, HAND_DIR, NWM_CACHE_DIR, QPF_DIR, ATLAS14_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 logger.info("SurgeDPS storage root: %s", PERSISTENT_DATA_DIR)

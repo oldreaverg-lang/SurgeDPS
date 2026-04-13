@@ -22,8 +22,10 @@ import {
   formatTimeToClear,
   worstShelterPosture,
   shelterPosture,
+  lossRoutingSplit,
+  hazardMechanismLabel,
 } from './catTeam';
-import type { RoutingTag, AdjusterRecommendation } from './catTeam';
+import type { RoutingTag, AdjusterRecommendation, HazardMix, LossRoutingSplit } from './catTeam';
 
 // Shape we expect from App.tsx's Hotspot interface, narrowed to
 // just the fields the reports touch so this module doesn't have
@@ -41,6 +43,14 @@ export type ReportHotspot = {
   severity: { severe: number; major: number; moderate: number; minor: number; none: number };
   recommend: AdjusterRecommendation;
   routing: RoutingTag;
+  // ── Phase 5: hazard mechanism breakdown ──────────────────
+  // Aggregated from per-building hazard_mechanism field.
+  // Optional so existing callers don't break.
+  hazardMix?: HazardMix;
+  // Aggregated from per-building loss_mechanism field (classify_loss_mechanism).
+  // Keys: "surge_nfip" | "flood_nfip" | "compound_nfip" |
+  //       "pluvial_homeowners" | "wind_homeowners" | "minimal"
+  lossMechanismCounts?: Partial<Record<string, number>>;
 };
 
 export type ReportStorm = {
@@ -191,6 +201,25 @@ export function buildCatDeploymentReport(args: {
     if (!h) return '';
     const statusTag = pa.status === 'covered' ? 'tag-covered' : pa.status === 'partial' ? 'tag-partial' : 'tag-uncovered';
     const routingTag = h.routing.hint === 'nfip' ? 'tag-nfip' : h.routing.hint === 'ho3' ? 'tag-ho3' : 'tag-mixed';
+
+    // Hazard mechanism breakdown (Phase 5)
+    const hazardLine = h.hazardMix
+      ? `<div style="font-size:12px;color:#475569;margin-top:3px">
+           Hazard: <strong>${esc(hazardMechanismLabel(h.hazardMix))}</strong>
+         </div>`
+      : '';
+
+    // NFIP vs homeowners split
+    let routingSplitLine = '';
+    if (h.lossMechanismCounts) {
+      const split: LossRoutingSplit = lossRoutingSplit(h.lossMechanismCounts);
+      routingSplitLine = `<div style="font-size:12px;color:#475569;margin-top:3px">
+        Insurance routing: <strong style="color:#3730a3">NFIP ${split.nfipPct}%</strong>
+        · <strong style="color:#075985">Homeowners ${split.homeownersPct}%</strong>
+        ${split.otherPct > 0 ? `· Other ${split.otherPct}%` : ''}
+      </div>`;
+    }
+
     return `
     <div class="area-card">
       <h3>#${h.rank} — ${fmtUSD(h.loss)} modeled loss across ${fmtCount(h.count)} buildings</h3>
@@ -210,12 +239,10 @@ export function buildCatDeploymentReport(args: {
         recommended: <strong>${esc(h.recommend.label)}</strong>
         (~${pa.required_days.toFixed(1)} adjuster-days)
       </div>
+      ${hazardLine}
+      ${routingSplitLine}
       <div style="font-size:12px;color:#475569;margin-top:4px">
-        Severity mix:
-        ${h.severity.severe} severe ·
-        ${h.severity.major} major ·
-        ${h.severity.moderate} moderate ·
-        ${h.severity.minor} minor
+        Severity: ${h.severity.severe} severe · ${h.severity.major} major · ${h.severity.moderate} moderate · ${h.severity.minor} minor
       </div>
     </div>`;
   }).join('');
@@ -390,6 +417,24 @@ export function buildSitRep(args: {
       : h.maxDepthFt >= 3 ? 'SHELTER UPPER FLOORS'
       : 'SHELTER IN PLACE';
     const evacColor = evac === 'EVACUATE' ? '#dc2626' : evac === 'SHELTER UPPER FLOORS' ? '#f59e0b' : '#10b981';
+
+    // Hazard mechanism line (Phase 5 — shows surge/pluvial/compound breakdown)
+    const hazardLine = h.hazardMix
+      ? `<div style="font-size:12px;color:#475569;margin-top:3px">
+           Hazard: <strong>${esc(hazardMechanismLabel(h.hazardMix))}</strong>
+         </div>`
+      : '';
+
+    // NFIP vs homeowners split for the SitRep (critical for resource coordination)
+    let routingSplitLine = '';
+    if (h.lossMechanismCounts) {
+      const split: LossRoutingSplit = lossRoutingSplit(h.lossMechanismCounts);
+      routingSplitLine = `<div style="font-size:12px;color:#475569;margin-top:3px">
+        Claims routing: NFIP ${split.nfipPct}% · Homeowners ${split.homeownersPct}%
+        ${split.otherPct > 0 ? `· Other ${split.otherPct}%` : ''}
+      </div>`;
+    }
+
     return `
     <div class="area-card">
       <h3>#${h.rank} — ${fmtCount(h.count)} buildings impacted</h3>
@@ -405,6 +450,8 @@ export function buildSitRep(args: {
         Water ${h.waterPct}% · Wind ${h.windPct}% ·
         ${h.severity.severe + h.severity.major} likely uninhabitable
       </div>
+      ${hazardLine}
+      ${routingSplitLine}
     </div>`;
   }).join('');
 

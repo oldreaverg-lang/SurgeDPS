@@ -23,36 +23,146 @@
 // B7 — Rainfall overlay
 //
 // Intent: show inland flooding contribution where SurgeDPS
-// currently only models coastal surge. v1 target source is
-// MRMS (Multi-Radar Multi-Sensor) QPE composite, falling back
-// to StormDPS's rainfall service if that ships first. The
-// frontend expects a raster tile URL template (MapLibre
-// `raster` source) plus a legend for the color ramp.
+// currently only models coastal surge. v1 source: MRMS QPE
+// composite fetched via /api/rainfall (backed by NOAA S3 or
+// NCEP NOMADS). The backend returns stats; tile serving for
+// the map raster is a Phase 6 item (requires a COG tile server
+// or XYZ endpoint conversion from the clipped GeoTIFF).
 // ───────────────────────────────────────────────────────────
 export type RainfallSource = 'mrms' | 'stormdps' | 'none';
 
 export type RainfallOverlay = {
-  available: boolean;                 // false until backend ships
+  available: boolean;
   source: RainfallSource;
-  tileUrlTemplate: string | null;     // e.g. "/surgedps/api/rainfall/{z}/{x}/{y}.png?storm_id=…"
-  validTime: string | null;           // ISO string — when the raster was generated
-  bboxInches: [number, number] | null; // min/max of the color ramp for legend
-  notes: string;                      // human-readable caveat
+  tileUrlTemplate: string | null;     // Phase 6: COG tile server URL
+  validTime: string | null;           // ISO string — MRMS product valid time
+  bboxInches: [number, number] | null; // [min, max] inches across storm bbox
+  maxPrecipMm: number | null;
+  avgPrecipMm: number | null;
+  durationHr: number | null;
+  product: string | null;             // e.g. "MultiSensor_QPE_72H_Pass2"
+  notes: string;
 };
 
-// TODO(backend): wire to /surgedps/api/rainfall?storm_id=…
-// Response shape should match RainfallOverlay directly.
+/**
+ * Fetch MRMS QPE accumulation stats for the active storm.
+ *
+ * Calls GET /api/rainfall?duration={durationHr}&pass={passLevel}
+ * Returns available=true with stats when MRMS data is accessible;
+ * falls back to available=false with notes on failure.
+ *
+ * @param durationHr  Accumulation window in hours (24, 48, 72). Default 72.
+ * @param passLevel   MRMS pass level (1=radar-only, 2=gauge-corrected). Default 2.
+ */
 export async function fetchRainfallOverlay(
   _stormId: string,
+  durationHr = 72,
+  passLevel = 2,
 ): Promise<RainfallOverlay> {
-  return {
-    available: false,
-    source: 'none',
-    tileUrlTemplate: null,
-    validTime: null,
-    bboxInches: null,
-    notes: 'Rainfall overlay not yet integrated. Backend endpoint /surgedps/api/rainfall pending (MRMS QPE composite or StormDPS rainfall service).',
-  };
+  try {
+    const url = `/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText);
+      return {
+        available: false, source: 'none', tileUrlTemplate: null,
+        validTime: null, bboxInches: null, maxPrecipMm: null,
+        avgPrecipMm: null, durationHr: null, product: null,
+        notes: `MRMS fetch error (${resp.status}): ${text}`,
+      };
+    }
+    const data = await resp.json();
+    const maxIn  = data.max_precip_mm != null ? data.max_precip_mm / 25.4 : null;
+    const avgIn  = data.avg_precip_mm != null ? data.avg_precip_mm / 25.4 : null;
+    return {
+      available: true,
+      source: 'mrms',
+      tileUrlTemplate: null,   // Phase 6: wire COG/XYZ tiles here
+      validTime: data.valid_time ?? null,
+      bboxInches: maxIn != null && avgIn != null ? [0, +maxIn.toFixed(1)] : null,
+      maxPrecipMm: data.max_precip_mm ?? null,
+      avgPrecipMm: data.avg_precip_mm ?? null,
+      durationHr: data.duration_hr ?? durationHr,
+      product: data.product ?? null,
+      notes: `MRMS ${data.product ?? ''} · source: ${data.source ?? 'unknown'} · max ${maxIn != null ? maxIn.toFixed(1) + ' in' : '—'}`,
+    };
+  } catch (err) {
+    return {
+      available: false, source: 'none', tileUrlTemplate: null,
+      validTime: null, bboxInches: null, maxPrecipMm: null,
+      avgPrecipMm: null, durationHr: null, product: null,
+      notes: `MRMS unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// Stream gauge overlay (NOAA AHPS / NWPS)
+//
+// Returns active flood gauges near the storm landfall as a
+// GeoJSON FeatureCollection plus summary counts by category.
+// ───────────────────────────────────────────────────────────
+export type GaugeSummary = {
+  available: boolean;
+  gaugeCount: number;
+  atOrAboveMajor: number;
+  atOrAboveModerate: number;
+  atOrAboveMinor: number;
+  geojson: GeoJSON.FeatureCollection | null;
+  notes: string;
+};
+
+// Minimal GeoJSON types (avoids adding @types/geojson if not already a dep)
+declare namespace GeoJSON {
+  interface FeatureCollection { type: 'FeatureCollection'; features: Feature[]; }
+  interface Feature { type: 'Feature'; geometry: unknown; properties: Record<string, unknown> | null; }
+}
+
+/**
+ * Fetch active stream gauges near the storm's landfall.
+ *
+ * Calls GET /api/gauges?radius={radiusDeg}&category={minCategory}
+ *
+ * @param radiusDeg   Search radius in decimal degrees (~111 km/°). Default 4.
+ * @param minCategory Minimum flood category: "action"|"minor"|"moderate"|"major".
+ */
+export async function fetchGaugeOverlay(
+  _stormId: string,
+  radiusDeg = 4.0,
+  minCategory: 'action' | 'minor' | 'moderate' | 'major' = 'action',
+): Promise<GaugeSummary> {
+  try {
+    const url = `/api/gauges?radius=${radiusDeg}&category=${minCategory}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    if (!resp.ok) {
+      return {
+        available: false, gaugeCount: 0,
+        atOrAboveMajor: 0, atOrAboveModerate: 0, atOrAboveMinor: 0,
+        geojson: null,
+        notes: `Gauge fetch error (${resp.status}): ${resp.statusText}`,
+      };
+    }
+    const data = await resp.json();
+    const count = data.gauge_count ?? data.gauges?.features?.length ?? 0;
+    return {
+      available: true,
+      gaugeCount: count,
+      atOrAboveMajor:    data.at_or_above_major    ?? 0,
+      atOrAboveModerate: data.at_or_above_moderate ?? 0,
+      atOrAboveMinor:    data.at_or_above_minor    ?? 0,
+      geojson: data.gauges ?? null,
+      notes: count > 0
+        ? `${count} gauge${count === 1 ? '' : 's'} at or above ${minCategory} stage`
+        : `No gauges at or above ${minCategory} stage within ${radiusDeg}° radius`,
+    };
+  } catch (err) {
+    return {
+      available: false, gaugeCount: 0,
+      atOrAboveMajor: 0, atOrAboveModerate: 0, atOrAboveMinor: 0,
+      geojson: null,
+      notes: `Gauge data unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 // ───────────────────────────────────────────────────────────

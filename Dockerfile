@@ -36,15 +36,27 @@ COPY data/ ./data/
 COPY --from=frontend-builder /app/ui/dist/ ./ui/dist/
 
 # Persistent data — mount a Railway volume at /app/persistent
-# Contains: cells/ (surge grid cache), validation/ (run ledger),
-# census/ (population cache), forecasts/ (NHC track cache),
-# geocode/ (reverse geocoding cache), monitor_state.json
-# Set PERSISTENT_DATA_DIR=/app/persistent in Railway env vars
-# Falls back to /app/tmp_integration when env var is not set
+# Set PERSISTENT_DATA_DIR=/app/persistent in Railway env vars.
+# Both SurgeDPS and StormDPS use /app/persistent as the mount point.
+# Falls back to /app/tmp_integration for local dev.
+#
+# Directory layout:
+#   cells/        per-storm surge/damage cache
+#   validation/   run ledger
+#   census/       county population cache
+#   forecasts/    NHC track cache
+#   geocode/      reverse geocoding cache
+#   mrms/         MRMS QPE GeoTIFF cache
+#   hand_fim/     NOAA OWP HAND rasters by HUC8 (permanent, ~50-200MB/HUC8)
+#   nwm/          NWM discharge cache by storm (evicted with cell cache)
 RUN mkdir -p persistent/cells persistent/validation \
     persistent/census persistent/forecasts persistent/geocode \
+    persistent/mrms persistent/hand_fim persistent/nwm \
+    persistent/qpf persistent/atlas14 \
     tmp_integration/cells tmp_integration/validation \
-    tmp_integration/census tmp_integration/forecasts tmp_integration/geocode
+    tmp_integration/census tmp_integration/forecasts tmp_integration/geocode \
+    tmp_integration/mrms tmp_integration/hand_fim tmp_integration/nwm \
+    tmp_integration/qpf tmp_integration/atlas14
 
 # Railway injects PORT at runtime; default to 8000 for local dev
 ENV PORT=8000

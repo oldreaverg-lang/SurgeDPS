@@ -131,6 +131,16 @@ HISTORICAL_STORMS: List[StormEntry] = [
         basin="AL", advisory="best-track",
         dps_score=88.4,
         rmax_nm=25.0,   # NHC TCR: moderate-sized eyewall at Rockport
+        # KNOWN LIMITATION — speed_kt=10 is Harvey's *landfall* forward speed.
+        # After initial landfall near Rockport, Harvey slowed to ~2-3 kt and
+        # stalled over southeast Texas for 4-5 days.  The rainfall model uses a
+        # single speed_kt for all cells, so inland cells (Harris, Fort Bend,
+        # Montgomery, Brazoria) are modeled at 10 kt rather than the actual
+        # ~2 kt stall speed.  This causes the parametric rainfall estimate to
+        # run ~3× low for those cells (525 mm modeled vs ~1500 mm observed in
+        # Houston). Surge cells near Rockport/Port Aransas are accurately
+        # captured.  A future improvement would interpolate speed along the
+        # NHC best-track as a function of cell distance from landfall.
     ),
     StormEntry(
         storm_id="ian_2022", name="Hurricane Ian", year=2022,

@@ -33,8 +33,8 @@ import type {
   VendorCoverageLayer,
   TimeToAccessLayer,
 } from './betaLayers';
-import { rollupByCounty, rollupToCentroidGeoJSON } from './jurisdictions';
-import type { CountyRollup } from './jurisdictions';
+import { rollupByCounty, rollupToCentroidGeoJSON, rollupByCity, cityRollupToCentroidGeoJSON } from './jurisdictions';
+import type { CountyRollup, CityRollup, CityEntry } from './jurisdictions';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PMTiles Protocol (cloud-native vector tiles for flood polygons)
@@ -1901,10 +1901,18 @@ function App() {
   const [basemap, setBasemap] = useState<string>('dark');
   const [imageryDate, setImageryDate] = useState<string | null>(null);
   const imageryFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Map view mode — toggles the bubble pipeline between damage-weighted
+  // (buildings × severity, loss) and population-weighted (est. displaced,
+  // occupants). Same county → city → building zoom hierarchy either way.
+  const [mapView, setMapView] = useState<'damage' | 'population'>('damage');
   const [showCounties, setShowCounties] = useState(false);
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<any>(null);
   const [countiesLoading, setCountiesLoading] = useState(false);
   const [countiesError, setCountiesError] = useState<string | null>(null);
+  // City-level data — lazy-loaded alongside buildings (no toggle needed;
+  // city bubbles are always on between county zoom and building zoom).
+  const [citiesData, setCitiesData] = useState<CityEntry[] | null>(null);
+  const citiesLoadedRef = useRef(false);
   const [showFloodZones, setShowFloodZones] = useState(false);
   const [floodZonesGeoJSON, setFloodZonesGeoJSON] = useState<any>(null);
   const [floodZonesLoading, setFloodZonesLoading] = useState(false);
@@ -1968,6 +1976,24 @@ function App() {
       setCountiesError('Could not load county boundaries');
     } finally {
       setCountiesLoading(false);
+    }
+  }, []);
+
+  // ── City data (Census Places, pop ≥ 2500, 18 coastal states) ──
+  // Lazy-loaded as soon as buildings are available — no toggle needed because
+  // city bubbles are always shown between county zoom (<8) and individual
+  // building zoom (≥11). 423 KB minified, loads in ~100 ms on LTE.
+  const loadCities = useCallback(async () => {
+    if (citiesLoadedRef.current) return;
+    try {
+      const mod = await import('./assets/cities-coastal.json');
+      const raw: any = (mod as any).default ?? mod;
+      if (Array.isArray(raw) && raw.length) {
+        setCitiesData(raw as CityEntry[]);
+        citiesLoadedRef.current = true;
+      }
+    } catch (err: any) {
+      console.warn('[cities] load failed:', err?.message || err);
     }
   }, []);
 
@@ -2128,6 +2154,12 @@ function App() {
       setCountiesLoading(false);
     }
   }, [showCounties, hasBuildings, loadCounties]);
+
+  // Load city data as soon as buildings are present (city bubbles are always-on
+  // between county and building zoom levels — no user toggle needed).
+  useEffect(() => {
+    if (hasBuildings) loadCities();
+  }, [hasBuildings, loadCities]);
 
   // Fetch FEMA flood zones when showFloodZones is enabled; clear when disabled.
   useEffect(() => {
@@ -3041,6 +3073,31 @@ ${fieldFlag ? `
     return rollupToCentroidGeoJSON(countyRollup);
   }, [countyRollup]);
 
+  // GEOID → county name lookup — drives the "Unincorp. Harris" labels
+  // inside the city rollup for buildings that fall outside any city boundary.
+  const countyNameMap = useMemo<Record<string, string>>(() => {
+    if (!countiesGeoJSON?.features?.length) return {};
+    const map: Record<string, string> = {};
+    for (const f of countiesGeoJSON.features) {
+      const geoid: string = f.properties?.GEOID;
+      const name: string  = f.properties?.NAME;
+      if (geoid && name) map[geoid] = name;
+    }
+    return map;
+  }, [countiesGeoJSON]);
+
+  // City-level rollup — groups buildings into Census Places (pop ≥ 2500)
+  // with an "Unincorporated" bucket per county for buildings outside any place.
+  const cityRollup = useMemo(() => {
+    if (!citiesData || !allBuildings) return null;
+    return rollupByCity(allBuildings, citiesData, countyNameMap);
+  }, [citiesData, allBuildings, countyNameMap]);
+
+  const cityAggregatePoints = useMemo(() => {
+    if (!cityRollup || cityRollup.length === 0) return null;
+    return cityRollupToCentroidGeoJSON(cityRollup);
+  }, [cityRollup]);
+
   // Critical facilities breakdown
   const criticalBreakdown = useMemo(() => {
     if (!allBuildings?.features?.length) return [];
@@ -3346,7 +3403,7 @@ ${fieldFlag ? `
   const onHover = useCallback((event: any) => {
     const { features, lngLat: { lng, lat } } = event;
     if (!features || !features.length) { setHoverInfo(null); return; }
-    for (const [layerId, type] of [['grid-available-fill', 'grid'], ['grid-ready-fill', 'grid'], ['damage-clusters', 'cluster'], ['damage-points', 'damage'], ['flood-depth-layer', 'flood'], ['county-aggregate-circle', 'county']] as const) {
+    for (const [layerId, type] of [['grid-available-fill', 'grid'], ['grid-ready-fill', 'grid'], ['damage-clusters', 'cluster'], ['damage-points', 'damage'], ['population-points', 'population'], ['flood-depth-layer', 'flood'], ['city-aggregate-circle', 'city'], ['county-aggregate-circle', 'county']] as const) {
       const f = features.find((f: any) => f.layer.id === layerId);
       if (f) { setHoverInfo({ lng, lat, type, feature: f }); return; }
     }
@@ -3356,8 +3413,18 @@ ${fieldFlag ? `
   const onClick = useCallback((event: any) => {
     // Close any open menus when map is clicked
     setMoreMenuOpen(false);
+    // City aggregate bubble click → fly in to zoom 11 (individual building zoom).
+    const cityBubble = event.features?.find((f: any) => f.layer.id === 'city-aggregate-circle');
+    if (cityBubble && mapRef.current) {
+      mapRef.current.flyTo({
+        center: [event.lngLat.lng, event.lngLat.lat],
+        zoom: 11,
+        duration: 700,
+      });
+      return;
+    }
     // County aggregate bubble click → fly in to zoom 9 (above the minzoom
-    // threshold for individual-building bubbles) so the user can drill down.
+    // threshold for city-aggregate bubbles) so the user can drill down.
     const countyBubble = event.features?.find((f: any) => f.layer.id === 'county-aggregate-circle');
     if (countyBubble && mapRef.current) {
       mapRef.current.flyTo({
@@ -3382,6 +3449,12 @@ ${fieldFlag ? `
     const damagePoint = event.features?.find((f: any) => f.layer.id === 'damage-points');
     if (damagePoint) {
       setPinnedInfo({ lng: event.lngLat.lng, lat: event.lngLat.lat, type: 'damage', feature: damagePoint });
+      return;
+    }
+    // Population point click → pin population popup (property-level occupancy + displacement status)
+    const popPoint = event.features?.find((f: any) => f.layer.id === 'population-points');
+    if (popPoint) {
+      setPinnedInfo({ lng: event.lngLat.lng, lat: event.lngLat.lat, type: 'population', feature: popPoint });
       return;
     }
     // Grid cell click → load data (available or pre-computed "ready" cells)
@@ -3428,8 +3501,8 @@ ${fieldFlag ? `
           ref={mapRef}
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
           mapStyle={BASEMAPS[basemap]}
-          interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', 'county-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
-          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' || hoverInfo?.type === 'county' ? 'pointer' : ''}
+          interactiveLayerIds={['flood-depth-layer', 'damage-points', 'damage-clusters', 'population-points', 'county-aggregate-circle', 'city-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
+          cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' || hoverInfo?.type === 'population' || hoverInfo?.type === 'county' || hoverInfo?.type === 'city' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
           onMoveEnd={e => {
             setZoom(e.viewState.zoom);
@@ -3556,17 +3629,17 @@ ${fieldFlag ? `
 
           {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
-          {allBuildings && (
+          {allBuildings && mapView === 'damage' && (
             <Source id="damage-data" type="geojson" data={allBuildings}
               cluster={true} clusterMaxZoom={14} clusterRadius={50}
               clusterProperties={{ total_loss: ['+', ['get', 'estimated_loss_usd']] }}
             >
-              {/* Individual-building and supercluster bubbles only at zoom ≥ 8.
-                  Below zoom 8 we switch to county-aggregate bubbles so the EM
-                  sees one marker per jurisdiction instead of geographically
-                  arbitrary supercluster blobs. */}
+              {/* Individual-building and supercluster bubbles only at zoom ≥ 11.
+                  Below zoom 11 city-aggregate bubbles take over (zoom 8–11),
+                  and below zoom 8 county-aggregate bubbles are shown instead,
+                  so the EM sees one clearly-labeled marker per jurisdiction. */}
               <Layer id="damage-points" type="circle" filter={['!', ['has', 'point_count']]}
-                minzoom={8}
+                minzoom={11}
                 paint={{
                   'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 13, 8, 14, 12, 16, 16, 18, 22],
                   'circle-color': ['match', ['get', 'damage_category'], 'none', '#4ade80', 'minor', '#facc15', 'moderate', '#fb923c', 'major', '#ef4444', 'severe', '#7f1d1d', '#9ca3af'],
@@ -3574,7 +3647,7 @@ ${fieldFlag ? `
                   'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
                 }} />
               <Layer id="damage-clusters" type="circle" filter={['has', 'point_count']}
-                minzoom={8}
+                minzoom={11}
                 paint={{
                   'circle-color': ['step', ['/', ['get', 'total_loss'], ['get', 'point_count']],
                     '#4ade80', 5000, '#facc15', 25000, '#fb923c', 75000, '#ef4444', 200000, '#7f1d1d'],
@@ -3582,12 +3655,53 @@ ${fieldFlag ? `
                   'circle-stroke-width': 3, 'circle-stroke-color': '#fff',
                 }} />
               <Layer id="damage-cluster-count" type="symbol" filter={['has', 'point_count']}
-                minzoom={8}
+                minzoom={11}
                 layout={{
                   'text-field': ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1000]]], 'K'],
                   'text-size': 11,
                 }}
                 paint={{ 'text-color': '#fff', 'text-halo-color': 'rgba(0,0,0,0.8)', 'text-halo-width': 1.5 }} />
+            </Source>
+          )}
+
+          {/* Population mode building layer — non-clustered so every residential
+              dwelling shows up distinctly. Radius scales with zoom; color
+              encodes displacement state derived from damage_category × building_type
+              (RES + major/severe = red "displaced", RES + minor/none = green "safe",
+              non-residential = gray). */}
+          {allBuildings && mapView === 'population' && (
+            <Source id="population-data" type="geojson" data={allBuildings}>
+              <Layer id="population-points" type="circle"
+                minzoom={11}
+                paint={{
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 4, 13, 7, 14, 10, 16, 14, 18, 20],
+                  // Color: if building_type starts with "RES" → color by damage severity;
+                  // otherwise gray (non-residential buildings don't have overnight residents).
+                  'circle-color': [
+                    'case',
+                    ['==', ['index-of', 'RES', ['get', 'building_type']], 0],
+                    ['match', ['get', 'damage_category'],
+                      'severe', '#7f1d1d',
+                      'major', '#ef4444',
+                      'moderate', '#fb923c',
+                      'minor', '#facc15',
+                      '#4ade80'],
+                    '#6b7280',
+                  ],
+                  'circle-opacity': [
+                    'case',
+                    ['==', ['index-of', 'RES', ['get', 'building_type']], 0],
+                    0.9,
+                    0.45,
+                  ],
+                  'circle-stroke-width': [
+                    'case',
+                    ['==', ['index-of', 'RES', ['get', 'building_type']], 0],
+                    2,
+                    1,
+                  ],
+                  'circle-stroke-color': '#fff',
+                }} />
             </Source>
           )}
 
@@ -3598,7 +3712,7 @@ ${fieldFlag ? `
             <Source id="county-aggregate-data" type="geojson" data={countyAggregatePoints}>
               <Layer id="county-aggregate-circle" type="circle"
                 maxzoom={8}
-                paint={{
+                paint={mapView === 'damage' ? {
                   'circle-radius': ['interpolate', ['linear'], ['get', 'buildings'],
                     1, 10, 100, 14, 1000, 20, 10000, 30, 50000, 42],
                   'circle-color': ['match', ['get', 'worstCategory'],
@@ -3610,13 +3724,97 @@ ${fieldFlag ? `
                   'circle-opacity': 0.9,
                   'circle-stroke-width': 3,
                   'circle-stroke-color': '#fff',
+                } : {
+                  // Population mode: radius = est. displaced, color stepped by displaced count.
+                  'circle-radius': ['interpolate', ['linear'], ['get', 'estDisplaced'],
+                    0, 8, 50, 12, 500, 18, 5000, 28, 25000, 40, 100000, 50],
+                  'circle-color': ['step', ['get', 'estDisplaced'],
+                    '#4ade80',     // 0 displaced = green (safe)
+                    1,    '#facc15',   // 1–99
+                    100,  '#fb923c',   // 100–999
+                    1000, '#ef4444',   // 1k–9.9k
+                    10000,'#7f1d1d'],  // 10k+
+                  'circle-opacity': 0.9,
+                  'circle-stroke-width': 3,
+                  'circle-stroke-color': '#fff',
                 }} />
               <Layer id="county-aggregate-label" type="symbol"
                 maxzoom={8}
-                layout={{
+                layout={mapView === 'damage' ? {
                   'text-field': ['get', 'label'],
                   'text-size': 11,
                   'text-offset': [0, 1.8],
+                  'text-anchor': 'top',
+                  'text-allow-overlap': false,
+                } : {
+                  'text-field': ['concat', ['get', 'name'], '  ',
+                    ['case', ['>=', ['get', 'estDisplaced'], 1000],
+                      ['concat', ['to-string', ['round', ['/', ['get', 'estDisplaced'], 1000]]], 'k displ.'],
+                      ['concat', ['to-string', ['get', 'estDisplaced']], ' displ.']]],
+                  'text-size': 11,
+                  'text-offset': [0, 1.8],
+                  'text-anchor': 'top',
+                  'text-allow-overlap': false,
+                }}
+                paint={{
+                  'text-color': '#fff',
+                  'text-halo-color': 'rgba(0,0,0,0.85)',
+                  'text-halo-width': 1.5,
+                }} />
+            </Source>
+          )}
+
+          {/* City-aggregate bubbles — one per Census Place (or Unincorporated
+              county bucket) at zoom 8–11. Sits between the county overview
+              (maxzoom 8) and individual building dots (minzoom 11) so the EM
+              can identify which cities carry the most exposure before drilling
+              into individual properties. Click flies to zoom 11. */}
+          {cityAggregatePoints && (
+            <Source id="city-aggregate-data" type="geojson" data={cityAggregatePoints}>
+              <Layer id="city-aggregate-circle" type="circle"
+                minzoom={8} maxzoom={11}
+                paint={mapView === 'damage' ? {
+                  'circle-radius': ['interpolate', ['linear'], ['get', 'buildings'],
+                    1, 8, 50, 12, 500, 18, 5000, 28, 20000, 38],
+                  'circle-color': ['match', ['get', 'worstCategory'],
+                    'severe', '#7f1d1d',
+                    'major', '#ef4444',
+                    'moderate', '#fb923c',
+                    'minor', '#facc15',
+                    '#4ade80'],
+                  'circle-opacity': 0.88,
+                  'circle-stroke-width': 2,
+                  'circle-stroke-color': '#fff',
+                } : {
+                  // Population mode: radius by displaced, color stepped by displaced count.
+                  // Narrower thresholds than county (cities are smaller).
+                  'circle-radius': ['interpolate', ['linear'], ['get', 'estDisplaced'],
+                    0, 6, 25, 10, 250, 16, 2500, 26, 10000, 36],
+                  'circle-color': ['step', ['get', 'estDisplaced'],
+                    '#4ade80',
+                    1,   '#facc15',
+                    50,  '#fb923c',
+                    500, '#ef4444',
+                    5000,'#7f1d1d'],
+                  'circle-opacity': 0.88,
+                  'circle-stroke-width': 2,
+                  'circle-stroke-color': '#fff',
+                }} />
+              <Layer id="city-aggregate-label" type="symbol"
+                minzoom={8} maxzoom={11}
+                layout={mapView === 'damage' ? {
+                  'text-field': ['get', 'label'],
+                  'text-size': 10,
+                  'text-offset': [0, 1.6],
+                  'text-anchor': 'top',
+                  'text-allow-overlap': false,
+                } : {
+                  'text-field': ['concat', ['get', 'name'], '  ',
+                    ['case', ['>=', ['get', 'estDisplaced'], 1000],
+                      ['concat', ['to-string', ['round', ['/', ['get', 'estDisplaced'], 1000]]], 'k displ.'],
+                      ['concat', ['to-string', ['get', 'estDisplaced']], ' displ.']]],
+                  'text-size': 10,
+                  'text-offset': [0, 1.6],
                   'text-anchor': 'top',
                   'text-allow-overlap': false,
                 }}
@@ -3755,7 +3953,83 @@ ${fieldFlag ? `
                   <><h3 className="font-semibold text-gray-800 text-sm mb-1">Storm Surge Depth</h3>
                   <p className="text-gray-800 font-bold text-base">{((pinnedInfo ?? hoverInfo).feature.properties.depth_ft != null ? (pinnedInfo ?? hoverInfo).feature.properties.depth_ft : ((pinnedInfo ?? hoverInfo).feature.properties.depth != null ? (pinnedInfo ?? hoverInfo).feature.properties.depth * 3.28084 : 0)).toFixed(1)} ft</p>
                   <p className="text-gray-400 text-[10px] mt-0.5">Modeled inundation at this location</p></>
-                ) : (
+                ) : (pinnedInfo ?? hoverInfo).type === 'county' ? (() => {
+                  const p = (pinnedInfo ?? hoverInfo).feature.properties;
+                  const isPop = mapView === 'population';
+                  return (
+                    <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">{p.name}, {p.state}</h3>
+                    <div className="text-xs space-y-1">
+                      {isPop ? (
+                        <>
+                          <p className="flex justify-between"><span className="text-gray-500">Est. displaced:</span> <span className="font-bold text-indigo-600">{(p.estDisplaced ?? 0).toLocaleString()}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Severe damage:</span> <span className="font-medium">{(p.severe ?? 0).toLocaleString()}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Major damage:</span> <span className="font-medium">{(p.major ?? 0).toLocaleString()}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Buildings exposed:</span> <span className="font-medium">{(p.buildings ?? 0).toLocaleString()}</span></p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="flex justify-between"><span className="text-gray-500">Buildings:</span> <span className="font-medium">{(p.buildings ?? 0).toLocaleString()}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Est. loss:</span> <span className="font-bold text-red-600">${((p.loss ?? 0) / 1e6).toFixed(1)}M</span></p>
+                          {p.criticalFacilities > 0 && <p className="flex justify-between"><span className="text-gray-500">Critical:</span> <span className="font-medium">{p.criticalFacilities}</span></p>}
+                        </>
+                      )}
+                      <p className="text-gray-400 text-[10px] mt-0.5">Click to zoom in</p>
+                    </div></>
+                  );
+                })()
+                : (pinnedInfo ?? hoverInfo).type === 'city' ? (() => {
+                  const p = (pinnedInfo ?? hoverInfo).feature.properties;
+                  const isPop = mapView === 'population';
+                  const pct = isPop && p.pop > 0 ? Math.min(100, Math.round(100 * (p.estDisplaced ?? 0) / p.pop)) : null;
+                  return (
+                    <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">{p.name}, {p.state}</h3>
+                    <div className="text-xs space-y-1">
+                      {isPop ? (
+                        <>
+                          <p className="flex justify-between"><span className="text-gray-500">Est. displaced:</span> <span className="font-bold text-indigo-600">{(p.estDisplaced ?? 0).toLocaleString()}</span></p>
+                          {p.pop > 0 && <p className="flex justify-between"><span className="text-gray-500">City population:</span> <span className="font-medium">{p.pop.toLocaleString()}</span></p>}
+                          {pct != null && <p className="flex justify-between"><span className="text-gray-500">Displacement rate:</span> <span className={`font-bold ${pct >= 25 ? 'text-red-600' : pct >= 5 ? 'text-orange-600' : 'text-gray-700'}`}>{pct}%</span></p>}
+                          <p className="flex justify-between"><span className="text-gray-500">Buildings exposed:</span> <span className="font-medium">{(p.buildings ?? 0).toLocaleString()}</span></p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="flex justify-between"><span className="text-gray-500">Buildings:</span> <span className="font-medium">{(p.buildings ?? 0).toLocaleString()}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Est. loss:</span> <span className="font-bold text-red-600">${((p.loss ?? 0) / 1e6).toFixed(1)}M</span></p>
+                          {p.criticalFacilities > 0 && <p className="flex justify-between"><span className="text-gray-500">Critical:</span> <span className="font-medium">{p.criticalFacilities}</span></p>}
+                          {p.pop > 0 && <p className="flex justify-between"><span className="text-gray-500">Population:</span> <span className="font-medium">{p.pop.toLocaleString()}</span></p>}
+                        </>
+                      )}
+                      <p className="text-gray-400 text-[10px] mt-0.5">Click to zoom in</p>
+                    </div></>
+                  );
+                })()
+                : (pinnedInfo ?? hoverInfo).type === 'population' ? (() => {
+                  const p = (pinnedInfo ?? hoverInfo).feature.properties;
+                  const isRes = (p.building_type || '').startsWith('RES');
+                  const cat = (p.damage_category || 'none') as string;
+                  const displaced = isRes && (cat === 'severe' || cat === 'major');
+                  const estOccupants = isRes ? 2.5 : 0;
+                  return (
+                    <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property — Population Impact</h3>
+                    <div className="text-xs space-y-1">
+                      <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(p.building_type)}</span></p>
+                      <p className="flex justify-between"><span className="text-gray-500">Damage:</span> <span className="font-medium capitalize">{cat === 'none' ? 'No damage' : cat}</span></p>
+                      {isRes ? (
+                        <>
+                          <p className="flex justify-between"><span className="text-gray-500">Est. occupants:</span> <span className="font-medium">{estOccupants}</span></p>
+                          <p className="flex justify-between"><span className="text-gray-500">Status:</span>
+                            <span className={`font-bold ${displaced ? 'text-red-600' : 'text-green-700'}`}>
+                              {displaced ? 'Displaced' : 'Sheltering in place'}
+                            </span>
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-gray-500 italic">Non-residential — no overnight occupancy</p>
+                      )}
+                    </div></>
+                  );
+                })()
+                : (
                   (() => {
                     const p = (pinnedInfo ?? hoverInfo).feature.properties;
                     const foundHt = p.found_ht != null ? p.found_ht : null;
@@ -4417,6 +4691,23 @@ ${fieldFlag ? `
 
         {/* ── Basemap toggle + map controls (bottom-left of map) — always visible ── */}
         <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
+          {/* View mode pill: Damage vs Population. Swaps the bubble pipeline
+              (same county → city → building hierarchy) between damage-weighted
+              and population-displaced metrics. */}
+          {activeStorm && (
+            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+              <button
+                onClick={() => setMapView('damage')}
+                title="Color/size bubbles by building damage & loss"
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${mapView === 'damage' ? 'bg-rose-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >🏚️ Damage</button>
+              <button
+                onClick={() => setMapView('population')}
+                title="Color/size bubbles by estimated displaced population"
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${mapView === 'population' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >👥 Population</button>
+            </div>
+          )}
           <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
             {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
               <button

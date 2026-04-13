@@ -364,13 +364,106 @@ class DEMClipper:
         # USGS 3DEP tiles are typically 1°x1°
         return (lon - 1.0, lat - 1.0, lon, lat)
 
+    def _fetch_3dep_dem(
+        self,
+        bounds: Tuple[float, float, float, float],
+        output_dir: str,
+        max_pixels: int = 2000,
+    ) -> Optional[str]:
+        """
+        Fetch a real DEM from USGS 3DEP via the TNM ImageServer WCS endpoint.
+
+        The National Map (TNM) 3DEP 1/3 arc-second (~10m) elevation service
+        returns a Cloud-Optimized GeoTIFF for any CONUS bounding box.
+        No authentication required.
+
+        Endpoint:
+            https://elevation.nationalmap.gov/arcgis/rest/services/
+            3DEPElevation/ImageServer/exportImage
+
+        Args:
+            bounds: (west, south, east, north) in EPSG:4326 decimal degrees.
+            output_dir: Directory to write output GeoTIFF.
+            max_pixels: Maximum image dimension (width or height).
+                        TNM caps at 4096; we default to 2000 for speed.
+
+        Returns:
+            Path to downloaded GeoTIFF, or None if fetch fails.
+        """
+        import urllib.request
+        import urllib.parse
+
+        west, south, east, north = bounds
+
+        # Compute pixel dimensions at ~10m (1/3 arc-second ≈ 0.0000926°)
+        # but cap at max_pixels to avoid huge downloads
+        deg_per_pixel = 0.0000926  # 1/3 arc-second
+        width  = int(min((east - west)  / deg_per_pixel, max_pixels))
+        height = int(min((north - south) / deg_per_pixel, max_pixels))
+        width  = max(width, 64)
+        height = max(height, 64)
+
+        bbox = f"{west},{south},{east},{north}"
+        params = urllib.parse.urlencode({
+            "bbox":       bbox,
+            "bboxSR":     "4326",
+            "size":       f"{width},{height}",
+            "imageSR":    "4326",
+            "format":     "tiff",
+            "pixelType":  "F32",
+            "noData":     "-9999",
+            "noDataInterpretation": "esriNoDataMatchAny",
+            "interpolation": "RSP_BilinearInterpolation",
+            "f":          "image",
+        })
+        url = (
+            "https://elevation.nationalmap.gov/arcgis/rest/services/"
+            f"3DEPElevation/ImageServer/exportImage?{params}"
+        )
+
+        logger.info("[3DEP] Fetching %dx%d px DEM for bbox %s", width, height, bbox)
+
+        output_path = os.path.join(output_dir, "dem_3dep.tif")
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "SurgeDPS/1.0 (elevation data)"},
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+
+            # Verify it's a GeoTIFF (starts with TIFF magic bytes)
+            if len(raw) < 100 or raw[:4] not in (b"II\x2A\x00", b"MM\x00\x2A",
+                                                   b"II\x2B\x00", b"MM\x00\x2B"):
+                logger.warning(
+                    "[3DEP] Response doesn't look like a TIFF (%d bytes, "
+                    "header: %s)", len(raw), raw[:20]
+                )
+                return None
+
+            with open(output_path, "wb") as f:
+                f.write(raw)
+
+            logger.info(
+                "[3DEP] Downloaded DEM: %s (%d bytes, %dx%d px)",
+                output_path, len(raw), width, height,
+            )
+            return output_path
+
+        except Exception as exc:
+            logger.warning("[3DEP] Fetch failed: %s", exc)
+            return None
+
     def _generate_synthetic_dem(
         self,
         bounds: Tuple[float, float, float, float],
         output_dir: str,
     ) -> str:
         """
-        Generate a synthetic DEM for development/testing.
+        Generate a synthetic DEM as a last-resort fallback.
+
+        First tries to fetch a real DEM from USGS 3DEP.  Only falls back to
+        the synthetic terrain if 3DEP is unreachable (e.g., during testing).
 
         Creates a gentle slope from coast inland with some noise,
         representative of flat Gulf Coast terrain.
@@ -378,7 +471,16 @@ class DEMClipper:
         import rasterio
         from rasterio.transform import from_bounds
 
-        logger.info("Generating synthetic DEM for development")
+        # ── Attempt real 3DEP fetch first ────────────────────────────────────
+        real_path = self._fetch_3dep_dem(bounds, output_dir)
+        if real_path:
+            return real_path
+
+        # ── Fallback: synthetic DEM for dev / offline environments ───────────
+        logger.warning(
+            "[DEM] 3DEP unavailable — falling back to synthetic DEM "
+            "(results will be approximate)"
+        )
 
         # 10m resolution in degrees (approximate)
         res = 0.0001  # ~11m
@@ -433,7 +535,7 @@ class DEMClipper:
             dst.write(elevation, 1)
 
         logger.info(
-            f"Synthetic DEM: {output_path} ({width}x{height}, "
-            f"{west:.2f} to {east:.2f})"
+            "[DEM] Synthetic DEM: %s (%dx%d px, %.2f to %.2f lon)",
+            output_path, width, height, west, east,
         )
         return output_path

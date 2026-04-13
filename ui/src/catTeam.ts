@@ -341,6 +341,74 @@ export function formatTimeToClear(days: number): string {
   return `~${weeks} weeks`;
 }
 
+// ───────────────────────────────────────────────────────────
+// Hazard mechanism breakdown helpers (Phase 5)
+//
+// Aggregate per-building hazard_mechanism and loss_mechanism
+// counts (produced by the depth_damage.py pipeline) into
+// summary types the CAT report and EM panel can render.
+// ───────────────────────────────────────────────────────────
+
+/** Raw counts of buildings by hazard mechanism at a hotspot. */
+export type HazardMix = {
+  surge: number;
+  pluvial: number;
+  fluvial: number;
+  compound: number;
+  wind: number;
+  none: number;
+};
+
+/** Insurance routing split (percent of total buildings). */
+export type LossRoutingSplit = {
+  nfipPct: number;        // surge_nfip + flood_nfip + compound_nfip
+  homeownersPct: number;  // pluvial_homeowners + wind_homeowners
+  otherPct: number;       // minimal + unknown
+};
+
+/**
+ * Aggregate per-building loss_mechanism counts into an NFIP vs
+ * homeowners routing split.  Input is a record keyed by the
+ * loss_mechanism string values from classify_loss_mechanism().
+ */
+export function lossRoutingSplit(
+  mechanismCounts: Partial<Record<string, number>>,
+): LossRoutingSplit {
+  const nfip = (mechanismCounts['surge_nfip']    ?? 0)
+             + (mechanismCounts['flood_nfip']     ?? 0)
+             + (mechanismCounts['compound_nfip']  ?? 0);
+  const ho   = (mechanismCounts['pluvial_homeowners'] ?? 0)
+             + (mechanismCounts['wind_homeowners']     ?? 0);
+  const other = (mechanismCounts['minimal']  ?? 0)
+              + (mechanismCounts['unknown']  ?? 0);
+  const total = nfip + ho + other;
+  if (total === 0) return { nfipPct: 0, homeownersPct: 0, otherPct: 0 };
+  return {
+    nfipPct:       Math.round(nfip  / total * 100),
+    homeownersPct: Math.round(ho    / total * 100),
+    otherPct:      Math.round(other / total * 100),
+  };
+}
+
+/**
+ * Return a short human-readable breakdown of the hazard mix.
+ * e.g. "Surge 55% · Compound 30% · Pluvial 15%"
+ */
+export function hazardMechanismLabel(mix: HazardMix): string {
+  const total = mix.surge + mix.pluvial + mix.fluvial + mix.compound + mix.wind + mix.none;
+  if (total === 0) return 'No damage';
+  const parts: string[] = [];
+  const add = (n: number, label: string) => {
+    if (n > 0) parts.push(`${label} ${Math.round(n / total * 100)}%`);
+  };
+  add(mix.surge,    'Surge');
+  add(mix.compound, 'Compound');
+  add(mix.pluvial,  'Pluvial');
+  add(mix.fluvial,  'Fluvial');
+  add(mix.wind,     'Wind');
+  return parts.join(' · ') || 'No flood damage';
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Emergency Manager helpers (CAT_TEAM_PLAN §4c E1, E2, E3)
 //

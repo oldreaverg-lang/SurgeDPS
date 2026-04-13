@@ -360,15 +360,213 @@ def load_cell(col: int, row: int) -> dict:
             speed_kt=storm.speed_kt,
         )
 
-    # 2. Flood polygons
-    _progress.update(step='Building flood map', step_num=2)
+    # 2. Rainfall raster (parametric, always available) + optional HAND fluvial
+    _progress.update(step='Generating rainfall model', step_num=2)
+    rainfall_raster_path = os.path.join(sdir, f'cell_{col}_{row}_rainfall.tif')
+    compound_raster_path = os.path.join(sdir, f'cell_{col}_{row}_compound.tif')
+    _rainfall_raster_available = False
+
+    # 2a-pre. NLCD impervious surface → runoff coefficient
+    #   Fetch the NLCD 2021 impervious surface fraction for this cell and
+    #   use it to calibrate the rainfall runoff coefficient before running
+    #   the parametric rainfall model.  Falls back to 0.45 if unavailable.
+    _nlcd_runoff_coeff = 0.45  # default: mixed coastal landscape
+    try:
+        from rainfall.nlcd_fetcher import fetch_nlcd_for_cell
+        from persistent_paths import NWM_CACHE_DIR
+        _nlcd = fetch_nlcd_for_cell(
+            lon_min=lon_min, lat_min=lat_min,
+            lon_max=lon_max, lat_max=lat_max,
+            cache_dir=str(NWM_CACHE_DIR),
+            storm_id=storm.storm_id,
+            col=col, row=row,
+        )
+        if _nlcd is not None:
+            _nlcd_runoff_coeff = _nlcd.runoff_coefficient
+            print(f"  [NLCD] Cell ({col},{row}): {_nlcd.mean_impervious_pct:.1f}% "
+                  f"impervious → runoff C={_nlcd_runoff_coeff:.2f}")
+    except Exception as _nlcd_err:
+        print(f"  [NLCD] Impervious fetch skipped (non-fatal): {_nlcd_err}")
+
+    if not os.path.exists(rainfall_raster_path):
+        try:
+            from flood_model.rainfall import estimate_rainfall_flooding
+            rain_result = estimate_rainfall_flooding(
+                center_lat=storm.landfall_lat,
+                center_lon=storm.landfall_lon,
+                max_wind_kt=storm.max_wind_kt,
+                storm_speed_kt=storm.speed_kt,
+                rmax_nm=getattr(storm, 'rmax_nm', 20.0),
+                heading_deg=storm.heading_deg,
+                output_dir=sdir,
+                storm_id=f'cell_{col}_{row}_{storm.storm_id}',
+                # Clip to cell extent
+                extent_km=max(
+                    abs(lon_max - storm.landfall_lon) * 111,
+                    abs(lat_max - storm.landfall_lat) * 111,
+                ) + 20,
+                runoff_coefficient=_nlcd_runoff_coeff,
+            )
+            # The rainfall module writes to its own path; symlink to our expected name
+            if os.path.exists(rain_result.depth_raster_path):
+                import shutil as _shutil
+                _shutil.copy2(rain_result.depth_raster_path, rainfall_raster_path)
+                os.remove(rain_result.depth_raster_path)
+                os.remove(rain_result.total_precip_path)
+                _rainfall_raster_available = True
+        except Exception as _rain_err:
+            print(f"  [rainfall] Parametric raster failed (non-fatal): {_rain_err}")
+    else:
+        _rainfall_raster_available = True
+
+    # 2a-post. Atlas 14 return-period classification
+    #   After computing max_precip from the Lonfat model, classify the storm's
+    #   rainfall magnitude against NOAA PFDS frequency data so the CAT report
+    #   can say e.g. "~500-year rainfall event".
+    _rain_return_period_label = "unknown"
+    try:
+        from rainfall.atlas14_fetcher import get_return_period_for_storm
+        from persistent_paths import ATLAS14_DIR
+        _atlas14_cache = str(ATLAS14_DIR)
+        # Estimate peak precip for classification (use Lonfat model if rain_result available)
+        _peak_precip_mm = 0.0
+        if '_rainfall_raster_available' and '_rain_result_ref' in dir():
+            pass  # Would use rain_result.max_precip_mm if captured
+        else:
+            # Estimate from parametric model parameters directly
+            from flood_model.rainfall import (
+                estimate_rain_rate_mm_hr, estimate_storm_duration_hr,
+                estimate_total_precip_mm
+            )
+            _r = estimate_rain_rate_mm_hr(50.0, storm.max_wind_kt, storm.speed_kt, "right")
+            _dur = estimate_storm_duration_hr(storm.speed_kt)
+            _peak_precip_mm = estimate_total_precip_mm(_r, storm.speed_kt, _dur)
+
+        _rp = get_return_period_for_storm(
+            storm_lat=storm.landfall_lat,
+            storm_lon=storm.landfall_lon,
+            total_precip_mm=_peak_precip_mm,
+            storm_speed_kt=storm.speed_kt,
+            cache_dir=_atlas14_cache,
+        )
+        _rain_return_period_label = _rp.label
+        print(f"  [Atlas14] Return period: {_rain_return_period_label} "
+              f"(~{_peak_precip_mm:.0f} mm peak)")
+    except Exception as _a14_err:
+        print(f"  [Atlas14] Classification skipped (non-fatal): {_a14_err}")
+
+    # 2b. NWM streamflow + CFIM HAND fluvial inundation layer
+    #     ─────────────────────────────────────────────────────
+    #     Fetch gaged streamflow via AHPS gauges (NWPS API) → NLDI COMID lookup,
+    #     then run the HAND model on the downloaded NOAA OWP FIM rasters for each
+    #     HUC8 that overlaps the cell.  The resulting fluvial depth raster is merged
+    #     with surge and parametric rainfall into a 3-way compound raster used for
+    #     flood polygon display.  Failure here is fully non-fatal.
+    _fluvial_raster_path = os.path.join(sdir, f'cell_{col}_{row}_fluvial.tif')
+    _fluvial_available   = False
+
+    if not os.path.exists(_fluvial_raster_path):
+        try:
+            from persistent_paths import HAND_DIR, NWM_CACHE_DIR
+            from rainfall.nwm_http_fetcher import fetch_nwm_for_cell
+            from rainfall.cfim_fetcher    import get_hand_for_cell
+            from flood_model.hand_model   import run_hand_model
+
+            # Step 2b-i: NWM discharge (AHPS gauges → NLDI → discharge dict)
+            _nwm = fetch_nwm_for_cell(
+                lon_min=lon_min, lat_min=lat_min,
+                lon_max=lon_max, lat_max=lat_max,
+                landfall_lat=storm.landfall_lat,
+                landfall_lon=storm.landfall_lon,
+                nwm_cache_dir=str(NWM_CACHE_DIR),
+                storm_id=storm.storm_id,
+                col=col, row=row,
+                radius_deg=4.0,
+                min_flood_category='action',
+                cache_ttl_seconds=1800,
+            )
+            _discharge_dict = _nwm.as_discharge_dict() if _nwm else {}
+
+            if _discharge_dict:
+                # Step 2b-ii: CFIM HAND rasters (download HUC8 tiles, mosaic to cell)
+                _hand_files = get_hand_for_cell(
+                    lon_min=lon_min, lat_min=lat_min,
+                    lon_max=lon_max, lat_max=lat_max,
+                    hand_cache_dir=str(HAND_DIR),
+                    col=col, row=row,
+                    storm_id=storm.storm_id,
+                )
+
+                if _hand_files is not None:
+                    # Step 2b-iii: HAND inundation model
+                    _hand_result = run_hand_model(
+                        hand_path=_hand_files.hand_path,
+                        catchment_path=_hand_files.catchment_path,
+                        discharge_data=_discharge_dict,
+                        output_dir=sdir,
+                        storm_id=storm.storm_id,
+                    )
+                    if _hand_result.max_depth_m > 0:
+                        import shutil as _shutil
+                        _shutil.copy2(_hand_result.depth_path, _fluvial_raster_path)
+                        _fluvial_available = True
+                        print(
+                            f"  [HAND] fluvial layer: max={_hand_result.max_depth_m:.2f}m, "
+                            f"reaches={_hand_result.reaches_flooded}, "
+                            f"huc8s={_hand_files.huc8s}"
+                        )
+                else:
+                    print(f"  [HAND] CFIM rasters not available for cell ({col},{row})")
+            else:
+                print(f"  [HAND] No NWM discharge data for cell ({col},{row})")
+
+        except Exception as _hand_err:
+            print(f"  [HAND] Fluvial layer failed (non-fatal): {_hand_err}")
+    else:
+        _fluvial_available = True
+
+    # Optional: merge surge + rainfall + fluvial into compound raster for flood polygon display
+    if not os.path.exists(compound_raster_path):
+        try:
+            from flood_model.compound import merge_compound_flood
+
+            # Choose the best available rainfall/fluvial source
+            # Priority: fluvial HAND > parametric rainfall > surge only
+            _rain_source = None
+            if _fluvial_available:
+                _rain_source = _fluvial_raster_path
+            elif _rainfall_raster_available:
+                _rain_source = rainfall_raster_path
+
+            if _rain_source:
+                comp = merge_compound_flood(
+                    surge_depth_path=raster_path,
+                    rainfall_depth_path=_rain_source,
+                    output_dir=sdir,
+                    storm_id=storm.storm_id,
+                    interaction_factor=0.5,
+                )
+                import shutil as _shutil
+                _shutil.copy2(comp.compound_depth_path, compound_raster_path)
+                for _p in (comp.compound_depth_path, comp.overlap_mask_path):
+                    if os.path.exists(_p) and _p != compound_raster_path:
+                        try:
+                            os.remove(_p)
+                        except OSError:
+                            pass
+        except Exception as _comp_err:
+            print(f"  [compound] Merge failed (non-fatal): {_comp_err}")
+
+    # 3. Flood polygons — use compound raster when available, fall back to surge
+    _progress.update(step='Building flood map', step_num=3)
+    flood_source = compound_raster_path if os.path.exists(compound_raster_path) else raster_path
     if not os.path.exists(flood_path):
-        raster_to_geojson(raster_path, flood_path)
+        raster_to_geojson(flood_source, flood_path)
     with open(flood_path) as f:
         flood_data = json.load(f)
 
-    # 3. Fetch real OSM buildings
-    _progress.update(step='Fetching building footprints', step_num=3)
+    # 4. Fetch real OSM/NSI buildings
+    _progress.update(step='Fetching building footprints', step_num=4)
     buildings_path = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
     fetch_buildings(lon_min, lat_min, lon_max, lat_max, buildings_path, cache=True)
 
@@ -381,27 +579,45 @@ def load_cell(col: int, row: int) -> dict:
         with open(damage_path, 'w') as f:
             json.dump(empty, f)
         _update_building_index(storm.storm_id, col, row, 0)
-        _progress.update(step='Complete', step_num=4)
+        _progress.update(step='Complete', step_num=5)
         return {"buildings": empty, "flood": flood_data}
 
-    # 4. Run HAZUS damage model (with IBTrACS wind field when available)
-    _progress.update(step='Running damage model', step_num=4)
+    # 5. Run HAZUS damage model (surge raster + wind field + parametric rainfall)
+    #    Note: the damage model computes per-building rainfall depth internally
+    #    via estimate_rainfall_at_point; the compound raster is used for flood
+    #    polygon display but the per-building depth is the more accurate per-point query.
+    _progress.update(step='Running damage model', step_num=5)
     estimate_damage_from_raster(
         raster_path, buildings_path, damage_path,
         storm_id=storm.storm_id,
         landfall_lat=storm.landfall_lat,
         landfall_lon=storm.landfall_lon,
+        max_wind_kt=storm.max_wind_kt,
+        storm_speed_kt=storm.speed_kt,
+        storm_heading_deg=storm.heading_deg,
     )
 
     with open(damage_path) as f:
         damage_data = json.load(f)
 
-    # 5. Record building count in lightweight index (instant confidence lookups).
+    # Inject cell-level metadata into the FeatureCollection root so CAT reports
+    # can display rainfall return period, impervious fraction, etc.
+    if isinstance(damage_data, dict):
+        damage_data.setdefault("metadata", {})
+        damage_data["metadata"].update({
+            "rain_return_period":   _rain_return_period_label,
+            "nlcd_runoff_coeff":    round(_nlcd_runoff_coeff, 3),
+            "fluvial_available":    _fluvial_available,
+        })
+
+    # 6. Record building count in lightweight index (instant confidence lookups).
     _update_building_index(storm.storm_id, col, row, n_buildings)
 
-    # 6. Clean up intermediate files to save volume space (matches warm_cache.py).
-    #    The API only needs damage.geojson + flood.geojson for cache hits.
-    for tmp in (raster_path, buildings_path):
+    # 7. Clean up intermediate files to save volume space.
+    #    Keep: damage.geojson, flood.geojson (required for cache hits)
+    #    Remove: surge depth.tif, rainfall.tif, compound.tif, buildings.json
+    for tmp in (raster_path, buildings_path, rainfall_raster_path,
+                compound_raster_path, _fluvial_raster_path):
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -778,6 +994,9 @@ class CellHandler(BaseHTTPRequestHandler):
                     storm_id=sim_storm.storm_id,
                     landfall_lat=sim_storm.landfall_lat,
                     landfall_lon=sim_storm.landfall_lon,
+                    max_wind_kt=sim_wind,
+                    storm_speed_kt=sim_speed,
+                    storm_heading_deg=sim_heading,
                 )
             else:
                 with open(damage_path, 'w') as f:
@@ -862,6 +1081,189 @@ class CellHandler(BaseHTTPRequestHandler):
                 loss = float(params.get('loss', ['0'])[0])
                 result = predict_loss_range(loss)
                 self._send_json(200, result)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/rainfall?storm_id=<id>&duration=72&pass=2 ──
+        # Returns MRMS QPE overlay GeoTIFF stats + bounding box for the active storm.
+        # Used by the frontend Rainfall (obs) map toggle.
+        if path == '/api/rainfall':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active')
+                return
+            try:
+                sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
+                from rainfall.mrms_fetcher import MRMSFetcher, storm_bbox_from_catalog_entry
+                duration_hr = int(params.get('duration', ['72'])[0])
+                pass_level  = int(params.get('pass',     ['2'])[0])
+                realtime    = params.get('realtime', ['0'])[0] == '1'
+                bbox = storm_bbox_from_catalog_entry(
+                    _active_storm.landfall_lat, _active_storm.landfall_lon, buffer_deg=4.0
+                )
+                mrms_cache = os.path.join(PERSISTENT_DIR, 'mrms')
+                os.makedirs(mrms_cache, exist_ok=True)
+                fetcher = MRMSFetcher(cache_dir=mrms_cache, keep_raw_grib=False)
+                result = fetcher.fetch_storm_accumulation(
+                    storm_bbox=bbox,
+                    duration_hr=duration_hr,
+                    pass_level=pass_level,
+                    realtime=realtime,
+                )
+                if result is None:
+                    self._send_json(200, {'available': False, 'storm_id': _active_storm.storm_id})
+                    return
+                self._send_json(200, {
+                    'available': True,
+                    'storm_id': _active_storm.storm_id,
+                    'product': result.product,
+                    'valid_time': result.valid_time.isoformat() if result.valid_time else None,
+                    'duration_hr': result.duration_hr,
+                    'max_precip_mm': round(result.max_precip_mm, 1),
+                    'avg_precip_mm': round(result.avg_precip_mm, 1),
+                    'max_precip_in': round(result.max_precip_mm / 25.4, 2),
+                    'bbox': list(result.bbox),
+                    'tif_path': result.clipped_tif_path,
+                    'source': result.source,
+                })
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/qpf ──
+        # Returns WPC 72-hour Quantitative Precipitation Forecast stats for the
+        # active storm area as a planning overlay.
+        #
+        # IMPORTANT: WPC QPF is a DETERMINISTIC forecast best suited for
+        # fast-moving extratropical and post-tropical systems.  For slow-moving
+        # tropical cyclones (≤ 5 kt forward speed), the WPC QPF systematically
+        # underestimates total accumulation because it uses a synoptic-scale
+        # NWP model that doesn't capture TC stall dynamics well.  The API
+        # response includes a `caveat` field indicating model reliability.
+        #
+        # The QPF raster is NOT used as a model input — it is served as a
+        # read-only planning overlay for the frontend map panel.
+        if path == '/api/qpf':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active')
+                return
+            try:
+                sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
+                from data_ingest.noaa_fetchers import QPFFetcher
+                from data_ingest.config import IngestConfig
+                import time as _time_qpf
+
+                qpf_cache = os.path.join(PERSISTENT_DIR, 'qpf')
+                os.makedirs(qpf_cache, exist_ok=True)
+                cache_meta = os.path.join(qpf_cache, 'latest_meta.json')
+
+                # Return cached result if fresh (< 6 hours for WPC QPF)
+                if os.path.exists(cache_meta):
+                    try:
+                        with open(cache_meta) as _f:
+                            _cached = json.load(_f)
+                        age_hr = (_time_qpf.time() - _cached.get('fetched_at', 0)) / 3600
+                        if age_hr < 6 and _cached.get('storm_id') == _active_storm.storm_id:
+                            self._send_json(200, _cached)
+                            return
+                    except Exception:
+                        pass
+
+                config = IngestConfig()
+                fetcher = QPFFetcher(config)
+
+                # Build a simple storm polygon from landfall + 4° buffer
+                _clat = _active_storm.landfall_lat
+                _clon = _active_storm.landfall_lon
+                storm_geom = {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [_clon - 4, _clat - 4], [_clon + 4, _clat - 4],
+                        [_clon + 4, _clat + 4], [_clon - 4, _clat + 4],
+                        [_clon - 4, _clat - 4],
+                    ]],
+                }
+
+                qpf_result = fetcher.fetch(storm_geom, qpf_cache, duration_hours=72)
+
+                # Determine reliability caveat based on storm forward speed.
+                # Thresholds: <5 kt = nearly stationary (low), ≤10 kt = slow-
+                # moving tropical (medium), >10 kt = fast-moving (high).
+                # Use ≤10 (not <10) so that Harvey-class storms (catalog 10 kt)
+                # correctly land in "medium" rather than "high" — at 10 kt a TC
+                # is still within NHC's "slow-moving" definition and WPC QPF
+                # is known to underestimate rainfall for such storms.
+                _spd = getattr(_active_storm, 'speed_kt', 10.0) or 10.0
+                if _spd < 5:
+                    caveat = ("WPC QPF unreliable for nearly-stationary storms — "
+                              "use MRMS observed QPE instead")
+                    reliability = "low"
+                elif _spd <= 10:
+                    caveat = ("WPC QPF may underestimate totals for slow-moving "
+                              "tropical systems (≤10 kt) — verify against MRMS QPE")
+                    reliability = "medium"
+                else:
+                    caveat = "WPC QPF reliable for fast-moving post-tropical/extratropical systems"
+                    reliability = "high"
+
+                _meta = {
+                    'available': qpf_result is not None,
+                    'storm_id': _active_storm.storm_id,
+                    'storm_speed_kt': round(_spd, 1),
+                    'reliability': reliability,
+                    'caveat': caveat,
+                    'fetched_at': _time_qpf.time(),
+                }
+                if qpf_result is not None:
+                    _meta.update({
+                        'duration_hr': 72,
+                        'max_precip_mm': round(getattr(qpf_result, 'total_precip_mm', 0), 1),
+                        'max_precip_in': round(getattr(qpf_result, 'total_precip_mm', 0) / 25.4, 2),
+                        'tif_path': getattr(qpf_result, 'path', None),
+                        'source': 'wpc_qpf_72hr',
+                    })
+
+                # Cache the response
+                try:
+                    with open(cache_meta, 'w') as _f:
+                        _out = {k: v for k, v in _meta.items() if k != 'fetched_at'}
+                        json.dump({**_out, 'fetched_at': _meta['fetched_at']}, _f)
+                except Exception:
+                    pass
+
+                self._send_json(200, _meta)
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/gauges?lat=N&lon=N&radius=4 ──
+        # Returns active flood gauges near the storm as GeoJSON.
+        # Used by the frontend Flood Warnings map toggle.
+        if path == '/api/gauges':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active')
+                return
+            try:
+                from rainfall.ahps_gauges import AHPSClient
+                radius  = float(params.get('radius', ['4.0'])[0])
+                min_cat = params.get('category', ['action'])[0]
+                client = AHPSClient(cache_ttl_seconds=300)
+                gauges = client.get_gauges_for_storm(
+                    landfall_lat=_active_storm.landfall_lat,
+                    landfall_lon=_active_storm.landfall_lon,
+                    radius_deg=radius,
+                    min_flood_category=min_cat,
+                )
+                geojson = client.to_geojson(gauges)
+                body = json.dumps({
+                    'storm_id': _active_storm.storm_id,
+                    'gauge_count': len(gauges),
+                    'at_or_above_major': sum(1 for g in gauges if g.flood_category == 'major'),
+                    'at_or_above_moderate': sum(1 for g in gauges if g.flood_category in ('moderate', 'major')),
+                    'at_or_above_minor': sum(1 for g in gauges if g.flood_category in ('minor', 'moderate', 'major')),
+                    'gauges': geojson,
+                }).encode()
+                self._send_raw(200, body)
             except Exception as e:
                 self._send_error(500, str(e))
             return

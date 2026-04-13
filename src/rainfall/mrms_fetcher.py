@@ -1,0 +1,599 @@
+"""
+MRMS QPE Fetcher
+================
+Fetches NOAA Multi-Radar Multi-Sensor Quantitative Precipitation Estimate data
+for a storm's footprint.
+
+Two access paths:
+  REAL-TIME (active storm, last ~2 days):
+    NCEP NOMADS — https://mrms.ncep.noaa.gov/data/2D/
+    ~2-minute delivery lag from radar scan. Use Pass1 (radar-only) for speed,
+    Pass2 (gauge-adjusted) for accuracy once gauges report.
+
+  HISTORICAL (post-event validation):
+    AWS S3 open data — s3://noaa-mrms-pds/CONUS/
+    No auth required. Available from 2020-10 onward.
+    Naming: MRMS_MultiSensor_QPE_{DUR}H_{PASS}_00.00_{YYYYMMDD}-{HHMMSS}.grib2.gz
+
+Products used:
+  MultiSensor_QPE_01H_Pass1   — 1-hour accumulation, radar-only, real-time
+  MultiSensor_QPE_24H_Pass2   — 24-hour accumulation, gauge-adjusted (best accuracy)
+  MultiSensor_QPE_72H_Pass2   — 72-hour accumulation (Harvey / Florence type events)
+
+Grid: 0.01° × 0.01° (~1 km), CONUS. GRIB2 format (gzip-compressed).
+Parser: cfgrib + xarray. Falls back to wgrib2 CLI if cfgrib not installed.
+
+Usage:
+    from rainfall.mrms_fetcher import MRMSFetcher
+    fetcher = MRMSFetcher(cache_dir="/path/to/cache")
+
+    # Real-time (last 6 hours):
+    result = fetcher.fetch_storm_accumulation(
+        storm_bbox=(-98.0, 27.0, -94.0, 31.0),
+        duration_hr=72,
+        pass_level=2,
+        realtime=True,
+    )
+    print(result.max_precip_mm, result.clipped_tif_path)
+
+    # Historical (Harvey):
+    result = fetcher.fetch_historical(
+        storm_bbox=(-98.0, 27.0, -94.0, 31.0),
+        start_date="2017-08-25",
+        end_date="2017-09-01",
+        duration_hr=72,
+    )
+"""
+
+from __future__ import annotations
+
+import gzip
+import hashlib
+import logging
+import os
+import shutil
+import tempfile
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# ── S3 open-data base (no auth, no rate limit) ──────────────────────────────
+_S3_BASE = "https://noaa-mrms-pds.s3.amazonaws.com/CONUS"
+
+# ── NCEP NOMADS real-time (last ~2 days) ────────────────────────────────────
+_NCEP_BASE = "https://mrms.ncep.noaa.gov/data/2D"
+
+# Product path templates
+_PRODUCT_PATHS = {
+    (1,  1): "MultiSensor_QPE_01H_Pass1_00.00",
+    (1,  2): "MultiSensor_QPE_01H_Pass2_00.00",
+    (24, 1): "MultiSensor_QPE_24H_Pass1_00.00",
+    (24, 2): "MultiSensor_QPE_24H_Pass2_00.00",
+    (48, 2): "MultiSensor_QPE_48H_Pass2_00.00",
+    (72, 2): "MultiSensor_QPE_72H_Pass2_00.00",
+}
+
+
+@dataclass
+class MRMSResult:
+    """Output of an MRMS QPE fetch operation."""
+    clipped_tif_path: str          # Storm-footprint GeoTIFF (mm precip)
+    raw_grib_path: Optional[str]   # Full CONUS GRIB2 (may be deleted after clip)
+    max_precip_mm: float
+    avg_precip_mm: float
+    product: str                   # e.g. "MultiSensor_QPE_72H_Pass2_00.00"
+    valid_time: datetime           # Timestamp of the accumulation end
+    duration_hr: int
+    bbox: Tuple[float, float, float, float]  # (lon_min, lat_min, lon_max, lat_max)
+    crs: str = "EPSG:4326"
+    source: str = "mrms_s3"        # "mrms_s3" | "mrms_ncep"
+
+
+class MRMSFetcher:
+    """
+    Fetch and clip MRMS QPE GRIB2 files to a storm bounding box.
+
+    Args:
+        cache_dir: Directory for caching downloaded GRIB2 and clipped GeoTIFFs.
+        keep_raw_grib: If False (default), delete the full CONUS GRIB2 after
+                       clipping to save disk space (~3-8 MB per file).
+        request_timeout: HTTP timeout in seconds.
+    """
+
+    def __init__(
+        self,
+        cache_dir: str = "/tmp/mrms_cache",
+        keep_raw_grib: bool = False,
+        request_timeout: int = 30,
+    ):
+        self.cache_dir = cache_dir
+        self.keep_raw_grib = keep_raw_grib
+        self.timeout = request_timeout
+        os.makedirs(cache_dir, exist_ok=True)
+
+    # ── Public interface ─────────────────────────────────────────────────────
+
+    def fetch_storm_accumulation(
+        self,
+        storm_bbox: Tuple[float, float, float, float],
+        duration_hr: int = 72,
+        pass_level: int = 2,
+        realtime: bool = True,
+        valid_time: Optional[datetime] = None,
+    ) -> Optional[MRMSResult]:
+        """
+        Fetch the MRMS QPE accumulation product covering the storm bbox.
+
+        For real-time use (active storm): fetches the most recent available file.
+        For historical use: fetches the file matching valid_time.
+
+        Args:
+            storm_bbox: (lon_min, lat_min, lon_max, lat_max)
+            duration_hr: Accumulation window — 1, 24, 48, or 72 hours.
+            pass_level: 1 = radar-only (faster), 2 = gauge-adjusted (more accurate).
+            realtime: True → NCEP NOMADS (last 2 days); False → S3 (historical).
+            valid_time: For historical fetch, the accumulation end timestamp (UTC).
+                        If None and realtime=False, uses the most recent available.
+
+        Returns:
+            MRMSResult, or None if no data is available.
+        """
+        product_key = (duration_hr, pass_level)
+        if product_key not in _PRODUCT_PATHS:
+            available = sorted(_PRODUCT_PATHS.keys())
+            raise ValueError(
+                f"Unsupported (duration_hr={duration_hr}, pass={pass_level}). "
+                f"Available: {available}"
+            )
+
+        product_name = _PRODUCT_PATHS[product_key]
+
+        if realtime:
+            return self._fetch_ncep(product_name, storm_bbox, duration_hr)
+        else:
+            return self._fetch_s3(
+                product_name, storm_bbox, duration_hr, valid_time
+            )
+
+    def fetch_historical(
+        self,
+        storm_bbox: Tuple[float, float, float, float],
+        start_date: str,
+        end_date: str,
+        duration_hr: int = 72,
+    ) -> Optional[MRMSResult]:
+        """
+        Fetch the peak-accumulation MRMS QPE file within a date range.
+
+        Selects the 72H Pass2 file at the midpoint of the storm window
+        (or the end of it, which captures the full accumulation).
+
+        Args:
+            storm_bbox: (lon_min, lat_min, lon_max, lat_max)
+            start_date: "YYYY-MM-DD"
+            end_date:   "YYYY-MM-DD"
+            duration_hr: Accumulation period (72 recommended for multi-day storms).
+
+        Returns:
+            MRMSResult with the highest accumulation file in the window, or None.
+        """
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(
+            hour=12, tzinfo=timezone.utc
+        )
+        return self._fetch_s3(
+            _PRODUCT_PATHS[(duration_hr, 2)],
+            storm_bbox,
+            duration_hr,
+            valid_time=end_dt,
+        )
+
+    def list_available_dates(
+        self,
+        duration_hr: int = 24,
+        pass_level: int = 2,
+    ) -> List[str]:
+        """
+        List dates available in the S3 bucket for a given product.
+        Returns sorted list of "YYYYMMDD" strings.
+        """
+        product_name = _PRODUCT_PATHS.get((duration_hr, pass_level))
+        if not product_name:
+            return []
+        url = f"{_S3_BASE}/{product_name}/?list-type=2&delimiter=/"
+        try:
+            import re
+            with urllib.request.urlopen(url, timeout=self.timeout) as resp:
+                content = resp.read().decode()
+            prefix = f"CONUS/{product_name}/"
+            dates = re.findall(
+                r'<Prefix>' + re.escape(prefix) + r'(\d{8})/', content
+            )
+            return sorted(dates)
+        except Exception as exc:
+            logger.warning("Failed to list MRMS dates: %s", exc)
+            return []
+
+    # ── Internal: NCEP NOMADS (real-time) ────────────────────────────────────
+
+    def _fetch_ncep(
+        self,
+        product_name: str,
+        storm_bbox: Tuple[float, float, float, float],
+        duration_hr: int,
+    ) -> Optional[MRMSResult]:
+        """Fetch most recent file from NCEP NOMADS."""
+        base_url = f"{_NCEP_BASE}/{product_name}/"
+
+        # Get directory listing to find latest file
+        try:
+            with urllib.request.urlopen(base_url, timeout=self.timeout) as resp:
+                html = resp.read().decode()
+        except Exception as exc:
+            logger.warning("NCEP NOMADS unreachable (%s), trying S3 fallback", exc)
+            return self._fetch_s3(product_name, storm_bbox, duration_hr, valid_time=None)
+
+        # Parse filenames from HTML directory listing
+        import re
+        fnames = re.findall(
+            r'(MRMS_' + re.escape(product_name) + r'_\d{8}-\d{6}\.grib2\.gz)',
+            html,
+        )
+        if not fnames:
+            logger.warning("No MRMS files found at NCEP for %s", product_name)
+            return None
+
+        latest_fname = sorted(fnames)[-1]
+        url = f"{base_url}{latest_fname}"
+        valid_time = self._parse_timestamp(latest_fname)
+
+        return self._download_and_clip(
+            url=url,
+            fname=latest_fname,
+            product_name=product_name,
+            storm_bbox=storm_bbox,
+            duration_hr=duration_hr,
+            valid_time=valid_time,
+            source="mrms_ncep",
+        )
+
+    # ── Internal: S3 open data (historical) ──────────────────────────────────
+
+    def _fetch_s3(
+        self,
+        product_name: str,
+        storm_bbox: Tuple[float, float, float, float],
+        duration_hr: int,
+        valid_time: Optional[datetime] = None,
+    ) -> Optional[MRMSResult]:
+        """Fetch from S3. Picks the file closest to valid_time (or most recent)."""
+        if valid_time is None:
+            valid_time = datetime.now(tz=timezone.utc)
+
+        date_str = valid_time.strftime("%Y%m%d")
+        prefix = f"CONUS/{product_name}/{date_str}/"
+        list_url = (
+            f"{_S3_BASE.replace('https://noaa-mrms-pds.s3.amazonaws.com/CONUS', 'https://noaa-mrms-pds.s3.amazonaws.com')}"
+            f"?list-type=2&prefix={prefix}&max-keys=50"
+        )
+
+        try:
+            import re
+            with urllib.request.urlopen(list_url, timeout=self.timeout) as resp:
+                content = resp.read().decode()
+            keys = re.findall(r'<Key>(CONUS/' + re.escape(product_name) + r'/\d{8}/[^<]+\.grib2\.gz)</Key>', content)
+        except Exception as exc:
+            logger.warning("S3 listing failed for %s/%s: %s", product_name, date_str, exc)
+            return None
+
+        if not keys:
+            logger.warning("No MRMS files on S3 for %s on %s", product_name, date_str)
+            return None
+
+        # Pick the file whose timestamp is closest to valid_time
+        target_hour = valid_time.hour
+        best_key = None
+        best_delta = float("inf")
+        for key in keys:
+            fname = os.path.basename(key)
+            ts = self._parse_timestamp(fname)
+            if ts is None:
+                continue
+            delta = abs((ts - valid_time).total_seconds())
+            if delta < best_delta:
+                best_delta = delta
+                best_key = key
+                best_ts = ts
+
+        if best_key is None:
+            return None
+
+        fname = os.path.basename(best_key)
+        url = f"https://noaa-mrms-pds.s3.amazonaws.com/{best_key}"
+        return self._download_and_clip(
+            url=url,
+            fname=fname,
+            product_name=product_name,
+            storm_bbox=storm_bbox,
+            duration_hr=duration_hr,
+            valid_time=best_ts,
+            source="mrms_s3",
+        )
+
+    # ── Internal: Download + clip ─────────────────────────────────────────────
+
+    def _download_and_clip(
+        self,
+        url: str,
+        fname: str,
+        product_name: str,
+        storm_bbox: Tuple[float, float, float, float],
+        duration_hr: int,
+        valid_time: Optional[datetime],
+        source: str,
+    ) -> Optional[MRMSResult]:
+        """Download a GRIB2 file, clip to storm_bbox, write GeoTIFF, return result."""
+        # Cache key = hash of (url, bbox) so different storm windows get separate clips
+        bbox_str = "_".join(f"{v:.3f}" for v in storm_bbox)
+        cache_key = hashlib.md5(f"{url}|{bbox_str}".encode()).hexdigest()[:12]
+        clipped_tif = os.path.join(self.cache_dir, f"mrms_{cache_key}.tif")
+
+        if os.path.exists(clipped_tif):
+            logger.info("MRMS cache hit: %s", clipped_tif)
+            return self._result_from_tif(
+                clipped_tif, product_name, valid_time, duration_hr, storm_bbox, source
+            )
+
+        # Download
+        gz_path = os.path.join(self.cache_dir, fname)
+        grib_path = gz_path.replace(".gz", "")
+
+        if not os.path.exists(grib_path):
+            logger.info("Downloading MRMS: %s", url)
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "SurgeDPS/1.0 (surgedps.com)"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    with open(gz_path, "wb") as f:
+                        shutil.copyfileobj(resp, f)
+                # Decompress
+                with gzip.open(gz_path, "rb") as gz_in:
+                    with open(grib_path, "wb") as f_out:
+                        shutil.copyfileobj(gz_in, f_out)
+                os.remove(gz_path)
+            except Exception as exc:
+                logger.error("MRMS download failed: %s", exc)
+                for p in (gz_path, grib_path):
+                    if os.path.exists(p):
+                        os.remove(p)
+                return None
+
+        # Parse GRIB2 and clip to bbox
+        clipped = self._grib_to_clipped_tif(grib_path, storm_bbox, clipped_tif)
+
+        if not self.keep_raw_grib and os.path.exists(grib_path):
+            os.remove(grib_path)
+
+        if not clipped:
+            return None
+
+        return self._result_from_tif(
+            clipped_tif, product_name, valid_time, duration_hr, storm_bbox, source
+        )
+
+    def _grib_to_clipped_tif(
+        self,
+        grib_path: str,
+        bbox: Tuple[float, float, float, float],
+        out_tif: str,
+    ) -> bool:
+        """Convert GRIB2 → clipped GeoTIFF using cfgrib + rasterio."""
+        lon_min, lat_min, lon_max, lat_max = bbox
+
+        # cfgrib path (preferred)
+        try:
+            import xarray as xr
+            import numpy as np
+            import rasterio
+            from rasterio.transform import from_bounds
+
+            ds = xr.open_dataset(grib_path, engine="cfgrib", indexpath="")
+            # Field is named 'tp' (total precipitation, mm)
+            if "tp" in ds:
+                da = ds["tp"]
+            elif "unknown" in ds:
+                da = ds["unknown"]
+            else:
+                da = list(ds.data_vars.values())[0]
+
+            # MRMS uses 0–360 longitude convention on some products
+            if float(da.longitude.max()) > 180:
+                da = da.assign_coords(
+                    longitude=(da.longitude + 180) % 360 - 180
+                ).sortby("longitude")
+
+            # Clip to bbox
+            da_clip = da.sel(
+                latitude=slice(lat_max, lat_min),
+                longitude=slice(lon_min, lon_max),
+            )
+            data = da_clip.values.astype("float32")
+            data[data < 0] = 0  # MRMS nodata is -999; zero out
+            lats = da_clip.latitude.values
+            lons = da_clip.longitude.values
+
+            n_rows, n_cols = data.shape
+            transform = from_bounds(
+                float(lons.min()), float(lats.min()),
+                float(lons.max()), float(lats.max()),
+                n_cols, n_rows,
+            )
+
+            with rasterio.open(
+                out_tif, "w",
+                driver="GTiff", dtype="float32", count=1,
+                width=n_cols, height=n_rows,
+                crs="EPSG:4326", transform=transform,
+                nodata=-9999,
+                compress="deflate", predictor=3,
+            ) as dst:
+                dst.write(data, 1)
+                dst.update_tags(
+                    source="MRMS_QPE",
+                    product=os.path.basename(grib_path),
+                    units="mm",
+                )
+            ds.close()
+            return True
+
+        except ImportError:
+            logger.warning("cfgrib/xarray not installed; trying wgrib2 CLI")
+        except Exception as exc:
+            logger.warning("cfgrib parse failed: %s — trying wgrib2", exc)
+
+        # wgrib2 fallback (CLI tool)
+        try:
+            import subprocess
+            import numpy as np
+            import rasterio
+            from rasterio.transform import from_bounds
+
+            csv_path = grib_path + ".csv"
+            cmd = [
+                "wgrib2", grib_path,
+                "-latlon",
+                f"{lon_min}:{int((lon_max-lon_min)/0.01)}:0.01",
+                f"{lat_min}:{int((lat_max-lat_min)/0.01)}:0.01",
+                "-csv", csv_path,
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+
+            lons_u, lats_u, vals = [], [], []
+            with open(csv_path) as f:
+                next(f)  # header
+                for line in f:
+                    _, _, lat, lon, val = line.strip().split(",")
+                    lats_u.append(float(lat))
+                    lons_u.append(float(lon))
+                    vals.append(max(0.0, float(val)))
+
+            import numpy as np
+            lats_arr = np.unique(sorted(set(lats_u), reverse=True))
+            lons_arr = np.unique(sorted(set(lons_u)))
+            data = np.full((len(lats_arr), len(lons_arr)), -9999, dtype=np.float32)
+            lat_idx = {v: i for i, v in enumerate(lats_arr)}
+            lon_idx = {v: i for i, v in enumerate(lons_arr)}
+            for lat, lon, val in zip(lats_u, lons_u, vals):
+                r, c = lat_idx.get(lat), lon_idx.get(lon)
+                if r is not None and c is not None:
+                    data[r, c] = val
+
+            transform = from_bounds(
+                float(lons_arr.min()), float(lats_arr.min()),
+                float(lons_arr.max()), float(lats_arr.max()),
+                len(lons_arr), len(lats_arr),
+            )
+            with rasterio.open(
+                out_tif, "w",
+                driver="GTiff", dtype="float32", count=1,
+                width=len(lons_arr), height=len(lats_arr),
+                crs="EPSG:4326", transform=transform,
+                nodata=-9999,
+                compress="deflate", predictor=3,
+            ) as dst:
+                dst.write(data, 1)
+            os.remove(csv_path)
+            return True
+        except Exception as exc:
+            logger.error("wgrib2 fallback failed: %s", exc)
+            return False
+
+    def _result_from_tif(
+        self,
+        tif_path: str,
+        product_name: str,
+        valid_time: Optional[datetime],
+        duration_hr: int,
+        bbox: Tuple[float, float, float, float],
+        source: str,
+    ) -> MRMSResult:
+        """Read stats from a clipped GeoTIFF and build MRMSResult."""
+        try:
+            import rasterio
+            import numpy as np
+            with rasterio.open(tif_path) as src:
+                data = src.read(1)
+                nodata = src.nodata or -9999
+            valid = data[data != nodata]
+            valid = valid[valid >= 0]
+            max_mm = float(np.nanmax(valid)) if len(valid) else 0.0
+            avg_mm = float(np.nanmean(valid)) if len(valid) else 0.0
+        except Exception:
+            max_mm, avg_mm = 0.0, 0.0
+
+        return MRMSResult(
+            clipped_tif_path=tif_path,
+            raw_grib_path=None,
+            max_precip_mm=max_mm,
+            avg_precip_mm=avg_mm,
+            product=product_name,
+            valid_time=valid_time or datetime.now(tz=timezone.utc),
+            duration_hr=duration_hr,
+            bbox=bbox,
+            source=source,
+        )
+
+    @staticmethod
+    def _parse_timestamp(fname: str) -> Optional[datetime]:
+        """Extract datetime from MRMS filename like ...20250101-120000.grib2.gz"""
+        import re
+        m = re.search(r'(\d{8})-(\d{6})', fname)
+        if not m:
+            return None
+        try:
+            return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            return None
+
+
+# ── Convenience helpers ──────────────────────────────────────────────────────
+
+def point_precip_mm(tif_path: str, lat: float, lon: float) -> Optional[float]:
+    """
+    Sample MRMS QPE accumulation (mm) at a single lat/lon point.
+    Returns None if outside the raster or data invalid.
+    """
+    try:
+        import rasterio
+        with rasterio.open(tif_path) as src:
+            row, col = src.index(lon, lat)
+            data = src.read(1)
+            nodata = src.nodata or -9999
+            val = float(data[row, col])
+            if val == nodata or val < 0:
+                return None
+            return val
+    except Exception:
+        return None
+
+
+def storm_bbox_from_catalog_entry(
+    landfall_lat: float,
+    landfall_lon: float,
+    buffer_deg: float = 4.0,
+) -> Tuple[float, float, float, float]:
+    """
+    Build a bounding box around a storm landfall point.
+    Default buffer 4° (≈ 440 km) captures most TC rain fields.
+    """
+    return (
+        landfall_lon - buffer_deg,
+        landfall_lat - buffer_deg,
+        landfall_lon + buffer_deg,
+        landfall_lat + buffer_deg,
+    )

@@ -13,6 +13,19 @@
 // has <20 counties, so the O(B·C·V) loop is fine in practice.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// counties-coastal.json has STATE as a 2-digit FIPS string (e.g. "48" for Texas).
+// Map to the two-letter postal abbreviation for human-readable sidebar labels.
+const FIPS_TO_ABBREV: Record<string, string> = {
+  '01':'AL','02':'AK','04':'AZ','05':'AR','06':'CA','08':'CO','09':'CT',
+  '10':'DE','11':'DC','12':'FL','13':'GA','15':'HI','16':'ID','17':'IL',
+  '18':'IN','19':'IA','20':'KS','21':'KY','22':'LA','23':'ME','24':'MD',
+  '25':'MA','26':'MI','27':'MN','28':'MS','29':'MO','30':'MT','31':'NE',
+  '32':'NV','33':'NH','34':'NJ','35':'NM','36':'NY','37':'NC','38':'ND',
+  '39':'OH','40':'OK','41':'OR','42':'PA','44':'RI','45':'SC','46':'SD',
+  '47':'TN','48':'TX','49':'UT','50':'VT','51':'VA','53':'WA','54':'WV',
+  '55':'WI','56':'WY','72':'PR',
+};
+
 type Ring = [number, number][];
 
 // Ray-casting point-in-polygon. Works on a single ring.
@@ -78,6 +91,42 @@ function bboxOf(geom: any): [number, number, number, number] {
   return [minX, minY, maxX, maxY];
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// City entry shape — matches cities-coastal.json records
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export interface CityEntry {
+  name: string;
+  state: string;
+  county_geoid: string;
+  lat: number;
+  lon: number;
+  pop: number;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// City-level rollup — one row per city (or "Unincorporated"
+// area) within the loaded cells.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export interface CityRollup {
+  key: string;          // unique bucket key
+  name: string;         // city name, or "Unincorporated"
+  state: string;
+  countyGeoid: string;
+  countyName: string;   // parent county name
+  buildings: number;
+  loss: number;
+  severe: number;
+  major: number;
+  moderate: number;
+  minor: number;
+  criticalFacilities: number;
+  estDisplaced: number;
+  maxDepthFt: number;
+  centerLon: number;
+  centerLat: number;
+  pop: number;
+}
+
 export interface CountyRollup {
   geoid: string;
   name: string;
@@ -117,7 +166,7 @@ export function rollupByCounty(
     rollup: {
       geoid: f.properties?.GEOID || f.properties?.NAME || '?',
       name: f.properties?.NAME || 'Unknown',
-      state: f.properties?.STUSAB || '',
+      state: FIPS_TO_ABBREV[f.properties?.STATE || ''] || f.properties?.STATE || '',
       buildings: 0,
       loss: 0,
       severe: 0,
@@ -226,6 +275,192 @@ export function rollupToCentroidGeoJSON(rows: CountyRollup[]): any {
         estDisplaced: r.estDisplaced,
         worstCategory: worst,
         label: `${safeName}  ${r.buildings.toLocaleString()}`,
+      },
+    };
+  });
+  return { type: 'FeatureCollection', features };
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// rollupByCity
+//
+// Groups buildings by the nearest city centroid within MAX_DIST_DEG
+// (≈12 km at Gulf-Coast latitudes). Buildings beyond that radius are
+// bucketed as "Unincorporated" and grouped by parent county GEOID so
+// rural clusters stay geographically distinct.
+//
+// Performance: uses a 0.5° lat/lon grid index so each building only
+// checks the ~20-30 city candidates in its local grid cell rather than
+// all 4,000+ cities in the dataset — O(B × ~25) instead of O(B × C).
+//
+// countyNameMap: GEOID → county name, built from the county rollup or
+// the counties GeoJSON properties so "Unincorporated" rows can carry a
+// recognisable parent name.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const MAX_DIST_DEG = 0.12;   // ≈12 km — keeps neighbouring cities distinct
+const MAX_DIST_SQ  = MAX_DIST_DEG * MAX_DIST_DEG;
+const GRID_SIZE    = 0.5;    // grid cell width/height in degrees
+
+export function rollupByCity(
+  buildings: any,
+  cities: CityEntry[],
+  countyNameMap: Record<string, string>,  // geoid → county name
+): CityRollup[] {
+  if (!buildings?.features?.length || !cities?.length) return [];
+
+  // ── Build spatial grid index ──────────────────────────────────────
+  const grid: Record<string, CityEntry[]> = {};
+  for (const city of cities) {
+    const gx = Math.floor(city.lon / GRID_SIZE);
+    const gy = Math.floor(city.lat / GRID_SIZE);
+    const k  = `${gx},${gy}`;
+    if (!grid[k]) grid[k] = [];
+    grid[k].push(city);
+  }
+
+  // ── Accumulate per-bucket rollup ──────────────────────────────────
+  const buckets: Record<string, {
+    rollup: CityRollup;
+    sumLon: number;
+    sumLat: number;
+    count: number;
+  }> = {};
+
+  for (const b of buildings.features) {
+    const coords = b.geometry?.coordinates;
+    if (!coords) continue;
+    const [lon, lat] = coords;
+    const p = b.properties || {};
+
+    // Find nearest city using grid index
+    const gx = Math.floor(lon / GRID_SIZE);
+    const gy = Math.floor(lat / GRID_SIZE);
+    let bestCity: CityEntry | null = null;
+    let bestDSq = MAX_DIST_SQ;
+
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const candidates = grid[`${gx + dx},${gy + dy}`];
+        if (!candidates) continue;
+        for (const city of candidates) {
+          const dlon = lon - city.lon;
+          const dlat = lat - city.lat;
+          const dsq  = dlon * dlon + dlat * dlat;
+          if (dsq < bestDSq) { bestDSq = dsq; bestCity = city; }
+        }
+      }
+    }
+
+    // Derive bucket key + metadata
+    let key: string, name: string, state: string, countyGeoid: string, countyName: string;
+    if (bestCity) {
+      key         = `${bestCity.name}|${bestCity.state}`;
+      name        = bestCity.name;
+      state       = bestCity.state;
+      countyGeoid = bestCity.county_geoid;
+      countyName  = countyNameMap[bestCity.county_geoid] || '';
+    } else {
+      // Unincorporated: bucket at 0.2° resolution so adjacent rural areas
+      // don't all collapse into one giant "Unincorporated" cluster.
+      const gLon = Math.round(lon * 5) / 5;
+      const gLat = Math.round(lat * 5) / 5;
+      key         = `unincorp|${gLat}|${gLon}`;
+      name        = 'Unincorporated';
+      state       = '';
+      countyGeoid = '';
+      countyName  = '';
+    }
+
+    if (!buckets[key]) {
+      buckets[key] = {
+        rollup: {
+          key, name, state, countyGeoid, countyName,
+          buildings: 0, loss: 0,
+          severe: 0, major: 0, moderate: 0, minor: 0,
+          criticalFacilities: 0, estDisplaced: 0, maxDepthFt: 0,
+          centerLon: bestCity?.lon ?? lon,
+          centerLat: bestCity?.lat ?? lat,
+          pop: bestCity?.pop ?? 0,
+        },
+        sumLon: 0, sumLat: 0, count: 0,
+      };
+    }
+
+    const { rollup } = buckets[key];
+    rollup.buildings += 1;
+    rollup.loss      += p.estimated_loss_usd || 0;
+
+    const cat = p.damage_category;
+    if      (cat === 'severe')   rollup.severe   += 1;
+    else if (cat === 'major')    rollup.major    += 1;
+    else if (cat === 'moderate') rollup.moderate += 1;
+    else if (cat === 'minor')    rollup.minor    += 1;
+
+    if (p.depth_ft && p.depth_ft > rollup.maxDepthFt) rollup.maxDepthFt = p.depth_ft;
+
+    const occ = (p.occtype || '').toUpperCase().split('-')[0];
+    if (CRITICAL_OCCTYPES.has(occ)) rollup.criticalFacilities += 1;
+
+    const isRes = (p.building_type || '').startsWith('RES');
+    if (isRes && (cat === 'major' || cat === 'severe')) rollup.estDisplaced += Math.round(AVG_HOUSEHOLD);
+
+    // For unincorporated buckets, drift centroid toward actual building cluster
+    if (!bestCity) {
+      buckets[key].sumLon += lon;
+      buckets[key].sumLat += lat;
+      buckets[key].count  += 1;
+    }
+  }
+
+  // Finalize unincorporated centroids
+  const rows: CityRollup[] = [];
+  for (const { rollup, sumLon, sumLat, count } of Object.values(buckets)) {
+    if (rollup.buildings === 0) continue;
+    if (rollup.name === 'Unincorporated' && count > 0) {
+      rollup.centerLon = sumLon / count;
+      rollup.centerLat = sumLat / count;
+    }
+    rows.push(rollup);
+  }
+
+  rows.sort((a, b) => b.loss - a.loss);
+  return rows;
+}
+
+/**
+ * Convert a city rollup array into a Point FeatureCollection for the
+ * city-aggregate bubble layer (rendered between zoom 8 and 11).
+ */
+export function cityRollupToCentroidGeoJSON(rows: CityRollup[]): any {
+  const features = rows.map(r => {
+    let worst = 'none';
+    if (r.severe > 0) worst = 'severe';
+    else if (r.major > 0) worst = 'major';
+    else if (r.moderate > 0) worst = 'moderate';
+    else if (r.minor > 0) worst = 'minor';
+    const displayName = r.name === 'Unincorporated' && r.countyName
+      ? `Unincorp. ${r.countyName}`
+      : r.name;
+    return {
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [r.centerLon, r.centerLat] },
+      properties: {
+        key: r.key,
+        name: displayName,
+        state: r.state,
+        countyGeoid: r.countyGeoid,
+        countyName: r.countyName,
+        buildings: r.buildings,
+        loss: r.loss,
+        severe: r.severe,
+        major: r.major,
+        moderate: r.moderate,
+        minor: r.minor,
+        criticalFacilities: r.criticalFacilities,
+        estDisplaced: r.estDisplaced,
+        pop: r.pop,
+        worstCategory: worst,
+        label: `${displayName}  ${r.buildings.toLocaleString()}`,
       },
     };
   });
