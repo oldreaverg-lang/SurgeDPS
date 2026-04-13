@@ -12,6 +12,8 @@
 // up a test harness, and so the UI layer stays thin.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+import { AVG_HOUSEHOLD } from './jurisdictions';
+
 export type SeverityCounts = {
   severe?: number;
   major?: number;
@@ -520,6 +522,7 @@ export function stagingPlan(
   estimatedPop: number,
   severityCounts: SeverityCounts,
   totalBuildings: number,
+  rollupDisplaced?: number,
 ): StagingPlan {
   const sev = {
     severe:   severityCounts.severe   ?? 0,
@@ -529,22 +532,28 @@ export function stagingPlan(
     none:     severityCounts.none     ?? 0,
   };
 
-  // Displaced population — estimate the fraction of residents whose
-  // building is likely uninhabitable (severe + major), then apply to
-  // the surge-zone population estimate. If we don't have building
-  // totals, fall back to a naive 20% of surge-zone pop.
+  // Displaced population — when the jurisdictions rollup has already
+  // computed residential-filtered displacement, use that as the
+  // authoritative figure so the panel agrees with the city/county
+  // bubbles and the Analyst tab total. Fall back to a pop-fraction
+  // estimate when rollup data isn't available (early boot).
   const uninhabitable = sev.severe + sev.major;
-  const allBuildings = Math.max(1, totalBuildings);
-  const uninhabFrac = uninhabitable / allBuildings;
-  const displacedRaw = uninhabFrac > 0
-    ? Math.round(estimatedPop * uninhabFrac)
-    : Math.round(estimatedPop * 0.2);
-  const displacedPop = Math.max(0, displacedRaw);
+  let displacedPop: number;
+  if (typeof rollupDisplaced === 'number' && rollupDisplaced > 0) {
+    displacedPop = rollupDisplaced;
+  } else {
+    const allBuildings = Math.max(1, totalBuildings);
+    const uninhabFrac = uninhabitable / allBuildings;
+    const displacedRaw = uninhabFrac > 0
+      ? Math.round(estimatedPop * uninhabFrac)
+      : Math.round(estimatedPop * 0.2);
+    displacedPop = Math.max(0, displacedRaw);
+  }
 
   // Rescue teams — primarily a function of people in the worst
   // depth bands, proxied by uninhabitable building count times the
-  // HAZUS-ish ~2.5 residents-per-household factor.
-  const rescueResidents = Math.round(uninhabitable * 2.5);
+  // HAZUS/Census avg residents-per-household factor.
+  const rescueResidents = Math.round(uninhabitable * AVG_HOUSEHOLD);
   const rescueTeams = Math.max(
     0,
     Math.ceil(rescueResidents / RESCUE_RESIDENTS_PER_TEAM),

@@ -146,7 +146,7 @@ export interface CountyRollup {
 
 const CRITICAL_OCCTYPES = new Set(['GOV1','GOV2','EDU1','EDU2','MED1','MED2','COM8','COM9','COM10']);
 // Census 2020 ACS 5-year US avg persons/household.
-const AVG_HOUSEHOLD = 2.53;
+export const AVG_HOUSEHOLD = 2.53;
 // Share of residentially-damaged households that actually vacate. Empirical:
 // FEMA TSA check-ins / (major+severe residential) from Harvey + Ian runs out
 // to roughly 0.5–0.7. We use 0.7 as an upper-bound planning figure, applied

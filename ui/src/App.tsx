@@ -532,6 +532,7 @@ function CatDeploymentSummary({
   mode,
   subPersona,
   teamSize,
+  rollupDisplaced,
   onGenerateCatReport,
   onGenerateSitRep,
 }: {
@@ -543,6 +544,7 @@ function CatDeploymentSummary({
   mode: DisplayMode;
   subPersona: SubPersona;
   teamSize: number;
+  rollupDisplaced?: number;
   onGenerateCatReport: (format: 'html' | 'pdf') => void;
   onGenerateSitRep: (format: 'html' | 'pdf') => void;
 }) {
@@ -569,7 +571,7 @@ function CatDeploymentSummary({
   // and staging plan for the Top Priority callout.
   const worstPost = worstShelterPosture(hotspots.map(h => h.maxDepthFt));
   const staging = isEM
-    ? stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings)
+    ? stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings, rollupDisplaced)
     : null;
 
   const panelClass = isEM
@@ -932,6 +934,7 @@ function ResourceStagingPanel({
   estimatedPop,
   severityCounts,
   criticalBreakdown,
+  rollupDisplaced,
 }: {
   storm: StormInfo;
   totals: { buildings: number; loss: number; totalDepth: number };
@@ -939,6 +942,7 @@ function ResourceStagingPanel({
   estimatedPop: number;
   severityCounts: Record<string, number>;
   criticalBreakdown: Array<{ icon: string; label: string; count: number }>;
+  rollupDisplaced?: number;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [advisoryOpen, setAdvisoryOpen] = useState(false);
@@ -946,7 +950,7 @@ function ResourceStagingPanel({
 
   if (hotspots.length === 0 || totals.buildings <= 0) return null;
 
-  const plan: StagingPlan = stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings);
+  const plan: StagingPlan = stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings, rollupDisplaced);
   const advisory = draftPublicAdvisory({
     storm: storm as any,
     hotspots,
@@ -1426,6 +1430,13 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
     return () => mq.removeEventListener('change', handler);
   }, []);
 
+  // Authoritative displaced count from the jurisdictions rollup (if present),
+  // so the Ops panel reconciles with the city/county bubbles and Analyst
+  // tab totals instead of the legacy pop-fraction estimate in stagingPlan().
+  const rollupDisplaced = countyRollup
+    ? countyRollup.reduce((s, r) => s + r.estDisplaced, 0)
+    : 0;
+
   if (!storm) return null;
 
   return (
@@ -1573,6 +1584,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         mode={mode}
         subPersona={subPersona}
         teamSize={teamSize}
+        rollupDisplaced={rollupDisplaced}
         onGenerateCatReport={onGenerateCatReport}
         onGenerateSitRep={onGenerateSitRep}
       />
@@ -1597,6 +1609,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           estimatedPop={estimatedPop}
           severityCounts={severityCounts}
           criticalBreakdown={criticalBreakdown}
+          rollupDisplaced={rollupDisplaced}
         />
       )}
 
