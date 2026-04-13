@@ -106,7 +106,7 @@ def rainfall_increment_in_window(
 
 
 # ── Tick schedule helpers ────────────────────────────────────────────────────
-DEFAULT_TICK_STEP_H = 3.0
+DEFAULT_TICK_STEP_H = 6.0
 DEFAULT_DURATION_H  = 72.0
 
 
