@@ -29,6 +29,24 @@
 // the map raster is a Phase 6 item (requires a COG tile server
 // or XYZ endpoint conversion from the clipped GeoTIFF).
 // ───────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────
+// The app is mounted at /surgedps/ on stormdps.com, but the
+// backend returns tile URL templates rooted at /api/... (it has
+// no knowledge of the public path prefix). MapLibre resolves
+// these as page-root-relative, so the tile requests go to
+// stormdps.com/api/... which 404s. Prefix here so tiles load.
+// ───────────────────────────────────────────────────────────
+function prefixTileUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  // Absolute (http:// or https://) URLs are left alone.
+  if (/^https?:\/\//i.test(raw)) return raw;
+  // Already prefixed — no-op.
+  if (raw.startsWith('/surgedps/')) return raw;
+  // Root-relative backend path → prepend /surgedps.
+  if (raw.startsWith('/')) return `/surgedps${raw}`;
+  return raw;
+}
+
 export type RainfallSource = 'mrms' | 'stormdps' | 'none';
 
 export type RainfallOverlay = {
@@ -79,7 +97,7 @@ export async function fetchRainfallOverlay(
       source: 'mrms',
       // Phase 6: backend returns a XYZ tile URL template (NWS colormap PNGs).
       // Server falls back to null if the MRMS clipped tif isn't on disk yet.
-      tileUrlTemplate: data.tile_url_template ?? null,
+      tileUrlTemplate: prefixTileUrl(data.tile_url_template),
       validTime: data.valid_time ?? null,
       bboxInches: maxIn != null && avgIn != null ? [0, +maxIn.toFixed(1)] : null,
       maxPrecipMm: data.max_precip_mm ?? null,
@@ -134,7 +152,7 @@ export async function fetchQPFOverlay(_stormId: string): Promise<QPFOverlay> {
       durationHr: data.duration_hr ?? null,
       source: data.source ?? null,
       caveat: data.caveat ?? null,
-      tileUrlTemplate: data.tile_url_template ?? null,
+      tileUrlTemplate: prefixTileUrl(data.tile_url_template),
       notes: data.caveat ?? '',
     };
   } catch (err) {
@@ -183,7 +201,7 @@ export async function fetchCompoundOverlay(
       cellCount: data.cell_count ?? 0,
       maxDepthFt: data.max_depth_ft ?? null,
       avgDepthFt: data.avg_depth_ft ?? null,
-      tileUrlTemplate: data.tile_url_template ?? null,
+      tileUrlTemplate: prefixTileUrl(data.tile_url_template),
       notes: data.notes ?? '',
     };
   } catch (err) {
