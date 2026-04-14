@@ -426,10 +426,22 @@ class MRMSFetcher:
             from rasterio.transform import from_bounds as _tfb
 
             with rasterio.open(grib_path) as ds:
-                win  = _wfb(lon_min, lat_min, lon_max, lat_max, ds.transform)
+                # IEM MRMS GRIB2 is on a 0-360 longitude grid. Normalize the
+                # bbox to that space before computing the read window, or
+                # from_bounds returns an empty/off-grid window and read(1)
+                # silently yields zeros.
+                lo_min, lo_max = lon_min, lon_max
+                if ds.bounds.right > 180:
+                    lo_min, lo_max = lon_min % 360, lon_max % 360
+                win  = _wfb(lo_min, lat_min, lo_max, lat_max, ds.transform)
                 data = ds.read(1, window=win).astype(np.float32)
                 n_rows, n_cols = data.shape
 
+            if data.size == 0 or float(data.max()) <= 0.0:
+                raise ValueError(
+                    "rasterio tier returned empty/zero window "
+                    "(likely lon-space or driver issue) — falling through"
+                )
             data[data < 0] = 0  # MRMS nodata (-3, -9999) → zero
             transform = _tfb(lon_min, lat_min, lon_max, lat_max, n_cols, n_rows)
             tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
@@ -728,12 +740,28 @@ class MRMSFetcher:
             import rasterio
             from rasterio.windows import from_bounds as _wfb
             with rasterio.open(grib_path) as ds:
-                win    = _wfb(lon_min, lat_min, lon_max, lat_max, ds.transform)
+                # IEM MRMS GRIB2 is on a 0-360 longitude grid — normalize
+                # before from_bounds, otherwise the window is empty/off-grid
+                # and the read silently returns zeros.
+                lo_min, lo_max = lon_min, lon_max
+                zero360 = ds.bounds.right > 180
+                if zero360:
+                    lo_min, lo_max = lon_min % 360, lon_max % 360
+                win    = _wfb(lo_min, lat_min, lo_max, lat_max, ds.transform)
                 data   = ds.read(1, window=win).astype(np.float32)
                 win_tf = ds.window_transform(win)
                 n_rows, n_cols = data.shape
+            if data.size == 0 or float(data.max()) <= 0.0:
+                raise ValueError(
+                    "rasterio tier returned empty/zero window "
+                    "(likely lon-space or driver issue) — falling through"
+                )
             data[data < 0] = 0
+            # Rehydrate lon coords back to -180..180 so downstream logic
+            # (GeoTIFF writes in EPSG:4326) stays consistent.
             lons = np.array([win_tf.c + (j + 0.5) * win_tf.a for j in range(n_cols)])
+            if zero360:
+                lons = ((lons + 180) % 360) - 180
             lats = np.array([win_tf.f + (i + 0.5) * win_tf.e for i in range(n_rows)])
             return data, lats, lons
         except Exception as exc:

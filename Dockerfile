@@ -67,4 +67,10 @@ EXPOSE 8000
 #   1. warm_cache.py — pre-generates cell data for sidebar storms
 #   2. storm_monitor.py — polls NHC every 30 min, auto-runs pipeline
 #   3. api_server.py — HTTP server (foreground, keeps container alive)
-CMD ["sh", "-c", "python scripts/warm_cache.py &\npython scripts/storm_monitor.py &\npython scripts/api_server.py"]
+#
+# NOTE (one-time cleanup, remove after next successful deploy):
+# The `rm -f /app/persistent/mrms/iem_*.tif` line purges stale zero-filled
+# rainfall TIFs written by the pre-fix longitude-space bug. Once you confirm
+# the rain layer renders correctly post-deploy, delete that line so future
+# boots don't re-nuke a healthy cache.
+CMD ["sh", "-c", "rm -f /app/persistent/mrms/iem_*.tif\npython scripts/warm_cache.py &\npython scripts/storm_monitor.py &\npython scripts/api_server.py"]
