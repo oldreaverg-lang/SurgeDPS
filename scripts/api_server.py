@@ -71,6 +71,28 @@ def _valid_storm_id(sid: str) -> bool:
     return bool(sid) and bool(_STORM_ID_RE.match(sid))
 
 
+def _parse_tile_zxy(parts: list[str]) -> tuple[int, int, int] | None:
+    """Parse and bounds-check XYZ tile path components.
+    Returns (z, x, y) or None on invalid input. Rejects crafted requests
+    like z=99 (would recurse 2^99 tiles) and negative coords.
+    """
+    if len(parts) != 3 or not parts[2].endswith('.png'):
+        return None
+    try:
+        z = int(parts[0])
+        x = int(parts[1])
+        y = int(parts[2][:-4])
+    except (ValueError, OverflowError):
+        return None
+    # Max zoom 22 is more than enough; z>22 would request sub-cm tiles.
+    if not (0 <= z <= 22):
+        return None
+    max_idx = (1 << z) - 1
+    if not (0 <= x <= max_idx) or not (0 <= y <= max_idx):
+        return None
+    return z, x, y
+
+
 # ── DPS Score Lookup (from StormDPS compiled_bundle) ──
 _DPS_SCORES: dict = {}
 _dps_path = os.path.join(BASE_DIR, 'data', 'dps_scores.json')
@@ -292,7 +314,12 @@ _active_exposure_region: str = ''  # R11: cached for cell-load lookups
 # /api/rainfall hit per storm (MRMSFetcher caches the raw GRIB + clipped tif
 # under PERSISTENT_DIR/mrms). Keeping it in-memory means tiles don't have
 # to re-run the MRMS fetch; the tif is already on disk.
-_rainfall_tif_by_storm: dict[str, str] = {}
+from collections import OrderedDict as _OrderedDict
+# Bounded LRU caps so long-running servers (weeks of storms processed)
+# don't grow these tracker dicts forever. 32 is well above any plausible
+# CAT workload (a single day rarely touches >5 storms).
+_STORM_TRACKER_CAP = 32
+_rainfall_tif_by_storm: "_OrderedDict[str, str]" = _OrderedDict()
 _rainfall_tif_lock = _threading.Lock()
 
 # ── Compound tile server state ──
@@ -301,14 +328,26 @@ _rainfall_tif_lock = _threading.Lock()
 # in <cache>/<storm_id>/cell_*_compound.tif the first time /api/compound
 # is hit, then rebuilt whenever new cells have been processed (detected by
 # comparing the mosaic's mtime against the newest per-cell tif).
-_compound_mosaic_by_storm: dict[str, str] = {}
+_compound_mosaic_by_storm: "_OrderedDict[str, str]" = _OrderedDict()
 _compound_lock = _threading.Lock()
 
 # ── QPF forecast tile server state ──
 # Parallel to _rainfall_tif_by_storm but for the WPC QPF forecast raster.
 # Populated on the first /api/qpf hit per storm; served by /api/qpf_tile.
-_qpf_tif_by_storm: dict[str, str] = {}
+_qpf_tif_by_storm: "_OrderedDict[str, str]" = _OrderedDict()
 _qpf_tif_lock = _threading.Lock()
+
+
+def _lru_set(cache: "_OrderedDict[str, str]", key: str, value: str,
+             cap: int = _STORM_TRACKER_CAP) -> None:
+    """Insert/refresh a key in an ordered cache and evict oldest past cap.
+    Caller holds the cache's lock.
+    """
+    if key in cache:
+        cache.move_to_end(key)
+    cache[key] = value
+    while len(cache) > cap:
+        cache.popitem(last=False)
 
 # ── Progress tracking for long-running activation ──
 import time as _time
@@ -546,11 +585,28 @@ def load_cell(col: int, row: int) -> dict:
                         storm_id=storm.storm_id,
                     )
                     if _hand_result.max_depth_m > 0:
-                        import shutil as _shutil
-                        _shutil.copy2(_hand_result.depth_path, _fluvial_raster_path)
+                        # HAND writes depths in METERS. The surge raster and
+                        # downstream compound mosaic + UI legend are in FEET.
+                        # Convert the fluvial layer before handing it to
+                        # merge_compound_flood — otherwise the overlap zones
+                        # get surge (ft) + rain (m)*0.5 which is nonsense.
+                        import rasterio as _rio_hand
+                        import numpy as _np_hand
+                        _M_TO_FT = 3.280839895
+                        with _rio_hand.open(_hand_result.depth_path) as _src_h:
+                            _data_m = _src_h.read(1)
+                            _prof_h = _src_h.profile.copy()
+                            _nd_h = _src_h.nodata
+                        _valid_h = (_data_m != (_nd_h if _nd_h is not None else -9999))
+                        _data_ft = _np_hand.where(_valid_h, _data_m * _M_TO_FT, -9999).astype('float32')
+                        _prof_h.update(dtype='float32', nodata=-9999, compress='deflate', tiled=True)
+                        with _rio_hand.open(_fluvial_raster_path, 'w', **_prof_h) as _dst_h:
+                            _dst_h.write(_data_ft, 1)
+                            _dst_h.update_tags(1, units='ft', converted_from='m')
                         _fluvial_available = True
                         print(
-                            f"  [HAND] fluvial layer: max={_hand_result.max_depth_m:.2f}m, "
+                            f"  [HAND] fluvial layer: max={_hand_result.max_depth_m:.2f}m "
+                            f"({_hand_result.max_depth_m * _M_TO_FT:.2f}ft), "
                             f"reaches={_hand_result.reaches_flooded}, "
                             f"huc8s={_hand_files.huc8s}"
                         )
@@ -1401,7 +1457,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 # /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=… can find it.
                 if result.clipped_tif_path and os.path.exists(result.clipped_tif_path):
                     with _rainfall_tif_lock:
-                        _rainfall_tif_by_storm[_active_storm.storm_id] = result.clipped_tif_path
+                        _lru_set(_rainfall_tif_by_storm, _active_storm.storm_id, result.clipped_tif_path)
                 tile_url_template = (
                     f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png"
                     f"?storm_id={_active_storm.storm_id}"
@@ -1448,10 +1504,11 @@ class CellHandler(BaseHTTPRequestHandler):
                     return
                 # Parse /api/rainfall_tile/{z}/{x}/{y}.png
                 parts = path[len('/api/rainfall_tile/'):].split('/')
-                if len(parts) != 3 or not parts[2].endswith('.png'):
-                    self._send_error(400, 'Expected /api/rainfall_tile/{z}/{x}/{y}.png')
+                zxy = _parse_tile_zxy(parts)
+                if zxy is None:
+                    self._send_error(400, 'Expected /api/rainfall_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
-                z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
+                z, x, y = zxy
                 png_bytes = _render_rainfall_tile(tif_path, z, x, y)
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=86400')
@@ -1478,10 +1535,11 @@ class CellHandler(BaseHTTPRequestHandler):
                                    cache_control='no-cache')
                     return
                 parts = path[len('/api/qpf_tile/'):].split('/')
-                if len(parts) != 3 or not parts[2].endswith('.png'):
-                    self._send_error(400, 'Expected /api/qpf_tile/{z}/{x}/{y}.png')
+                zxy = _parse_tile_zxy(parts)
+                if zxy is None:
+                    self._send_error(400, 'Expected /api/qpf_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
-                z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
+                z, x, y = zxy
                 png_bytes = _render_rainfall_tile(tif_path, z, x, y)
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=3600')
@@ -1528,6 +1586,12 @@ class CellHandler(BaseHTTPRequestHandler):
                 feats = gj.get('features', []) if isinstance(gj, dict) else []
                 clat = _active_storm.landfall_lat; clon = _active_storm.landfall_lon
                 out = []; total_cap = 0; any_unknown = False; total_occ = 0
+                # Track features dropped silently so operators know their
+                # manifest has gaps. Otherwise "5 shelters found" on a 50%-
+                # broken geojson gives false confidence in coverage.
+                malformed = 0
+                zero_capacity = 0
+                out_of_radius = 0
                 # Rough km-per-degree at the landfall latitude.
                 import math as _m
                 km_per_deg_lat = 111.32
@@ -1536,14 +1600,27 @@ class CellHandler(BaseHTTPRequestHandler):
                 rad_deg_lon = radius_km / km_per_deg_lon
                 for f in feats:
                     g = f.get('geometry') or {}
-                    if g.get('type') != 'Point': continue
-                    lon, lat = g.get('coordinates', [None, None])[:2]
-                    if lon is None or lat is None: continue
+                    if g.get('type') != 'Point':
+                        malformed += 1; continue
+                    coords = g.get('coordinates') or []
+                    if len(coords) < 2:
+                        malformed += 1; continue
+                    lon, lat = coords[0], coords[1]
+                    if lon is None or lat is None:
+                        malformed += 1; continue
+                    try:
+                        lon = float(lon); lat = float(lat)
+                    except (TypeError, ValueError):
+                        malformed += 1; continue
                     if abs(lat - clat) > rad_deg_lat or abs(lon - clon) > rad_deg_lon:
-                        continue
+                        out_of_radius += 1; continue
                     p = f.get('properties') or {}
-                    cap = int(p.get('capacity') or 0)
-                    if cap <= 0: continue
+                    try:
+                        cap = int(p.get('capacity') or 0)
+                    except (TypeError, ValueError):
+                        malformed += 1; continue
+                    if cap <= 0:
+                        zero_capacity += 1; continue
                     occ_raw = p.get('occupancy')
                     occ = int(occ_raw) if (occ_raw is not None and str(occ_raw).strip() != '') else None
                     if occ is None: any_unknown = True
@@ -1561,12 +1638,19 @@ class CellHandler(BaseHTTPRequestHandler):
                         'last_updated': p.get('last_updated'),
                         'notes': p.get('notes'),
                     })
+                _note = f'{len(out)} shelter{"" if len(out)==1 else "s"} within {radius_km:.0f} km of landfall'
+                if malformed:
+                    _note += f' ({malformed} malformed features dropped)'
                 self._send_json(200, {
                     'available': True,
                     'shelters': out,
                     'total_capacity': total_cap,
                     'total_occupancy': None if any_unknown else total_occ,
-                    'notes': f'{len(out)} shelter{"" if len(out)==1 else "s"} within {radius_km:.0f} km of landfall',
+                    'malformed_count': malformed,
+                    'zero_capacity_count': zero_capacity,
+                    'out_of_radius_count': out_of_radius,
+                    'source_feature_count': len(feats),
+                    'notes': _note,
                 })
             except Exception as e:
                 self._send_error(500, f'shelters error: {e}')
@@ -1679,7 +1763,20 @@ class CellHandler(BaseHTTPRequestHandler):
             try:
                 import datetime as _dt
                 raw_ranks = (params.get('ranks') or [''])[0]
-                ranks = [int(r) for r in raw_ranks.split(',') if r.strip().lstrip('-').isdigit()]
+                # Clamp rank count and value range so a crafted ?ranks=...
+                # with 10k entries or ridiculous values can't consume CPU
+                # in the Dijkstra loop. Real CAT workload is ≤20 hotspots.
+                _MAX_RANKS = 50
+                ranks = []
+                for r in raw_ranks.split(',')[:_MAX_RANKS]:
+                    if not r.strip().lstrip('-').isdigit():
+                        continue
+                    try:
+                        v = int(r)
+                    except (ValueError, OverflowError):
+                        continue
+                    if -10_000 < v < 10_000:
+                        ranks.append(v)
                 raw_coords = (params.get('coords') or [''])[0]
                 coords: list[tuple[float, float]] = []
                 if raw_coords:
@@ -1778,7 +1875,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 with _compound_lock:
                     mosaic_path, stats = _build_storm_compound_mosaic(_active_storm.storm_id)
                     if mosaic_path:
-                        _compound_mosaic_by_storm[_active_storm.storm_id] = mosaic_path
+                        _lru_set(_compound_mosaic_by_storm, _active_storm.storm_id, mosaic_path)
                 if mosaic_path is None:
                     self._send_json(200, {
                         'available': False,
@@ -1820,16 +1917,17 @@ class CellHandler(BaseHTTPRequestHandler):
                     if mosaic_path is None or not os.path.exists(mosaic_path):
                         mosaic_path, _ = _build_storm_compound_mosaic(storm_id)
                         if mosaic_path:
-                            _compound_mosaic_by_storm[storm_id] = mosaic_path
+                            _lru_set(_compound_mosaic_by_storm, storm_id, mosaic_path)
                 if not mosaic_path or not os.path.exists(mosaic_path):
                     self._send_raw(200, _transparent_tile_png(), content_type='image/png',
                                    cache_control='no-cache')
                     return
                 parts = path[len('/api/compound_tile/'):].split('/')
-                if len(parts) != 3 or not parts[2].endswith('.png'):
-                    self._send_error(400, 'Expected /api/compound_tile/{z}/{x}/{y}.png')
+                zxy = _parse_tile_zxy(parts)
+                if zxy is None:
+                    self._send_error(400, 'Expected /api/compound_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
-                z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
+                z, x, y = zxy
                 png_bytes = _render_compound_tile(mosaic_path, z, x, y)
                 # Mosaic changes as cells load, so cache is shorter than rainfall.
                 self._send_raw(200, png_bytes, content_type='image/png',
@@ -1877,7 +1975,7 @@ class CellHandler(BaseHTTPRequestHandler):
                             _cached_tif = _cached.get('tif_path')
                             if _cached_tif and os.path.exists(_cached_tif):
                                 with _qpf_tif_lock:
-                                    _qpf_tif_by_storm[_active_storm.storm_id] = _cached_tif
+                                    _lru_set(_qpf_tif_by_storm, _active_storm.storm_id, _cached_tif)
                             self._send_json(200, _cached)
                             return
                     except Exception:
@@ -1933,7 +2031,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     _qpf_tile_tmpl = None
                     if _qpf_tif and os.path.exists(_qpf_tif) and _active_storm is not None:
                         with _qpf_tif_lock:
-                            _qpf_tif_by_storm[_active_storm.storm_id] = _qpf_tif
+                            _lru_set(_qpf_tif_by_storm, _active_storm.storm_id, _qpf_tif)
                         _qpf_tile_tmpl = (
                             f"/api/qpf_tile/{{z}}/{{x}}/{{y}}.png"
                             f"?storm_id={_active_storm.storm_id}"
