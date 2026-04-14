@@ -286,33 +286,50 @@ class PSurgeFetcher:
         source: str,
     ) -> SurgeData:
         """Clip a surge raster to the storm extent."""
+        import threading as _th
         import rasterio
         from rasterio.mask import mask as rasterio_mask
+        from rasterio.warp import transform_geom
         from shapely.geometry import shape, mapping
 
         storm_shape = shape(storm_geometry)
         buffered = storm_shape.buffer(self.config.cone_buffer_km / 111.0)
+        wgs84_geom = mapping(buffered)
 
         output_path = os.path.join(
             output_dir, f"surge_{storm_id}_{advisory_num}.tif"
         )
+        # Atomic write so concurrent readers never see a half-written tif.
+        tmp_path = f"{output_path}.tmp.{os.getpid()}.{_th.get_ident()}"
 
         with rasterio.open(raster_path) as src:
+            # SLOSH MEOW basins and some P-Surge products are in projected
+            # CRSes (e.g. albers, LCC); passing a raw lat/lon polygon to
+            # rasterio.mask would be interpreted as meters and produce an
+            # empty clip. Reproject first if the source CRS isn't WGS84.
+            if src.crs and str(src.crs).upper() not in ("EPSG:4326", "OGC:CRS84"):
+                geom_for_mask = transform_geom("EPSG:4326", src.crs, wgs84_geom)
+            else:
+                geom_for_mask = wgs84_geom
             out_image, out_transform = rasterio_mask(
-                src, [mapping(buffered)], crop=True, nodata=-9999
+                src, [geom_for_mask], crop=True, nodata=-9999
             )
             profile = src.profile.copy()
             profile.update(
+                driver="GTiff",
                 transform=out_transform,
                 width=out_image.shape[2],
                 height=out_image.shape[1],
                 nodata=-9999,
                 compress="deflate",
             )
-            with rasterio.open(output_path, "w", **profile) as dst:
+            src_crs = src.crs
+            with rasterio.open(tmp_path, "w", **profile) as dst:
                 dst.write(out_image)
+        os.replace(tmp_path, output_path)
 
-        max_surge = float(np.nanmax(out_image[out_image != -9999]))
+        valid = out_image[out_image != -9999]
+        max_surge = float(np.nanmax(valid)) if valid.size else 0.0
 
         return SurgeData(
             path=output_path,
@@ -320,7 +337,7 @@ class PSurgeFetcher:
             exceedance=exceedance,
             max_surge_m=max_surge,
             bounds=tuple(buffered.bounds),
-            crs=str(src.crs),
+            crs=str(src_crs),
         )
 
     @staticmethod

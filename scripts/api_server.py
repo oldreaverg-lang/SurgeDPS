@@ -1025,8 +1025,12 @@ def _tile_cache_get_or_render(
     try:
         os.makedirs(cache_root, exist_ok=True)
         # Atomic write — rename only after the file is fully on disk so
-        # parallel readers never see a half-written PNG.
-        tmp_path = cache_path + '.tmp'
+        # parallel readers never see a half-written PNG. Include pid+tid in
+        # the temp name so two threads rendering the same missing tile
+        # concurrently (ThreadingHTTPServer serves requests in parallel)
+        # don't stomp on each other's partial writes.
+        import threading as _th
+        tmp_path = f'{cache_path}.tmp.{os.getpid()}.{_th.get_ident()}'
         with open(tmp_path, 'wb') as fh:
             fh.write(png_bytes)
         os.replace(tmp_path, cache_path)

@@ -770,17 +770,36 @@ class MRMSFetcher:
         bbox: Tuple[float, float, float, float],
         source: str,
     ) -> MRMSResult:
-        """Read stats from a clipped GeoTIFF and build MRMSResult."""
+        """Read stats from a clipped GeoTIFF and build MRMSResult.
+
+        Also: `src.nodata or -9999` collapses a legitimate nodata=0 to
+        -9999. Use an explicit None check.
+
+        Iterates the raster block-by-block rather than pulling the whole
+        array into RAM — a continental IEM accumulation is ~4000×6000
+        float32 (~100 MB) and we compute stats on every /api/rainfall
+        hit under ThreadingHTTPServer.
+        """
+        max_mm, avg_mm = 0.0, 0.0
         try:
             import rasterio
-            import numpy as np
+            total = 0.0
+            count = 0
+            running_max = float("-inf")
             with rasterio.open(tif_path) as src:
-                data = src.read(1)
-                nodata = src.nodata or -9999
-            valid = data[data != nodata]
-            valid = valid[valid >= 0]
-            max_mm = float(np.nanmax(valid)) if len(valid) else 0.0
-            avg_mm = float(np.nanmean(valid)) if len(valid) else 0.0
+                nodata = src.nodata if src.nodata is not None else -9999
+                for _, window in src.block_windows(1):
+                    block = src.read(1, window=window)
+                    valid = block[(block != nodata) & (block >= 0)]
+                    if valid.size:
+                        total += float(valid.sum())
+                        count += int(valid.size)
+                        m = float(valid.max())
+                        if m > running_max:
+                            running_max = m
+            if count:
+                max_mm = running_max
+                avg_mm = total / count
         except Exception:
             max_mm, avg_mm = 0.0, 0.0
 
