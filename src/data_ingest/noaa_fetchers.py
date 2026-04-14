@@ -554,27 +554,165 @@ class QPFFetcher:
         output_dir: str,
         duration_hours: int,
     ) -> Optional[QPFData]:
-        """Try to fetch WPC QPF GRIB data."""
-        # WPC QPF URLs change format periodically; this is best-effort
+        """Build a real N-hour QPF by summing WPC's 24-hour QPF tiles.
+
+        WPC publishes 24h accumulations at f024/f048/f072/... relative to
+        each 00/06/12/18Z cycle. We walk back through recent cycles until
+        we find one that has all the forecast-hour files we need
+        (fh ∈ {24, 48, 72, …}), download them, clip each to the storm
+        bbox, and sum into one GeoTIFF. No native `p72m_latest.grb` file
+        exists on ftp.wpc.ncep.noaa.gov — this is how they assemble it.
+
+        Returns None if no complete cycle is found in the search window
+        or if any download/parse fails. Caller falls back to synthetic.
+        """
         try:
-            url = f"{self.config.qpf_base_url}p72m_latest.grb"
-            response = self.session.get(
-                url, timeout=self.config.http_timeout
-            )
-            if response.status_code != 200:
+            # Which 24h forecast hours do we need to sum?
+            # 72h → [24, 48, 72]; 48h → [24, 48]; 24h → [24].
+            fhrs = [(i + 1) * 24 for i in range(max(1, duration_hours // 24))]
+            if not fhrs:
                 return None
 
-            grib_path = os.path.join(output_dir, "qpf_raw.grb")
-            with open(grib_path, "wb") as f:
-                f.write(response.content)
+            # Try recent cycles until one has every fhr we need. WPC posts
+            # new cycles ~50 min after cycle time; probe up to ~24h back.
+            now = datetime.utcnow()
+            cycle = now.replace(minute=0, second=0, microsecond=0)
+            # snap to nearest past 00/06/12/18 cycle
+            cycle = cycle.replace(hour=(cycle.hour // 6) * 6)
 
-            # Convert GRIB to GeoTIFF and clip
-            return self._process_grib(
-                grib_path, storm_geometry, output_dir, duration_hours
+            grib_paths: list[str] = []
+            picked_cycle: Optional[datetime] = None
+            for step in range(8):  # 8 cycles × 6 h = 48 h lookback
+                c = cycle - timedelta(hours=6 * step)
+                cycle_tag = c.strftime("%Y%m%d%H")
+                candidates = [
+                    (fh, f"{self.config.qpf_base_url}p24m_{cycle_tag}f{fh:03d}.grb")
+                    for fh in fhrs
+                ]
+                # HEAD each file; skip cycle if any missing
+                if not all(
+                    self.session.head(u, timeout=10, allow_redirects=True).status_code == 200
+                    for _, u in candidates
+                ):
+                    continue
+
+                picked_cycle = c
+                grib_paths = []
+                for fh, url in candidates:
+                    resp = self.session.get(
+                        url, timeout=self.config.http_timeout
+                    )
+                    if resp.status_code != 200 or not resp.content:
+                        grib_paths = []
+                        break
+                    gp = os.path.join(output_dir, f"qpf_{cycle_tag}_f{fh:03d}.grb")
+                    tmp = f"{gp}.tmp.{os.getpid()}"
+                    with open(tmp, "wb") as f:
+                        f.write(resp.content)
+                    os.replace(tmp, gp)
+                    grib_paths.append(gp)
+                if grib_paths:
+                    break
+
+            if not grib_paths or picked_cycle is None:
+                logger.info(
+                    "WPC QPF: no complete cycle with fhrs %s in last 48 h — "
+                    "falling back to synthetic", fhrs,
+                )
+                return None
+
+            logger.info(
+                "WPC QPF: summing %d×24h tiles from cycle %sZ for %dh total",
+                len(grib_paths), picked_cycle.strftime("%Y-%m-%d %H"), duration_hours,
+            )
+            return self._sum_and_clip_grib(
+                grib_paths, storm_geometry, output_dir, duration_hours,
             )
 
         except Exception as e:
             logger.info(f"WPC QPF fetch failed: {e}")
+            return None
+
+    def _sum_and_clip_grib(
+        self,
+        grib_paths: List[str],
+        storm_geometry: dict,
+        output_dir: str,
+        duration_hours: int,
+    ) -> Optional[QPFData]:
+        """Clip each grib to the storm bbox, sum, and write one GeoTIFF.
+
+        All input gribs must be on the same WPC 2.5 km grid (they are —
+        same cycle, same product). We clip each to the buffered storm
+        bounds, sum pixelwise (treating nodata as 0), and write an
+        atomic GeoTIFF.
+        """
+        try:
+            import rasterio
+            from rasterio.mask import mask as rasterio_mask
+            from shapely.geometry import shape, mapping
+
+            storm_shape = shape(storm_geometry)
+            buffered = storm_shape.buffer(self.config.cone_buffer_km / 111.0)
+            geoms = [mapping(buffered)]
+
+            accumulator: Optional[np.ndarray] = None
+            ref_transform = None
+            ref_profile: Optional[dict] = None
+
+            for gp in grib_paths:
+                with rasterio.open(gp) as src:
+                    out_image, out_transform = rasterio_mask(
+                        src, geoms, crop=True, nodata=-9999
+                    )
+                    # (1, H, W) → (H, W); zero-out nodata so sums are clean
+                    arr = out_image[0].astype(np.float32)
+                    arr = np.where(arr == -9999, 0.0, arr)
+                    if accumulator is None:
+                        accumulator = arr
+                        ref_transform = out_transform
+                        ref_profile = src.profile.copy()
+                        ref_crs = src.crs
+                    else:
+                        if arr.shape != accumulator.shape:
+                            logger.warning(
+                                "WPC QPF tile shape mismatch %s vs %s — "
+                                "skipping tile", arr.shape, accumulator.shape,
+                            )
+                            continue
+                        accumulator = accumulator + arr
+
+            if accumulator is None or accumulator.size == 0 or min(accumulator.shape) == 0:
+                logger.info("WPC QPF: empty clip — storm bbox outside grid")
+                return None
+
+            output_path = os.path.join(output_dir, "qpf_rainfall.tif")
+            tmp_path = f"{output_path}.tmp.{os.getpid()}"
+            ref_profile.update(
+                driver="GTiff",
+                transform=ref_transform,
+                width=accumulator.shape[1],
+                height=accumulator.shape[0],
+                count=1,
+                dtype="float32",
+                nodata=-9999,
+                compress="deflate",
+            )
+            with rasterio.open(tmp_path, "w", **ref_profile) as dst:
+                dst.write(accumulator.astype(np.float32), 1)
+            os.replace(tmp_path, output_path)
+
+            max_precip = float(np.nanmax(accumulator))
+            return QPFData(
+                path=output_path,
+                total_precip_mm=max_precip,
+                duration_hours=duration_hours,
+                bounds=tuple(buffered.bounds),
+                crs=str(ref_crs),
+            )
+
+        except Exception as e:
+            logger.error(f"WPC QPF sum/clip failed: {e}")
             return None
 
     def _process_grib(
