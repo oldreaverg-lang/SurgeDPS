@@ -4256,8 +4256,7 @@ ${fieldFlag ? `
                 onClick={handleResetView}
                 title="Reset view to storm landfall"
                 aria-label="Reset view"
-                className="maplibregl-ctrl-icon"
-                style={{ fontSize: 16, lineHeight: '29px', fontWeight: 600 }}
+                style={{ width: 29, height: 29, fontSize: 16, fontWeight: 600, lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >↺</button>
             </div>
           )}
