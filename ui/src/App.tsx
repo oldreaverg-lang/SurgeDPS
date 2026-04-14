@@ -755,9 +755,8 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
             <h2 className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider">Active Storms</h2>
           </div>
           {activeNHC.length === 0 ? (
-            <p className="text-xs text-slate-500 leading-relaxed">
-              No active tropical cyclones in any basin. During hurricane season (Jun–Nov Atlantic, May–Nov East Pacific),
-              active storms will appear here automatically.
+            <p className="text-xs text-slate-500 leading-relaxed" title="During hurricane season (Jun–Nov Atlantic, May–Nov East Pacific), active storms appear here automatically.">
+              No active tropical cyclones.
             </p>
           ) : (
             <div className="space-y-1">
@@ -4249,11 +4248,18 @@ ${fieldFlag ? `
         >
           <NavigationControl position="top-right" />
           {activeStorm && (
-            <button
-              onClick={handleResetView}
-              title="Reset view to storm landfall"
-              className="absolute z-10 right-[10px] top-[108px] w-[29px] h-[29px] bg-white border border-gray-300 rounded shadow flex items-center justify-center text-gray-700 hover:bg-gray-100 text-base leading-none"
-            >↺</button>
+            /* Styled to match MapLibre's maplibregl-ctrl-group so it visually
+               stacks with the zoom/compass control immediately above it. */
+            <div className="maplibregl-ctrl maplibregl-ctrl-group" style={{ position: 'absolute', right: 10, top: 108, zIndex: 10 }}>
+              <button
+                type="button"
+                onClick={handleResetView}
+                title="Reset view to storm landfall"
+                aria-label="Reset view"
+                className="maplibregl-ctrl-icon"
+                style={{ fontSize: 16, lineHeight: '29px', fontWeight: 600 }}
+              >↺</button>
+            </div>
           )}
 
           {showCounties && countiesGeoJSON && (
@@ -5519,12 +5525,16 @@ ${fieldFlag ? `
             </div>
           )}
           {/* Rainfall / Compound informational badge — shown only when
-              those views are selected. Gives immediate value today (max/avg
-              accumulation for the storm bbox) while the raster pipeline is
-              still stubbed. When tileUrlTemplate lands this whole badge can
-              be replaced by the real legend. */}
+              those views are selected. Wrapped in a <details> so it can be
+              collapsed when the user just wants the map clear. Default
+              open so the headline numbers are visible on hazard change. */}
           {activeStorm && hazardView !== 'surge' && (
-            <div className="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px] leading-tight">
+            <details open className="group">
+              <summary className="list-none cursor-pointer bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 inline-flex items-center gap-1.5 select-none">
+                <span>{hazardView === 'rainfall' ? '🌧️ Rainfall detail' : '💧 Compound detail'}</span>
+                <span className="text-gray-400 group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+            <div className="mt-1.5 bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px] leading-tight">
               <div className="font-semibold text-gray-900 mb-0.5">
                 {hazardView === 'rainfall'
                   ? (rainfallMode === 'forecast' ? '🔮 Forecast rainfall (WPC QPF)' : '🌧️ Observed rainfall')
@@ -5642,7 +5652,8 @@ ${fieldFlag ? `
                   </div>
                 </div>
               )}
-            </div>
+              </div>
+            </details>
           )}
           {/* ── Peril timeline slider ────────────────────────────────────────
                Shown once the first ticks bundle arrives from /api/cell_ticks.
@@ -5651,9 +5662,17 @@ ${fieldFlag ? `
                cumulative perils. tickIdx = -1 always means "latest" (the
                static peak-state damage.geojson, with no tick override). */}
           {tickHours.length > 0 && allBuildings && (
-            <div className="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px]">
+            <details className="group">
+              <summary className="list-none cursor-pointer bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 inline-flex items-center gap-1.5 select-none">
+                <span>📅 Damage Timeline</span>
+                {tickIdx >= 0 && (
+                  <span className="text-[10px] text-indigo-600 font-medium">T+{tickHours[Math.min(tickIdx, tickHours.length - 1)]}h</span>
+                )}
+                <span className="text-gray-400 group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+            <div className="mt-1.5 bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px]">
               <div className="flex items-center justify-between mb-1.5">
-                <span className="font-semibold text-gray-900">📅 Damage Timeline</span>
+                <span className="font-semibold text-gray-900">Scrub timeline</span>
                 <button
                   onClick={() => setTickIdx(-1)}
                   className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${tickIdx === -1 ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 border border-gray-300'}`}
@@ -5685,6 +5704,7 @@ ${fieldFlag ? `
                 <span>T+{tickHours[tickHours.length - 1]}h</span>
               </div>
             </div>
+            </details>
           )}
           {/* Group 2 — Basemap + overlay toggles, collapsed by default to
               reclaim map space. Uses a native <details> so no extra state
@@ -5773,12 +5793,26 @@ ${fieldFlag ? `
             </div>
           </details>
           {activeStorm && (countiesError || floodZonesError || gaugesError || sheltersError) && (
-            <div className="bg-red-50 border border-red-200 text-red-700 text-[10px] rounded-lg px-2 py-1.5 max-w-[220px] leading-tight">
-              {countiesError && <div>{countiesError}</div>}
-              {floodZonesError && <div>{floodZonesError}</div>}
-              {gaugesError && <div>{gaugesError}</div>}
-              {sheltersError && <div>{sheltersError}</div>}
-              <div className="text-red-500 mt-0.5">Check browser console for details, or pan the map to retry.</div>
+            <div className="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-red-200 max-w-[240px] text-[10px] leading-tight overflow-hidden">
+              <div className="bg-red-600 text-white px-2 py-1 font-semibold flex items-center gap-1.5">
+                <span>⚠</span>
+                <span>Layer fetch issues</span>
+              </div>
+              <div className="px-2 py-1.5 text-gray-700 space-y-0.5">
+                {countiesError && (
+                  <div className="flex gap-1.5"><span className="text-red-600 font-semibold shrink-0">Counties</span><span className="text-gray-600">{countiesError}</span></div>
+                )}
+                {floodZonesError && (
+                  <div className="flex gap-1.5"><span className="text-red-600 font-semibold shrink-0">FEMA</span><span className="text-gray-600">{floodZonesError}</span></div>
+                )}
+                {gaugesError && (
+                  <div className="flex gap-1.5"><span className="text-red-600 font-semibold shrink-0">Gauges</span><span className="text-gray-600">{gaugesError}</span></div>
+                )}
+                {sheltersError && (
+                  <div className="flex gap-1.5"><span className="text-amber-600 font-semibold shrink-0">Shelters</span><span className="text-gray-600">{sheltersError}</span></div>
+                )}
+                <div className="text-gray-500 italic mt-1">Pan the map to retry, or check console.</div>
+              </div>
             </div>
           )}
         </div>
