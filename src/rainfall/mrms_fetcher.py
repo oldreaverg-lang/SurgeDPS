@@ -289,7 +289,11 @@ class MRMSFetcher:
             return None
 
         if not keys:
-            logger.warning("No MRMS files on S3 for %s on %s", product_name, date_str)
+            # Pre-2020-10-14 dates have no MRMS archive on S3 — historical storms
+            # (Harvey 2017, Michael 2018, etc.) always hit this branch and fall back
+            # to the Lonfat parametric rainfall model. Log at INFO, not WARNING,
+            # so it doesn't look like a failure in the Railway dashboard.
+            logger.info("No MRMS files on S3 for %s on %s (expected for pre-2020 storms; parametric fallback will run)", product_name, date_str)
             return None
 
         # Pick the file whose timestamp is closest to valid_time

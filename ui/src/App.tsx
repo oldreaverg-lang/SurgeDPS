@@ -5266,11 +5266,17 @@ ${fieldFlag ? `
         {activating && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-20" style={{ animation: 'fadeIn 0.2s ease-out' }}>
             <div className="bg-slate-900 border border-slate-700 rounded-2xl p-7 shadow-2xl text-center min-w-[300px] max-w-sm">
-              {/* Animated ring */}
+              {/* Animated ring — spinner wraps the SurgeDPS logo (replaces the
+                  🌀 placeholder so loading state stays on-brand). */}
               <div className="relative w-14 h-14 mx-auto mb-4">
                 <div className="absolute inset-0 animate-spin rounded-full border-4 border-slate-700 border-t-indigo-500"></div>
-                <div className="absolute inset-2 rounded-full bg-slate-900 flex items-center justify-center">
-                  <span className="text-indigo-400 text-lg">🌀</span>
+                <div className="absolute inset-2 rounded-full bg-slate-900 flex items-center justify-center overflow-hidden">
+                  <img
+                    src="/surgedps/logo-180.png"
+                    alt="SurgeDPS"
+                    className="w-8 h-8 object-contain"
+                    style={{ filter: 'brightness(1.15)' }}
+                  />
                 </div>
               </div>
               <p className="font-bold text-white text-base">

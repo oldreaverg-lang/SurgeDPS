@@ -980,7 +980,7 @@ def _render_compound_tile(mosaic_path: str, z: int, x: int, y: int) -> bytes:
     data = tile.data[0].astype('float32')
     valid = tile.mask > 0 if tile.mask is not None else (data > 0)
     rgba = _compound_rgba(data, valid)
-    img = _Image.fromarray(rgba, 'RGBA')
+    img = _Image.fromarray(rgba)  # mode is inferred from (H,W,4) uint8
     buf = _io.BytesIO()
     img.save(buf, format='PNG', optimize=True)
     return buf.getvalue()
@@ -1058,7 +1058,7 @@ def _render_rainfall_tile(tif_path: str, z: int, x: int, y: int) -> bytes:
     valid = tile.mask > 0 if tile.mask is not None else (data > 0)
     rgba = _nws_rainfall_rgba(data, valid)
 
-    img = _Image.fromarray(rgba, 'RGBA')
+    img = _Image.fromarray(rgba)  # mode is inferred from (H,W,4) uint8
     buf = _io.BytesIO()
     img.save(buf, format='PNG', optimize=True)
     return buf.getvalue()
@@ -2234,7 +2234,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {
                     'available': True,
                     'estimates': estimates,
-                    'generated_at': _dt.datetime.utcnow().isoformat() + 'Z',
+                    'generated_at': _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
                     'notes': model_note,
                 })
             except Exception as e:
