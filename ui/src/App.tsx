@@ -1973,6 +1973,14 @@ function App() {
   const [citiesData, setCitiesData] = useState<CityEntry[] | null>(null);
   const citiesLoadedRef = useRef(false);
   const [showFloodZones, setShowFloodZones] = useState(false);
+  // Land-use overlay — served live from the USGS/MRLC NLCD 2021 WMS.
+  // 30 m CONUS raster, reclassified on the server side into 16 Anderson
+  // Level II classes that we roll up in the legend to residential /
+  // commercial / agricultural / open / water. No bundling, no per-run
+  // bake — the MRLC geoserver is a stable public endpoint used by the
+  // National Map. Can be replaced with a baked PMTiles later (see
+  // scripts/build_landuse_pmtiles.py) if we want offline or faster load.
+  const [showLandUse, setShowLandUse] = useState(false);
   const [floodZonesGeoJSON, setFloodZonesGeoJSON] = useState<any>(null);
   const [floodZonesLoading, setFloodZonesLoading] = useState(false);
   const [floodZonesError, setFloodZonesError] = useState<string | null>(null);
@@ -3670,6 +3678,35 @@ ${fieldFlag ? `
             )
           )}
 
+          {/* ── NLCD 2021 Land Cover (MRLC WMS) ──
+              30 m CONUS raster served live by the USGS Multi-Resolution Land
+              Characteristics Consortium. The server renders the canonical
+              16-class Anderson Level II palette (red = developed, yellow =
+              cropland, green = forest, blue = water). We layer it beneath
+              the damage bubbles at 55 % opacity so the zoning read remains
+              visible without obscuring loss severity. */}
+          {showLandUse && (
+            <Source
+              id="nlcd-landuse"
+              type="raster"
+              tiles={[
+                'https://www.mrlc.gov/geoserver/mrlc_display/NLCD_2021_Land_Cover_L48/wms?' +
+                'service=WMS&version=1.1.1&request=GetMap' +
+                '&layers=mrlc_display:NLCD_2021_Land_Cover_L48' +
+                '&styles=&format=image/png&transparent=true' +
+                '&srs=EPSG:3857&width=256&height=256&bbox={bbox-epsg-3857}',
+              ]}
+              tileSize={256}
+              attribution="Land cover © USGS/MRLC NLCD 2021"
+            >
+              <Layer
+                id="nlcd-landuse-raster"
+                type="raster"
+                paint={{ 'raster-opacity': 0.55, 'raster-fade-duration': 200 }}
+              />
+            </Source>
+          )}
+
           {showFloodZones && floodZonesGeoJSON && (
             <Source id="fema-flood-zones" type="geojson" data={floodZonesGeoJSON}>
               {/* Fill — color-coded by FEMA zone type */}
@@ -4434,6 +4471,11 @@ ${fieldFlag ? `
                       >📄 Claims Package (.csv)</button>
                       <div className="border-t border-gray-200" />
                       <button
+                        onClick={() => { setShowLandUse(v => !v); setMoreMenuOpen(false); }}
+                        className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center gap-2 ${showLandUse ? 'bg-emerald-50 text-emerald-900 hover:bg-emerald-100' : 'text-gray-700 hover:bg-gray-100'}`}
+                        title="Toggle USGS/MRLC NLCD 2021 land cover overlay. 30 m CONUS raster with residential, commercial, agricultural, and natural land classes."
+                      >🗺 Land use {showLandUse ? '✓' : ''}</button>
+                      <button
                         onClick={() => { setBetaLayersEnabled(v => !v); setMoreMenuOpen(false); }}
                         className={`w-full text-left px-4 py-2 text-sm transition-colors flex items-center gap-2 ${betaLayersEnabled ? 'bg-purple-50 text-purple-900 hover:bg-purple-100' : 'text-gray-700 hover:bg-gray-100'}`}
                         title="Toggle Phase 5 beta data layers (Rainfall, Shelter capacity, Vendor coverage, Time-to-access). These panels show the UX shape; real data is pending backend integration."
@@ -4466,7 +4508,7 @@ ${fieldFlag ? `
           setConfidence({ level: 'unvalidated', count: 0 }); setEli({ value: 0, tier: 'unavailable' });
           setValidatedDps({ value: 0, adj: 0, reason: '' }); setManifest({});
           setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
-          setShowCounties(false); setShowFloodZones(false); setBuildingFlags({});
+          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setBuildingFlags({});
           setSimMode(false); setSimResult(null); setForecastCone(null); setForecastTrack([]);
         }} />
 
@@ -4758,6 +4800,12 @@ ${fieldFlag ? `
                   <p>Sourced from FEMA's National Flood Hazard Layer (NFHL). Zone colors: <span className="text-red-500 font-bold">■ VE/V</span> coastal high-hazard (wave action + surge), <span className="text-orange-400 font-bold">■ AE/A</span> high-risk 100-year floodplain, <span className="text-yellow-400 font-bold">■ X</span> moderate/minimal risk. Zone labels appear at zoom ≥ 10.</p>
                 </div>
               )}
+              {showLandUse && (
+                <div>
+                  <h4 className="font-bold text-gray-800 mb-1">Land Use (NLCD 2021)</h4>
+                  <p>USGS/MRLC National Land Cover Database 2021, 30 m CONUS raster served live via the MRLC WMS. Sixteen Anderson Level II classes are rolled up into the bottom-right legend. Note this is <em>land cover</em>, not municipal zoning — a vacant R-1 lot classifies as "Developed Open Space," not residential. For regulatory zoning (R-1, C-2, M-1) consult the jurisdiction's planning department or the National Zoning Atlas.</p>
+                </div>
+              )}
               {basemap === 'satellite' && (
                 <div>
                   <h4 className="font-bold text-gray-800 mb-1">Satellite Imagery</h4>
@@ -4781,6 +4829,34 @@ ${fieldFlag ? `
               onClick={() => setGridHintDismissed(true)}
               className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
             >Got it ✓</button>
+          </div>
+        )}
+
+        {/* ── NLCD land-use legend (only when overlay is active) ──
+            Maps the canonical MRLC palette down to the five categories
+            stakeholders actually plan around. Colors are the ones MRLC
+            renders server-side — we're just decoding them. */}
+        {showLandUse && (
+          <div className="absolute bottom-24 right-4 z-20 bg-white/95 backdrop-blur shadow-lg rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700 max-w-[190px]">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="font-semibold text-gray-800">Land Use (NLCD 2021)</span>
+              <button
+                onClick={() => setShowLandUse(false)}
+                className="text-gray-400 hover:text-gray-700 text-sm leading-none"
+                title="Hide land-use overlay"
+              >✕</button>
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#AB0000' }} /><span>Developed — High</span></div>
+              <div className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#D99282' }} /><span>Residential</span></div>
+              <div className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#DCD939' }} /><span>Cropland</span></div>
+              <div className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#AB7028' }} /><span>Pasture / Hay</span></div>
+              <div className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#68AB5F' }} /><span>Forest</span></div>
+              <div className="flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#5475A8' }} /><span>Water / Wetland</span></div>
+            </div>
+            <div className="mt-1.5 pt-1.5 border-t border-gray-200 text-[10px] text-gray-500 leading-tight">
+              Source: USGS / MRLC 30 m raster
+            </div>
           </div>
         )}
 
