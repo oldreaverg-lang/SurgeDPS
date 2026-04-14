@@ -368,13 +368,34 @@ def handle_validation_request(handler, path: str, params: Dict[str, List[str]]) 
     or malformed access — including the case where VALIDATION_TOKEN is not
     configured.
     """
-    if not _token_ok(handler, params):
-        _not_found(handler)
-        return
-
     # Normalize path under /__val
     rel = path[len("/__val"):].lstrip("/")
     segments = [s for s in rel.split("/") if s]
+
+    # Diagnostic: /__val/__status reports whether the token env var is
+    # configured and whether this request's token matched — without
+    # ever revealing the token value itself. Safe to expose.
+    if segments == ["__status"]:
+        expected = os.environ.get("VALIDATION_TOKEN", "")
+        header_tok = handler.headers.get("X-Validation-Token", "")
+        query_tok = (params.get("t", [""])[0]) if params else ""
+        supplied = header_tok or query_tok
+        _send_json(handler, {
+            "token_env_set": bool(expected),
+            "token_env_length": len(expected) if expected else 0,
+            "token_supplied": bool(supplied),
+            "token_supplied_length": len(supplied) if supplied else 0,
+            "token_matches": _token_ok(handler, params),
+            "validation_root": os.path.abspath(VALIDATION_ROOT),
+            "validation_root_exists": os.path.isdir(VALIDATION_ROOT),
+            "storms_on_disk": sorted(os.listdir(VALIDATION_ROOT))
+                if os.path.isdir(VALIDATION_ROOT) else [],
+        })
+        return
+
+    if not _token_ok(handler, params):
+        _not_found(handler)
+        return
 
     # GET /__val/ (or /__val) → index
     if not segments:
