@@ -103,7 +103,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=140, min_pressure_mb=919,
         heading_deg=25, speed_kt=14,
         basin="AL", advisory="best-track",
-        dps_score=87.8,
+        dps_score=81.7,
         rmax_nm=17.0,   # NHC TCR: compact eyewall ~15-20 nm at Mexico Beach
         landfall_date="2018-10-10",
     ),
@@ -115,7 +115,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=110, min_pressure_mb=920,
         heading_deg=0, speed_kt=11,
         basin="AL", advisory="best-track",
-        dps_score=89.0,
+        dps_score=92.9,
         rmax_nm=35.0,   # NHC TCR: eyewall expanded significantly as storm weakened to Cat 3
         landfall_date="2005-08-29",  # MRMS archive starts ~2015; S3 fetch will return None
     ),
@@ -126,7 +126,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=95, min_pressure_mb=950,
         heading_deg=315, speed_kt=13,
         basin="AL", advisory="best-track",
-        dps_score=88.5,
+        dps_score=86.5,
         rmax_nm=35.0,   # NHC TCR: large wind field at Galveston
         landfall_date="2008-09-13",  # Pre-MRMS archive; S3 fetch will return None
     ),
@@ -137,7 +137,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=115, min_pressure_mb=938,
         heading_deg=315, speed_kt=10,
         basin="AL", advisory="best-track",
-        dps_score=88.4,
+        dps_score=83.4,
         rmax_nm=25.0,   # NHC TCR: moderate-sized eyewall at Rockport
         landfall_date="2017-08-25",
         # KNOWN LIMITATION — speed_kt=10 is Harvey's *landfall* forward speed.
@@ -158,7 +158,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=130, min_pressure_mb=937,
         heading_deg=35, speed_kt=9,
         basin="AL", advisory="best-track",
-        dps_score=90.1,
+        dps_score=87.9,
         rmax_nm=15.0,   # NHC TCR: compact Cat 4, small eyewall at Fort Myers
         landfall_date="2022-09-28",
     ),
@@ -169,7 +169,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=130, min_pressure_mb=937,
         heading_deg=350, speed_kt=15,
         basin="AL", advisory="best-track",
-        dps_score=86.9,
+        dps_score=85.4,
         rmax_nm=15.0,   # NHC TCR: compact Cat 4 at Cameron, LA
         landfall_date="2020-08-27",
     ),
@@ -180,7 +180,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=130, min_pressure_mb=930,
         heading_deg=330, speed_kt=13,
         basin="AL", advisory="best-track",
-        dps_score=88.7,
+        dps_score=85.9,
         rmax_nm=20.0,   # NHC TCR: ~20 nm at Port Fourchon
         landfall_date="2021-08-29",
     ),
@@ -192,7 +192,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=115, min_pressure_mb=929,
         heading_deg=350, speed_kt=8,
         basin="AL", advisory="best-track",
-        dps_score=87.6,
+        dps_score=88.2,
         rmax_nm=20.0,   # NHC TCR: contracted eyewall at FL Keys landfall
         landfall_date="2017-09-10",
     ),
@@ -203,7 +203,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=75, min_pressure_mb=958,
         heading_deg=315, speed_kt=5,
         basin="AL", advisory="best-track",
-        dps_score=85.4,
+        dps_score=75.9,
         rmax_nm=50.0,   # NHC TCR: very large, sprawling wind field at Wilmington
         landfall_date="2018-09-14",
     ),
@@ -215,7 +215,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=70, min_pressure_mb=940,
         heading_deg=315, speed_kt=28,
         basin="AL", advisory="best-track",
-        dps_score=89.5,
+        dps_score=83.3,
         rmax_nm=30.0,   # NHC TCR: large storm; coastal funnel geometry accounts for rest
         landfall_date="2012-10-29",  # Pre-MRMS archive; S3 fetch will return None
     ),
@@ -226,7 +226,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=85, min_pressure_mb=970,
         heading_deg=350, speed_kt=14,
         basin="AL", advisory="best-track",
-        dps_score=77.7,
+        dps_score=72.6,
         rmax_nm=25.0,   # NHC TCR: moderate wind field at Creole, LA
         landfall_date="2020-10-09",
     ),
@@ -238,7 +238,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=65, min_pressure_mb=995,
         heading_deg=320, speed_kt=9,
         basin="AL", advisory="best-track",
-        dps_score=61.6,  # Nicholas not in compiled bundle; estimated
+        dps_score=51.6,  # Nicholas not in compiled bundle; estimated
         rmax_nm=20.0,   # NHC TCR: small Cat 1 at Matagorda Peninsula
         landfall_date="2021-09-14",
     ),
@@ -249,7 +249,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=75, min_pressure_mb=981,
         heading_deg=5, speed_kt=22,
         basin="AL", advisory="best-track",
-        dps_score=45.5,  # Nate not in compiled bundle; estimated
+        dps_score=43.1,  # Nate not in compiled bundle; estimated
         rmax_nm=15.0,   # NHC TCR: compact fast-moving Cat 1, very small eyewall
         landfall_date="2017-10-07",
     ),
@@ -260,7 +260,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=120, min_pressure_mb=938,
         heading_deg=15, speed_kt=20,
         basin="AL", advisory="best-track",
-        dps_score=84.1,
+        dps_score=81.5,
         rmax_nm=15.0,   # NHC TCR: compact at Big Bend; coastal geometry limits surge further
         landfall_date="2024-09-26",
     ),
@@ -271,7 +271,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=120, min_pressure_mb=949,
         heading_deg=60, speed_kt=16,
         basin="AL", advisory="best-track",
-        dps_score=87.5,
+        dps_score=83.3,
         rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
         landfall_date="2024-10-09",
     ),

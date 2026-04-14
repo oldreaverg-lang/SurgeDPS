@@ -5408,7 +5408,17 @@ ${fieldFlag ? `
               </div>
               <div>
                 <h4 className="font-bold text-gray-800 mb-1">Damage Potential Score (DPS)</h4>
-                <p>DPS combines Integrated Kinetic Energy (IKE), maximum surge depth, and regional building exposure into a single 0–100 index. Scores above 60 indicate historically severe surge events.</p>
+                <p>DPS is StormDPS's 0–100 index of a hurricane's total destructive power — computed upstream and synchronized here so the storm list, map markers, and hero card all read the same canonical value. The current formula (v4, basin-specific) accumulates a per-snapshot Destructive Potential Index (peak intensity × duration on coast × wind-field breadth) then applies regional modifiers:</p>
+                <ul className="list-disc ml-4 mt-1 space-y-0.5 text-[11px]">
+                  <li><strong>Peak intensity</strong> — Integrated Kinetic Energy (IKE) from the NOAA wind-band method, capturing wind speed <em>and</em> storm size.</li>
+                  <li><strong>Duration &amp; breadth</strong> — hours in coastal contact × R34 footprint area.</li>
+                  <li><strong>Population exposure</strong> — economic weight of the landfall region.</li>
+                  <li><strong>Perpendicular surge bonus</strong> — how squarely the track crosses the coast.</li>
+                  <li><strong>Rainfall &amp; stall</strong> — observed peak rainfall (NHC TCR / NCEI / MRMS) plus a forward-speed stall bonus.</li>
+                  <li><strong>Inland flood penetration</strong> — tropical-storm-force winds sustained inland.</li>
+                  <li><strong>Basin coefficients</strong> — Atlantic, E/W Pacific, N/S Indian, and S Pacific each use tuned weights and a rapid-intensification bonus; the composite is sqrt-compressed to the 0–100 range.</li>
+                </ul>
+                <p className="mt-1">Severity bands: <strong>80–100 Catastrophic</strong>, <strong>60–79 Extreme</strong>, <strong>40–59 Severe</strong>, <strong>20–39 Moderate</strong>, <strong>10–19 Minor</strong>, <strong>0–9 Minimal</strong>. SurgeDPS additionally computes a <em>validated</em> DPS that reweights by actual building count vs. the regional baseline — shown alongside the raw score when they diverge.</p>
               </div>
               <div>
                 <h4 className="font-bold text-gray-800 mb-1">Limitations</h4>
