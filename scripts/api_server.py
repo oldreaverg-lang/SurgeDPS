@@ -274,6 +274,15 @@ _active_storm_lock = _threading.Lock()
 _active_storm: StormEntry | None = None
 _active_exposure_region: str = ''  # R11: cached for cell-load lookups
 
+# ── Rainfall tile server state ──
+# Keyed by storm_id, value is the absolute path to the MRMS-clipped GeoTIFF
+# that /api/rainfall_tile serves via rio-tiler. Populated on the first
+# /api/rainfall hit per storm (MRMSFetcher caches the raw GRIB + clipped tif
+# under PERSISTENT_DIR/mrms). Keeping it in-memory means tiles don't have
+# to re-run the MRMS fetch; the tif is already on disk.
+_rainfall_tif_by_storm: dict[str, str] = {}
+_rainfall_tif_lock = _threading.Lock()
+
 # ── Progress tracking for long-running activation ──
 import time as _time
 _progress: dict = {'step': '', 'step_num': 0, 'total_steps': 4, 'started_at': 0.0, 'storm_id': ''}
@@ -638,6 +647,105 @@ def _empty_fc():
 
 def _empty_fc_pair():
     return {"buildings": _empty_fc(), "flood": _empty_fc()}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Rainfall XYZ tile rendering (NWS standard precipitation colormap)
+#
+# Serves PNG tiles reprojected from the MRMS-clipped GeoTIFF. The
+# clipped tif is written to disk by MRMSFetcher; /api/rainfall
+# registers its path, this module reads and tiles it on demand.
+#
+# Values in the source raster are mm of accumulated precipitation.
+# We convert to inches for colormap lookup because the NWS ramp is
+# inch-denominated. nodata and sub-threshold pixels render fully
+# transparent so the basemap shows through.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# NWS standard precipitation stops — matches weather.gov / MRMS
+# product pages users have seen elsewhere. Stop = lower bound in inches.
+_NWS_RAIN_STOPS_IN = [0.01, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00, 10.00, 15.00]
+_NWS_RAIN_COLORS_RGB = [
+    (200, 255, 200),   # 0.01"  very light green
+    (100, 230, 100),   # 0.10"  light green
+    (50,  180, 50),    # 0.25"  green
+    (0,   130, 0),     # 0.50"  dark green
+    (170, 200, 60),    # 0.75"  yellow-green
+    (255, 255, 0),     # 1.00"  yellow
+    (255, 200, 0),     # 1.50"
+    (255, 140, 0),     # 2.00"  orange
+    (255, 60,  0),     # 3.00"
+    (200, 0,   0),     # 4.00"  red
+    (150, 0,   100),   # 6.00"  magenta
+    (110, 0,   180),   # 8.00"
+    (70,  0,   200),   # 10.00" purple
+    (255, 255, 255),   # 15.00"+ white/pink cap
+]
+_TILE_ALPHA = 200  # semi-transparent so basemap + flood polygons stay visible
+
+
+def _nws_rainfall_rgba(mm, valid_mask):
+    """Apply the NWS rainfall colormap to an (H, W) mm array.
+
+    valid_mask: boolean (H, W) — True where the source reports a value.
+    Returns (H, W, 4) uint8 RGBA. Pixels below the first stop OR invalid
+    render fully transparent; above the top stop clamp to the top color.
+    """
+    import numpy as _np
+    inches = mm / 25.4
+    rgba = _np.zeros((*inches.shape, 4), dtype=_np.uint8)
+    # searchsorted returns insertion index; idx==0 means below first stop
+    idx = _np.searchsorted(_NWS_RAIN_STOPS_IN, inches, side='right')
+    for bucket in range(1, len(_NWS_RAIN_STOPS_IN) + 1):
+        sel = (idx == bucket) & valid_mask
+        if not sel.any():
+            continue
+        r, g, b = _NWS_RAIN_COLORS_RGB[bucket - 1]
+        rgba[sel] = (r, g, b, _TILE_ALPHA)
+    return rgba
+
+
+_TRANSPARENT_TILE_PNG_CACHE: bytes | None = None
+
+def _transparent_tile_png() -> bytes:
+    """Cached all-transparent 256x256 PNG for empty/out-of-bounds tiles."""
+    global _TRANSPARENT_TILE_PNG_CACHE
+    if _TRANSPARENT_TILE_PNG_CACHE is None:
+        from PIL import Image as _Image
+        import io as _io
+        buf = _io.BytesIO()
+        _Image.new('RGBA', (256, 256), (0, 0, 0, 0)).save(buf, format='PNG', optimize=True)
+        _TRANSPARENT_TILE_PNG_CACHE = buf.getvalue()
+    return _TRANSPARENT_TILE_PNG_CACHE
+
+
+def _render_rainfall_tile(tif_path: str, z: int, x: int, y: int) -> bytes:
+    """Render a single XYZ tile as PNG bytes using rio-tiler + NWS colormap."""
+    import io as _io
+    from PIL import Image as _Image
+    try:
+        from rio_tiler.io import Reader as _Reader
+        from rio_tiler.errors import TileOutsideBounds as _TileOOB
+    except ImportError:
+        # rio-tiler missing (dev env) — degrade gracefully to transparent.
+        return _transparent_tile_png()
+
+    try:
+        with _Reader(tif_path) as src:
+            tile = src.tile(x, y, z, tilesize=256)
+    except _TileOOB:
+        return _transparent_tile_png()
+
+    # tile.data shape: (bands, H, W). We take band 0.
+    data = tile.data[0].astype('float32')
+    # rio-tiler's mask: 255 = valid, 0 = nodata.
+    valid = tile.mask > 0 if tile.mask is not None else (data > 0)
+    rgba = _nws_rainfall_rgba(data, valid)
+
+    img = _Image.fromarray(rgba, 'RGBA')
+    buf = _io.BytesIO()
+    img.save(buf, format='PNG', optimize=True)
+    return buf.getvalue()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1128,6 +1236,15 @@ class CellHandler(BaseHTTPRequestHandler):
                 if result is None:
                     self._send_json(200, {'available': False, 'storm_id': _active_storm.storm_id})
                     return
+                # Register the clipped GeoTIFF with the tile server so
+                # /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=… can find it.
+                if result.clipped_tif_path and os.path.exists(result.clipped_tif_path):
+                    with _rainfall_tif_lock:
+                        _rainfall_tif_by_storm[_active_storm.storm_id] = result.clipped_tif_path
+                tile_url_template = (
+                    f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png"
+                    f"?storm_id={_active_storm.storm_id}"
+                ) if result.clipped_tif_path else None
                 self._send_json(200, {
                     'available': True,
                     'storm_id': _active_storm.storm_id,
@@ -1139,10 +1256,45 @@ class CellHandler(BaseHTTPRequestHandler):
                     'max_precip_in': round(result.max_precip_mm / 25.4, 2),
                     'bbox': list(result.bbox),
                     'tif_path': result.clipped_tif_path,
+                    'tile_url_template': tile_url_template,
                     'source': result.source,
                 })
             except Exception as e:
                 self._send_error(500, str(e))
+            return
+
+        # ── GET /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=<id> ──
+        # On-demand XYZ PNG tile server for the MRMS rainfall raster.
+        # Backed by the clipped GeoTIFF registered by /api/rainfall.
+        # Colormap: NWS standard precipitation ramp (green→yellow→red→magenta).
+        # Tiles are cache-friendly (Cache-Control: public, 24h) because the
+        # MRMS product is immutable once archived.
+        if path.startswith('/api/rainfall_tile/'):
+            try:
+                storm_id = (params.get('storm_id') or [''])[0]
+                if not storm_id:
+                    self._send_error(400, 'Missing storm_id')
+                    return
+                with _rainfall_tif_lock:
+                    tif_path = _rainfall_tif_by_storm.get(storm_id)
+                if not tif_path or not os.path.exists(tif_path):
+                    # Client probably hit the tile endpoint before /api/rainfall.
+                    # Return a transparent 256x256 PNG so MapLibre doesn't
+                    # flood the console with errors.
+                    self._send_raw(200, _transparent_tile_png(), content_type='image/png',
+                                   cache_control='no-cache')
+                    return
+                # Parse /api/rainfall_tile/{z}/{x}/{y}.png
+                parts = path[len('/api/rainfall_tile/'):].split('/')
+                if len(parts) != 3 or not parts[2].endswith('.png'):
+                    self._send_error(400, 'Expected /api/rainfall_tile/{z}/{x}/{y}.png')
+                    return
+                z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
+                png_bytes = _render_rainfall_tile(tif_path, z, x, y)
+                self._send_raw(200, png_bytes, content_type='image/png',
+                               cache_control='public, max-age=86400')
+            except Exception as e:
+                self._send_error(500, f'tile error: {e}')
             return
 
         # ── GET /api/qpf ──
@@ -1326,19 +1478,24 @@ class CellHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
-    def _send_raw(self, code, body: bytes):
-        # Gzip compress large responses (>1 KB) if client supports it
+    def _send_raw(self, code, body: bytes, content_type: str = 'application/json', cache_control: str | None = None):
+        # Gzip compress large TEXT responses if client supports it. Skip
+        # binary formats (PNG, etc.) — they're already compressed and
+        # layering gzip on top just bloats the byte count.
+        gzippable = content_type.startswith(('application/json', 'text/', 'application/xml'))
         try:
             accept_enc = self.headers.get('Accept-Encoding', '')
-            if len(body) > 1024 and 'gzip' in accept_enc:
+            if gzippable and len(body) > 1024 and 'gzip' in accept_enc:
                 import gzip as _gzip
                 body = _gzip.compress(body, compresslevel=6)
                 self.send_response(code)
                 self.send_header('Content-Encoding', 'gzip')
             else:
                 self.send_response(code)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Type', content_type)
             self.send_header('Access-Control-Allow-Origin', '*')
+            if cache_control:
+                self.send_header('Cache-Control', cache_control)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)

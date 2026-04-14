@@ -2,6 +2,9 @@
 numpy>=1.24
 requests>=2.31,<3.0
 rasterio>=1.3
+# rio-tiler — on-demand XYZ tile server for rainfall/compound raster overlays
+# backing /api/rainfall_tile. Pulls morecantile, pydantic, pillow; all safe.
+rio-tiler>=6,<8
 shapely>=2.0
 duckdb>=1.1
 boto3>=1.34               # Cloudflare R2 storage (S3-compatible); no-op if env vars absent

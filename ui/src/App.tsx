@@ -2003,7 +2003,7 @@ function App() {
   // 'rainfall' → show MRMS observed accumulation stats badge (raster tiles Phase 6)
   // 'compound' → surge + rainfall + fluvial (same as damage model input); raster Phase 6
   const [hazardView, setHazardView] = useState<'surge' | 'rainfall' | 'compound'>('surge');
-  const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string } | null>(null);
+  const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string; tileUrl: string | null } | null>(null);
   const [rainfallLoading, setRainfallLoading] = useState(false);
   // ── AHPS / NWPS stream gauges layer ──
   // Cheap, immediate value: GeoJSON points colored by flood category.
@@ -2341,7 +2341,7 @@ function App() {
       .then((res: RainfallOverlay) => {
         if (cancelled) return;
         if (!res.available) {
-          setRainfallStats({ maxIn: null, avgIn: null, product: null, validTime: null, notes: res.notes });
+          setRainfallStats({ maxIn: null, avgIn: null, product: null, validTime: null, notes: res.notes, tileUrl: null });
         } else {
           setRainfallStats({
             maxIn: res.maxPrecipMm != null ? +(res.maxPrecipMm / 25.4).toFixed(1) : null,
@@ -2349,6 +2349,7 @@ function App() {
             product: res.product,
             validTime: res.validTime,
             notes: res.notes,
+            tileUrl: res.tileUrlTemplate,
           });
         }
       })
@@ -3925,6 +3926,31 @@ ${fieldFlag ? `
             </Source>
           )}
 
+          {/* Rainfall raster overlay — served on-demand as PNG tiles by the
+              /api/rainfall_tile endpoint (rio-tiler + NWS precipitation ramp).
+              Rendered below the damage bubbles so loss points remain visible;
+              opacity tuned so the basemap and FEMA zones still read through. */}
+          {hazardView === 'rainfall' && rainfallStats?.tileUrl && (
+            <Source
+              id="rainfall-raster"
+              type="raster"
+              tiles={[rainfallStats.tileUrl]}
+              tileSize={256}
+              minzoom={3}
+              maxzoom={12}
+            >
+              <Layer
+                id="rainfall-raster-layer"
+                type="raster"
+                paint={{
+                  'raster-opacity': 0.72,
+                  'raster-fade-duration': 250,
+                  'raster-resampling': 'linear',
+                }}
+              />
+            </Source>
+          )}
+
           {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
           {allBuildings && mapView === 'damage' && (
@@ -5127,11 +5153,47 @@ ${fieldFlag ? `
               {!rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
                 <div className="text-gray-500">{rainfallStats.notes}</div>
               )}
-              <div className="text-gray-400 mt-1 italic">
-                {hazardView === 'rainfall'
-                  ? 'Raster overlay coming in Phase 6 (COG tiles). Loss estimates already include rainfall contribution.'
-                  : 'Compound raster (surge + rain + fluvial) already drives loss estimates; standalone overlay coming Phase 6.'}
-              </div>
+              {/* NWS rainfall legend — shown only when the raster is
+                  actually mounted. Each row: color swatch + inch range.
+                  Keeps the colors in sync with _NWS_RAIN_* in api_server.py. */}
+              {hazardView === 'rainfall' && rainfallStats?.tileUrl && (
+                <div className="mt-1.5 pt-1.5 border-t border-gray-200">
+                  <div className="text-[10px] font-semibold text-gray-600 mb-0.5">Precipitation (in)</div>
+                  <div className="flex items-center gap-0.5">
+                    {[
+                      { c: '#c8ffc8', l: '.01' },
+                      { c: '#64e664', l: '.1' },
+                      { c: '#32b432', l: '.25' },
+                      { c: '#008200', l: '.5' },
+                      { c: '#aac83c', l: '.75' },
+                      { c: '#ffff00', l: '1' },
+                      { c: '#ffc800', l: '1.5' },
+                      { c: '#ff8c00', l: '2' },
+                      { c: '#ff3c00', l: '3' },
+                      { c: '#c80000', l: '4' },
+                      { c: '#960064', l: '6' },
+                      { c: '#6e00b4', l: '8' },
+                      { c: '#4600c8', l: '10' },
+                      { c: '#ffffff', l: '15+' },
+                    ].map(stop => (
+                      <div key={stop.l} className="flex flex-col items-center" style={{ width: 14 }}>
+                        <div style={{ backgroundColor: stop.c, width: 12, height: 10, border: '1px solid rgba(0,0,0,0.15)' }} />
+                        <div className="text-[8px] text-gray-500">{stop.l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {hazardView === 'rainfall' && !rainfallStats?.tileUrl && !rainfallLoading && (
+                <div className="text-gray-400 mt-1 italic">
+                  Stats only — raster GeoTIFF not on disk for this storm yet.
+                </div>
+              )}
+              {hazardView === 'compound' && (
+                <div className="text-gray-400 mt-1 italic">
+                  Compound raster (surge + rain + fluvial) already drives loss estimates; standalone map overlay coming next.
+                </div>
+              )}
             </div>
           )}
           <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">

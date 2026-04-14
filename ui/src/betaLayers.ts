@@ -77,7 +77,9 @@ export async function fetchRainfallOverlay(
     return {
       available: true,
       source: 'mrms',
-      tileUrlTemplate: null,   // Phase 6: wire COG/XYZ tiles here
+      // Phase 6: backend returns a XYZ tile URL template (NWS colormap PNGs).
+      // Server falls back to null if the MRMS clipped tif isn't on disk yet.
+      tileUrlTemplate: data.tile_url_template ?? null,
       validTime: data.valid_time ?? null,
       bboxInches: maxIn != null && avgIn != null ? [0, +maxIn.toFixed(1)] : null,
       maxPrecipMm: data.max_precip_mm ?? null,
