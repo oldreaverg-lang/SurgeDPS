@@ -53,6 +53,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -577,23 +578,33 @@ class MRMSFetcher:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _download_one(entry):
+            # Atomic-write pattern: download → decompress → rename. Prevents
+            # a concurrent request from seeing a half-written grib_path when
+            # two users hit /api/rainfall for the same storm simultaneously
+            # (ThreadingHTTPServer fans out requests across threads).
             url, fname, gz_path, grib_path = entry
-            if os.path.exists(grib_path):
+            if os.path.exists(grib_path) and os.path.getsize(grib_path) > 0:
                 return grib_path  # cached from prior fetch (files are immutable)
+            tid = threading.get_ident()
+            gz_tmp = f"{gz_path}.tmp.{os.getpid()}.{tid}"
+            grib_tmp = f"{grib_path}.tmp.{os.getpid()}.{tid}"
             try:
                 req = urllib.request.Request(
                     url, headers={"User-Agent": "SurgeDPS/1.0 (surgedps.com)"}
                 )
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    with open(gz_path, "wb") as f:
+                    with open(gz_tmp, "wb") as f:
                         shutil.copyfileobj(resp, f)
-                with gzip.open(gz_path, "rb") as gz_in, open(grib_path, "wb") as f_out:
+                with gzip.open(gz_tmp, "rb") as gz_in, open(grib_tmp, "wb") as f_out:
                     shutil.copyfileobj(gz_in, f_out)
-                os.remove(gz_path)
+                os.remove(gz_tmp)
+                # os.replace is atomic on POSIX — a concurrent reader either
+                # sees the fully-written file or the older cached one.
+                os.replace(grib_tmp, grib_path)
                 return grib_path
             except Exception as exc:
                 logger.debug("IEM miss %s: %s", fname, exc)
-                for p in (gz_path, grib_path):
+                for p in (gz_tmp, grib_tmp):
                     if os.path.exists(p):
                         try: os.remove(p)
                         except OSError: pass
@@ -606,12 +617,11 @@ class MRMSFetcher:
                 if p is not None:
                     downloaded_paths.append(p)
 
-        # Parse grib files in parallel too — cfgrib with indexpath="" doesn't
-        # write sidecar indices so threads are safe. This is the larger half
-        # of cold-fetch wall-clock (~20 s of 40 s for a 72-hour window).
-        # Parse sequentially — cfgrib holds the GIL and each open materializes
-        # the full CONUS grid (~300 MB); more threads just thrash memory.
+        # Parse sequentially. cfgrib materializes the full CONUS grid
+        # (~300 MB) on each open — threading it just thrashes memory and
+        # got OOM-killed under Railway's container limits in testing.
         parsed: list[tuple] = []
+        shape_mismatch = 0
         for gp in downloaded_paths:
             arr, lats, lons = self._grib_to_clipped_array(gp, storm_bbox)
             if arr is not None:
@@ -634,6 +644,16 @@ class MRMSFetcher:
                 accumulator[hr_valid] += arr[hr_valid]
                 valid_mask_any |= hr_valid
                 hours_accumulated += 1
+            else:
+                # Shouldn't happen on a stable MRMS grid + fixed bbox, but
+                # surface it if it ever does rather than silently dropping.
+                shape_mismatch += 1
+
+        if shape_mismatch:
+            logger.warning(
+                "IEM aggregator: dropped %d hourly files whose clip shape didn't match",
+                shape_mismatch,
+            )
 
         if accumulator is None or hours_accumulated < max(4, duration_hr // 2):
             logger.info(
@@ -642,11 +662,24 @@ class MRMSFetcher:
             )
             return None
 
+        # Guard against an all-empty clip (bbox entirely outside CONUS, or the
+        # lat/lon slice came back as a 0-row array). Writing a 0-dim GeoTIFF
+        # succeeds silently but the tile server can't render anything from it.
+        if accumulator.size == 0 or min(accumulator.shape) == 0:
+            logger.warning(
+                "IEM clip produced an empty array for bbox=%s — outside CONUS?",
+                storm_bbox,
+            )
+            return None
+
         # Mark non-observed pixels as nodata so the tile server draws them
         # transparent instead of zero-green.
         accumulator[~valid_mask_any] = -9999
 
-        # Write the summed raster as a clipped GeoTIFF (units: mm).
+        # Write the summed raster as a clipped GeoTIFF (units: mm). Atomic
+        # write so a concurrent /api/rainfall caller can't see a partially
+        # written tif through the cache-hit fast path.
+        tif_tmp = f"{clipped_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
         try:
             import rasterio
             from rasterio.transform import from_bounds
@@ -657,7 +690,7 @@ class MRMSFetcher:
                 n_cols, n_rows,
             )
             with rasterio.open(
-                clipped_tif, "w",
+                tif_tmp, "w",
                 driver="GTiff", dtype="float32", count=1,
                 width=n_cols, height=n_rows,
                 crs="EPSG:4326", transform=transform,
@@ -671,8 +704,12 @@ class MRMSFetcher:
                     units="mm",
                     hours_summed=str(hours_accumulated),
                 )
+            os.replace(tif_tmp, clipped_tif)
         except Exception as exc:
             logger.error("IEM GeoTIFF write failed: %s", exc)
+            if os.path.exists(tif_tmp):
+                try: os.remove(tif_tmp)
+                except OSError: pass
             return None
 
         logger.info(
