@@ -1718,13 +1718,17 @@ class CellHandler(BaseHTTPRequestHandler):
                 # S3 fetcher retrieves the historically-correct QPE file
                 # rather than the most-recent one (which would be wrong for
                 # any non-active storm).
-                from datetime import datetime, timezone as _tz
+                from datetime import datetime, timezone as _tz, timedelta as _td
                 valid_time = None
                 if not realtime and getattr(_active_storm, 'landfall_date', None):
                     try:
+                        # End the N-hour window 48 h *after* landfall so the
+                        # accumulation spans pre-landfall rain bands + peak
+                        # rain + trailing moisture (e.g., Harvey's heaviest
+                        # totals fell 24-72 h after initial landfall).
                         valid_time = datetime.strptime(
                             _active_storm.landfall_date, '%Y-%m-%d'
-                        ).replace(hour=18, tzinfo=_tz.utc)
+                        ).replace(hour=18, tzinfo=_tz.utc) + _td(hours=48)
                     except (ValueError, AttributeError):
                         pass
                 result = fetcher.fetch_storm_accumulation(
@@ -1734,16 +1738,36 @@ class CellHandler(BaseHTTPRequestHandler):
                     realtime=realtime,
                     valid_time=valid_time,
                 )
+                # ── IEM historical fallback (2015-10 → 2020-10) ─────────
+                # NOAA S3 starts 2020-10-14. Iowa State mirrors hourly
+                # MRMS GaugeCorr_QPE_01H grib2 back to ~mid-2015, which
+                # covers Matthew/Harvey/Irma/Maria/Florence/Michael/Dorian
+                # etc. Sum N hourly files → real observed QPE. We only
+                # reach here if S3 had nothing AND a valid_time is known
+                # (no point trying IEM for unnamed active storms).
+                if result is None and valid_time is not None and not realtime:
+                    try:
+                        iem_result = fetcher.fetch_iem_historical(
+                            storm_bbox=bbox,
+                            valid_time=valid_time,
+                            duration_hr=duration_hr,
+                        )
+                        if iem_result is not None:
+                            result = iem_result
+                    except Exception as _iem_err:
+                        import traceback as _tb
+                        _tb.print_exc()
+                        print(f"[rainfall] IEM historical fallback failed: {_iem_err}")
+
                 if result is None:
                     # ── Parametric fallback ───────────────────────────
-                    # MRMS S3 archive only goes back to ~2020-10-14, so
-                    # pre-2020 storms (Katrina, Ike, Sandy, Harvey, Irma,
-                    # Nate, Michael, Florence) have no observed QPE
-                    # available. Generate a Lonfat parametric total-
-                    # precipitation raster from storm parameters so the
-                    # rainfall layer still renders. Source is clearly
-                    # labelled "parametric" in the response so the UI
-                    # can distinguish observed vs modelled.
+                    # Reached only if both S3 (post-2020) and IEM
+                    # (2015-2020) returned nothing — meaning the storm
+                    # pre-dates the MRMS archive entirely (Katrina 2005,
+                    # Ike 2008, Sandy 2012, etc.). Generate a Lonfat
+                    # parametric total-precipitation raster from storm
+                    # parameters so the rainfall layer still renders.
+                    # Source is labelled "parametric" in the response.
                     try:
                         from flood_model.rainfall import estimate_rainfall_flooding
                         parametric_tif = os.path.join(

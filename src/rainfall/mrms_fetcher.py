@@ -66,6 +66,16 @@ _S3_BASE = "https://noaa-mrms-pds.s3.amazonaws.com/CONUS"
 # ── NCEP NOMADS real-time (last ~2 days) ────────────────────────────────────
 _NCEP_BASE = "https://mrms.ncep.noaa.gov/data/2D"
 
+# ── IEM (Iowa Env Mesonet) MRMS archive ─────────────────────────────────────
+# NOAA's S3 MRMS bucket only goes back to 2020-10-14. Iowa State mirrors
+# hourly GaugeCorr_QPE_01H grib2 files from mid-2015 onward, which covers
+# every modern US landfalling hurricane (Matthew 2016, Harvey/Irma/Maria 2017,
+# Florence/Michael 2018, Dorian 2019, pre-Oct-2020 storms). We sum N hourly
+# files to build an N-hour accumulation — slower than S3's pre-aggregated
+# 72H product (~70 downloads of 750 KB each) but the result is real
+# gauge-corrected observation, not a parametric model.
+_IEM_BASE = "https://mtarchive.geol.iastate.edu"
+
 # Product path templates
 _PRODUCT_PATHS = {
     (1,  1): "MultiSensor_QPE_01H_Pass1_00.00",
@@ -514,6 +524,205 @@ class MRMSFetcher:
         except Exception as exc:
             logger.error("wgrib2 fallback failed: %s", exc)
             return False
+
+    # ── Internal: IEM archive (pre-2020 historical) ──────────────────────────
+
+    def fetch_iem_historical(
+        self,
+        storm_bbox: Tuple[float, float, float, float],
+        valid_time: datetime,
+        duration_hr: int = 72,
+    ) -> Optional["MRMSResult"]:
+        """
+        Build a duration_hr accumulation GeoTIFF by summing IEM's hourly
+        GaugeCorr_QPE_01H archive. Covers storms back to ~2015 — the gap
+        between pre-S3 (2020-10-14) and early MRMS deployment.
+
+        Returns None if too few hourly files are retrievable (< 50%) or if
+        the grib parser fails on every file.
+        """
+        import numpy as np
+
+        # Cache key tied to (valid_time, duration_hr, bbox) so Harvey at
+        # 2017-08-26 18Z and 2017-08-27 18Z can coexist on disk.
+        bbox_str = "_".join(f"{v:.3f}" for v in storm_bbox)
+        cache_token = f"iem|{valid_time.isoformat()}|{duration_hr}|{bbox_str}"
+        cache_key = hashlib.md5(cache_token.encode()).hexdigest()[:12]
+        clipped_tif = os.path.join(self.cache_dir, f"iem_{cache_key}.tif")
+
+        if os.path.exists(clipped_tif):
+            logger.info("IEM cache hit: %s", clipped_tif)
+            return self._result_from_tif(
+                clipped_tif,
+                f"IEM_GaugeCorr_QPE_{duration_hr:02d}H",
+                valid_time, duration_hr, storm_bbox, source="mrms_iem",
+            )
+
+        # Build target URLs for every hour in the window.
+        hour_targets = []
+        for i in range(duration_hr):
+            t = valid_time - timedelta(hours=i)
+            url = (
+                f"{_IEM_BASE}/{t.year:04d}/{t.month:02d}/{t.day:02d}"
+                f"/mrms/ncep/GaugeCorr_QPE_01H"
+                f"/GaugeCorr_QPE_01H_00.00_{t.strftime('%Y%m%d-%H%M%S')}.grib2.gz"
+            )
+            fname = os.path.basename(url)
+            gz_path = os.path.join(self.cache_dir, fname)
+            grib_path = gz_path[:-3]
+            hour_targets.append((url, fname, gz_path, grib_path))
+
+        # Parallel downloads — 72 sequential HTTPs takes >30 s (Railway request
+        # timeout territory); 12 workers runs the whole window in ~5-8 s.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _download_one(entry):
+            url, fname, gz_path, grib_path = entry
+            if os.path.exists(grib_path):
+                return grib_path  # cached from prior fetch (files are immutable)
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "SurgeDPS/1.0 (surgedps.com)"}
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    with open(gz_path, "wb") as f:
+                        shutil.copyfileobj(resp, f)
+                with gzip.open(gz_path, "rb") as gz_in, open(grib_path, "wb") as f_out:
+                    shutil.copyfileobj(gz_in, f_out)
+                os.remove(gz_path)
+                return grib_path
+            except Exception as exc:
+                logger.debug("IEM miss %s: %s", fname, exc)
+                for p in (gz_path, grib_path):
+                    if os.path.exists(p):
+                        try: os.remove(p)
+                        except OSError: pass
+                return None
+
+        downloaded_paths: list[str] = []
+        with ThreadPoolExecutor(max_workers=24) as ex:
+            for fut in as_completed([ex.submit(_download_one, t) for t in hour_targets]):
+                p = fut.result()
+                if p is not None:
+                    downloaded_paths.append(p)
+
+        # Parse grib files in parallel too — cfgrib with indexpath="" doesn't
+        # write sidecar indices so threads are safe. This is the larger half
+        # of cold-fetch wall-clock (~20 s of 40 s for a 72-hour window).
+        # Parse sequentially — cfgrib holds the GIL and each open materializes
+        # the full CONUS grid (~300 MB); more threads just thrash memory.
+        parsed: list[tuple] = []
+        for gp in downloaded_paths:
+            arr, lats, lons = self._grib_to_clipped_array(gp, storm_bbox)
+            if arr is not None:
+                parsed.append((arr, lats, lons))
+
+        # Reduce sequentially — adding float32 arrays isn't worth parallelizing
+        # at this size (~500x500 per hour) and keeps shape-check logic simple.
+        accumulator = None
+        accum_lats = accum_lons = None
+        valid_mask_any = None
+        hours_accumulated = 0
+
+        for arr, lats, lons in parsed:
+            if accumulator is None:
+                accumulator = np.zeros_like(arr, dtype=np.float32)
+                valid_mask_any = np.zeros_like(arr, dtype=bool)
+                accum_lats, accum_lons = lats, lons
+            if arr.shape == accumulator.shape:
+                hr_valid = arr >= 0
+                accumulator[hr_valid] += arr[hr_valid]
+                valid_mask_any |= hr_valid
+                hours_accumulated += 1
+
+        if accumulator is None or hours_accumulated < max(4, duration_hr // 2):
+            logger.info(
+                "IEM fetch gave up: only %d/%d hourly files retrievable",
+                hours_accumulated, duration_hr,
+            )
+            return None
+
+        # Mark non-observed pixels as nodata so the tile server draws them
+        # transparent instead of zero-green.
+        accumulator[~valid_mask_any] = -9999
+
+        # Write the summed raster as a clipped GeoTIFF (units: mm).
+        try:
+            import rasterio
+            from rasterio.transform import from_bounds
+            n_rows, n_cols = accumulator.shape
+            transform = from_bounds(
+                float(accum_lons.min()), float(accum_lats.min()),
+                float(accum_lons.max()), float(accum_lats.max()),
+                n_cols, n_rows,
+            )
+            with rasterio.open(
+                clipped_tif, "w",
+                driver="GTiff", dtype="float32", count=1,
+                width=n_cols, height=n_rows,
+                crs="EPSG:4326", transform=transform,
+                nodata=-9999,
+                compress="deflate", predictor=3,
+            ) as dst:
+                dst.write(accumulator, 1)
+                dst.update_tags(
+                    source="MRMS_IEM_archive",
+                    product=f"GaugeCorr_QPE_{duration_hr:02d}H_sum",
+                    units="mm",
+                    hours_summed=str(hours_accumulated),
+                )
+        except Exception as exc:
+            logger.error("IEM GeoTIFF write failed: %s", exc)
+            return None
+
+        logger.info(
+            "IEM historical: summed %d/%d hours ending %s → %s",
+            hours_accumulated, duration_hr, valid_time.isoformat(), clipped_tif,
+        )
+        return self._result_from_tif(
+            clipped_tif,
+            f"IEM_GaugeCorr_QPE_{duration_hr:02d}H",
+            valid_time, duration_hr, storm_bbox, source="mrms_iem",
+        )
+
+    def _grib_to_clipped_array(
+        self,
+        grib_path: str,
+        bbox: Tuple[float, float, float, float],
+    ) -> Tuple[Optional["np.ndarray"], Optional["np.ndarray"], Optional["np.ndarray"]]:
+        """Parse a single hourly GRIB2 → (data, lats, lons) clipped to bbox.
+
+        Returns (None, None, None) on any parse failure. Used by the IEM
+        historical aggregator; the non-aggregating S3/NCEP path writes
+        straight to GeoTIFF via _grib_to_clipped_tif instead.
+        """
+        lon_min, lat_min, lon_max, lat_max = bbox
+        try:
+            import xarray as xr
+            import numpy as np
+            ds = xr.open_dataset(grib_path, engine="cfgrib", indexpath="")
+            if "tp" in ds:
+                da = ds["tp"]
+            elif "unknown" in ds:
+                da = ds["unknown"]
+            else:
+                da = list(ds.data_vars.values())[0]
+            if float(da.longitude.max()) > 180:
+                da = da.assign_coords(
+                    longitude=(da.longitude + 180) % 360 - 180
+                ).sortby("longitude")
+            da_clip = da.sel(
+                latitude=slice(lat_max, lat_min),
+                longitude=slice(lon_min, lon_max),
+            )
+            data = da_clip.values.astype("float32")
+            lats = da_clip.latitude.values
+            lons = da_clip.longitude.values
+            ds.close()
+            return data, lats, lons
+        except Exception as exc:
+            logger.debug("IEM grib parse failed on %s: %s", os.path.basename(grib_path), exc)
+            return None, None, None
 
     def _result_from_tif(
         self,

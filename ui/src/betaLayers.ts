@@ -79,7 +79,10 @@ export async function fetchRainfallOverlay(
 ): Promise<RainfallOverlay> {
   try {
     const url = `/surgedps/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    // First fetch of a pre-2020 storm spins up the IEM historical aggregator,
+    // which downloads and sums 72 hourly MRMS grib2 files (~40 s cold, <1 s
+    // warm once the clipped GeoTIFF is cached on the persistent volume).
+    const resp = await fetch(url, { signal: AbortSignal.timeout(90_000) });
     if (!resp.ok) {
       const text = await resp.text().catch(() => resp.statusText);
       return {
