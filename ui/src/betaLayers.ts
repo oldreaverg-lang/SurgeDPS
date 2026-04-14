@@ -417,6 +417,8 @@ export type AccessEstimate = {
   etaHours: number | null;       // hours until area is likely accessible
   limitingFactor: 'surge' | 'road_closure' | 'debris' | 'unknown';
   confidence: 'low' | 'medium' | 'high';
+  maxDepthFt?: number | null;    // deepest inundation on the best route
+  miles?: number | null;         // route length (OSM reachability only)
   notes?: string;
 };
 
@@ -434,18 +436,32 @@ export type TimeToAccessLayer = {
  * heuristic ETAs (confidence='low'); OSM × depth reachability is
  * the next upgrade. See PHASE5_DATA_CONTRACTS.md §4.
  */
+export type HotspotRef = { rank: number; lat: number; lon: number };
+
 export async function fetchTimeToAccess(
   _stormId: string,
-  hotspotRanks: number[],
+  hotspots: number[] | HotspotRef[],
 ): Promise<TimeToAccessLayer> {
   try {
-    if (!hotspotRanks.length) {
+    if (!hotspots.length) {
       return { available: false, estimates: [], generatedAt: null,
         notes: 'No hotspots to estimate.' };
     }
-    const qs = encodeURIComponent(hotspotRanks.join(','));
-    const resp = await fetch(`/api/time_to_access?ranks=${qs}`, {
-      signal: AbortSignal.timeout(10_000),
+    // Support both call shapes: bare ranks (legacy) and {rank,lat,lon}
+    // objects (preferred — lets the backend route on OSM roads).
+    const first = hotspots[0] as any;
+    const hasCoords = typeof first === 'object' && 'lat' in first && 'lon' in first;
+    const ranks = hasCoords
+      ? (hotspots as HotspotRef[]).map(h => h.rank).join(',')
+      : (hotspots as number[]).join(',');
+    const coords = hasCoords
+      ? (hotspots as HotspotRef[]).map(h => `${h.lon.toFixed(5)},${h.lat.toFixed(5)}`).join(';')
+      : '';
+    const qs = coords
+      ? `ranks=${encodeURIComponent(ranks)}&coords=${encodeURIComponent(coords)}`
+      : `ranks=${encodeURIComponent(ranks)}`;
+    const resp = await fetch(`/api/time_to_access?${qs}`, {
+      signal: AbortSignal.timeout(30_000),
     });
     if (!resp.ok) {
       return { available: false, estimates: [], generatedAt: null,
@@ -457,6 +473,8 @@ export async function fetchTimeToAccess(
       etaHours: e.eta_hours ?? null,
       limitingFactor: e.limiting_factor ?? 'unknown',
       confidence: e.confidence ?? 'low',
+      maxDepthFt: e.max_depth_ft ?? null,
+      miles: e.miles ?? null,
       notes: e.notes,
     }));
     return {

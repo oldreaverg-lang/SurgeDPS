@@ -6,5 +6,8 @@ rasterio>=1.3
 # backing /api/rainfall_tile. Pulls morecantile, pydantic, pillow; all safe.
 rio-tiler>=6,<8
 shapely>=2.0
+# networkx — graph search for E6 time-to-access reachability analysis
+# (Dijkstra over OSM road segments weighted by current inundation).
+networkx>=3,<4
 duckdb>=1.1
 boto3>=1.34               # Cloudflare R2 storage (S3-compatible); no-op if env vars absent

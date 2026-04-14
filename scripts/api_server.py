@@ -1562,9 +1562,10 @@ class CellHandler(BaseHTTPRequestHandler):
         # Reads PERSISTENT_DIR/vendors/vendors.json (an array of
         # { vendor_id, vendor_name, specialties, contact_url, notes,
         #   service_area: <GeoJSON Polygon|MultiPolygon> }) and computes
-        # each vendor's coverage % against the active storm footprint
-        # (4° box around landfall — intentionally coarse for v1).
-        # Future: compute against the union of hotspot polygons.
+        # each vendor's coverage % against the *union of flooded hotspot
+        # polygons* for the active storm. Falls back to a 4° bbox around
+        # landfall when no cells have been processed yet (so vendor bars
+        # aren't empty on a cold-start storm).
         if path == '/api/vendor_coverage':
             if _active_storm is None:
                 self._send_error(400, 'No storm active'); return
@@ -1582,12 +1583,45 @@ class CellHandler(BaseHTTPRequestHandler):
                     })
                     return
                 from shapely.geometry import shape as _shape, box as _shbox
+                from shapely.ops import unary_union as _unary_union
                 with open(vfile) as _vf:
                     vendors_in = json.load(_vf)
                 if not isinstance(vendors_in, list):
                     vendors_in = vendors_in.get('vendors', []) if isinstance(vendors_in, dict) else []
+
+                # Build storm footprint from the union of processed
+                # cells' flood polygons. This is the real "affected
+                # area" the CAT lead cares about — not a bbox.
                 clat = _active_storm.landfall_lat; clon = _active_storm.landfall_lon
-                storm_footprint = _shbox(clon - 4, clat - 4, clon + 4, clat + 4)
+                sdir = os.path.join(CACHE_DIR, _active_storm.storm_id)
+                flood_polys = []
+                if os.path.isdir(sdir):
+                    for fn in os.listdir(sdir):
+                        if not fn.endswith('_flood.geojson'): continue
+                        try:
+                            with open(os.path.join(sdir, fn)) as _ff:
+                                fj = json.load(_ff)
+                            for feat in (fj.get('features') or []):
+                                g = feat.get('geometry')
+                                if not g: continue
+                                try:
+                                    flood_polys.append(_shape(g))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            continue
+                footprint_source: str
+                if flood_polys:
+                    try:
+                        storm_footprint = _unary_union(flood_polys)
+                    except Exception:
+                        storm_footprint = _shbox(clon - 4, clat - 4, clon + 4, clat + 4)
+                        flood_polys = []  # signal fallback
+                    footprint_source = f'union of {len(flood_polys)} flooded polygon(s)'
+                else:
+                    storm_footprint = _shbox(clon - 4, clat - 4, clon + 4, clat + 4)
+                    footprint_source = '4° bbox around landfall (no cells processed yet)'
+
                 storm_area = storm_footprint.area or 1.0
                 out = []
                 for v in vendors_in:
@@ -1612,64 +1646,104 @@ class CellHandler(BaseHTTPRequestHandler):
                 out.sort(key=lambda r: r['coverage_pct'], reverse=True)
                 self._send_json(200, {
                     'available': True, 'vendors': out,
-                    'notes': f'Coverage computed against a 4° bbox around landfall ({len(out)} vendor(s) in manifest).',
+                    'notes': f'Coverage computed against {footprint_source}; {len(out)} vendor(s) in manifest.',
                 })
             except Exception as e:
                 self._send_error(500, f'vendor_coverage error: {e}')
             return
 
-        # ── GET /api/time_to_access?ranks=1,2,3 ──
-        # Hotspot access-time heuristic. For v1 this is a deliberately
-        # coarse estimate (confidence='low') based on the storm's
-        # max_surge and each hotspot's rank: higher rank ≈ more damage
-        # and/or more inland, so longer access window. The contract
-        # documents a POST endpoint, but because the payload is tiny
-        # (a handful of small integers) a GET with a comma-separated
-        # list is simpler and avoids a POST handler. Shape is
-        # identical to the documented TimeToAccessLayer.
+        # ── GET /api/time_to_access?ranks=1,2,3&coords=lon,lat;lon,lat ──
+        # Hotspot access-time estimator. When hotspot coordinates are
+        # supplied and the storm has an OSM bbox we can fetch, this
+        # routes Dijkstra over OSM arterials weighted by the current
+        # compound-depth mosaic (see scripts/road_reachability.py).
+        # Falls back to a rank × max-surge heuristic when the road
+        # graph can't be built (no coords, Overpass down, etc.).
         if path == '/api/time_to_access':
             if _active_storm is None:
                 self._send_error(400, 'No storm active'); return
             try:
-                raw = (params.get('ranks') or [''])[0]
-                ranks = [int(r) for r in raw.split(',') if r.strip().isdigit()]
+                import datetime as _dt
+                raw_ranks = (params.get('ranks') or [''])[0]
+                ranks = [int(r) for r in raw_ranks.split(',') if r.strip().lstrip('-').isdigit()]
+                raw_coords = (params.get('coords') or [''])[0]
+                coords: list[tuple[float, float]] = []
+                if raw_coords:
+                    for pair in raw_coords.split(';'):
+                        try:
+                            lon_s, lat_s = pair.split(',')
+                            coords.append((float(lon_s), float(lat_s)))
+                        except Exception:
+                            coords.append((0.0, 0.0))
                 if not ranks:
                     self._send_json(200, {
                         'available': False, 'estimates': [], 'generated_at': None,
                         'notes': 'No ranks supplied. Pass ?ranks=1,2,3 with the hotspot rank list.',
                     })
                     return
-                # Simple model: base ETA scales with max_surge; each rank
-                # adds ~2h because higher-rank hotspots are more damaged.
-                try:
-                    max_surge = float(getattr(_active_storm, 'max_surge_ft', 0) or 0)
-                except Exception:
-                    max_surge = 0.0
-                base_hr = 6.0 + max_surge * 2.0   # ~6h for no surge, ~36h at 15ft
-                import datetime as _dt
-                estimates = []
-                for r in ranks:
-                    eta = base_hr + r * 2.0
-                    # Above rank 10 or very high surge, label surge as limiting;
-                    # otherwise debris/road closures dominate.
-                    if max_surge >= 10:
-                        limiting = 'surge'
-                    elif r > 10:
-                        limiting = 'debris'
-                    else:
-                        limiting = 'road_closure'
-                    estimates.append({
-                        'hotspot_rank': r,
-                        'eta_hours': round(eta, 1),
-                        'limiting_factor': limiting,
-                        'confidence': 'low',
-                        'notes': 'Heuristic — depth × road-network model pending (see PHASE5_DATA_CONTRACTS.md §4).',
-                    })
+
+                # Try the OSM × depth reachability model first.
+                estimates: list[dict] | None = None
+                model_note = ''
+                if coords and len(coords) == len(ranks):
+                    try:
+                        from road_reachability import access_estimates as _rr
+                        storm_cache = _storm_cache_dir(_active_storm)
+                        mosaic_path = _compound_mosaic_by_storm.get(
+                            _active_storm.storm_id,
+                            os.path.join(storm_cache, 'storm_compound.tif'),
+                        )
+                        if not os.path.exists(mosaic_path):
+                            mosaic_path = None
+                        hotspot_pairs = list(zip(ranks, coords))
+                        landfall = (_active_storm.landfall_lon, _active_storm.landfall_lat)
+                        estimates = _rr(
+                            landfall=landfall,
+                            hotspots=hotspot_pairs,
+                            compound_tif_path=mosaic_path,
+                            cache_dir=storm_cache,
+                        )
+                        if estimates is not None:
+                            model_note = (
+                                f'OSM × compound-depth reachability '
+                                f'({len(estimates)} hotspot(s)'
+                                + (', depth-weighted' if mosaic_path else ', no depth raster')
+                                + ').'
+                            )
+                    except Exception as _rr_err:
+                        estimates = None
+                        model_note = f'Reachability model fell back ({_rr_err}).'
+
+                if estimates is None:
+                    # Heuristic fallback (shape-compatible).
+                    try:
+                        max_surge = float(getattr(_active_storm, 'max_surge_ft', 0) or 0)
+                    except Exception:
+                        max_surge = 0.0
+                    base_hr = 6.0 + max_surge * 2.0
+                    estimates = []
+                    for r in ranks:
+                        eta = base_hr + r * 2.0
+                        if max_surge >= 10: limiting = 'surge'
+                        elif r > 10:        limiting = 'debris'
+                        else:               limiting = 'road_closure'
+                        estimates.append({
+                            'hotspot_rank': r,
+                            'eta_hours': round(eta, 1),
+                            'limiting_factor': limiting,
+                            'confidence': 'low',
+                            'max_depth_ft': None,
+                            'miles': None,
+                            'notes': 'Heuristic — OSM reachability unavailable.',
+                        })
+                    if not model_note:
+                        model_note = f'Heuristic ETAs (max_surge={max_surge:.1f} ft).'
+
                 self._send_json(200, {
                     'available': True,
                     'estimates': estimates,
                     'generated_at': _dt.datetime.utcnow().isoformat() + 'Z',
-                    'notes': f'Heuristic ETAs for {len(estimates)} hotspot(s) based on max_surge={max_surge:.1f} ft.',
+                    'notes': model_note,
                 })
             except Exception as e:
                 self._send_error(500, f'time_to_access error: {e}')

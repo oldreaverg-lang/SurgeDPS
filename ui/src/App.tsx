@@ -1160,7 +1160,7 @@ function BetaDataLayersPanel({
         fetchRainfallOverlay(stormId),
         subPersona === 'em' ? fetchShelterCapacity(stormId, { lat: (storm as any).landfall_lat ?? 0, lon: (storm as any).landfall_lon ?? 0 }) : Promise.resolve(null),
         subPersona === 'cat' ? fetchVendorCoverage(stormId) : Promise.resolve(null),
-        subPersona === 'em' ? fetchTimeToAccess(stormId, hotspots.map(h => h.rank)) : Promise.resolve(null),
+        subPersona === 'em' ? fetchTimeToAccess(stormId, hotspots.map(h => ({ rank: h.rank, lat: h.lat, lon: h.lon }))) : Promise.resolve(null),
       ]);
       if (cancelled) return;
       setRainfall(r);
