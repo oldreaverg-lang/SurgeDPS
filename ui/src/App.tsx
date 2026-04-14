@@ -4405,7 +4405,7 @@ ${fieldFlag ? `
             </Source>
           )}
 
-          {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
+          {layerSurge && allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
           {allBuildings && mapView === 'damage' && (
             <Source id="damage-data" type="geojson" data={displayBuildings ?? allBuildings}

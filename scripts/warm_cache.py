@@ -552,9 +552,9 @@ def main():
     print("Phase 3: Warming FEMA NFHL flood zone tile cache")
     print("=" * 60)
 
-    import urllib.request as _fz_req
     import urllib.parse as _fz_parse
     import json as _fz_json
+    import requests as _fz_requests
 
     _FEMA_URL = (
         'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query'
@@ -562,7 +562,7 @@ def main():
     _FEMA_UA = 'SurgeDPS/1.0 (+https://stormdps.com) warm_cache'
     _FZ_TILE_DEG = 2.0      # fetch one 2° × 2° tile per request
     _FZ_RADIUS_DEG = 4.0    # cover ±4° around landfall in each axis → 4×4 grid
-    _FZ_TIMEOUT = 30        # seconds per FEMA request
+    _FZ_TIMEOUT = 45        # seconds per FEMA request (raised; hazards.fema.gov is slow)
 
     fz_cache_dir = os.path.join(str(PERSISTENT_DIR), 'cache', 'flood_zones')
     os.makedirs(fz_cache_dir, exist_ok=True)
@@ -617,9 +617,15 @@ def main():
                 })
                 fema_url = f'{_FEMA_URL}?{qs_str}'
                 try:
-                    req = _fz_req.Request(fema_url, headers={'User-Agent': _FEMA_UA})
-                    with _fz_req.urlopen(req, timeout=_FZ_TIMEOUT) as resp:
-                        raw = resp.read()
+                    # requests handles TLS session resumption and unexpected
+                    # EOF far more gracefully than urllib's raw SSL socket.
+                    _fz_resp = _fz_requests.get(
+                        fema_url,
+                        headers={'User-Agent': _FEMA_UA},
+                        timeout=_FZ_TIMEOUT,
+                    )
+                    _fz_resp.raise_for_status()
+                    raw = _fz_resp.content
                     # Validate JSON before caching (FEMA occasionally returns
                     # HTML error pages with HTTP 200).
                     parsed = _fz_json.loads(raw)
