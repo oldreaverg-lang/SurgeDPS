@@ -17,7 +17,8 @@ import io
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -574,11 +575,20 @@ class QPFFetcher:
                 return None
 
             # Try recent cycles until one has every fhr we need. WPC posts
-            # new cycles ~50 min after cycle time; probe up to ~24h back.
-            now = datetime.utcnow()
+            # new cycles ~50 min after cycle time; probe up to ~48h back.
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             cycle = now.replace(minute=0, second=0, microsecond=0)
             # snap to nearest past 00/06/12/18 cycle
             cycle = cycle.replace(hour=(cycle.hour // 6) * 6)
+
+            import threading as _th
+            tid = _th.get_ident()
+
+            def _head_ok(u: str) -> bool:
+                try:
+                    return self.session.head(u, timeout=10, allow_redirects=True).status_code == 200
+                except Exception:
+                    return False
 
             grib_paths: list[str] = []
             picked_cycle: Optional[datetime] = None
@@ -589,11 +599,11 @@ class QPFFetcher:
                     (fh, f"{self.config.qpf_base_url}p24m_{cycle_tag}f{fh:03d}.grb")
                     for fh in fhrs
                 ]
-                # HEAD each file; skip cycle if any missing
-                if not all(
-                    self.session.head(u, timeout=10, allow_redirects=True).status_code == 200
-                    for _, u in candidates
-                ):
+                # Probe in parallel — 3 sequential HEADs × 8 cycles × 10s
+                # timeout = 240s worst case. Parallel cuts this to ~80s.
+                with ThreadPoolExecutor(max_workers=len(candidates)) as ex:
+                    ok = list(ex.map(_head_ok, [u for _, u in candidates]))
+                if not all(ok):
                     continue
 
                 picked_cycle = c
@@ -602,11 +612,17 @@ class QPFFetcher:
                     resp = self.session.get(
                         url, timeout=self.config.http_timeout
                     )
-                    if resp.status_code != 200 or not resp.content:
+                    # Sanity check: WPC 24h QPF files are 150–500 KB.
+                    # Anything under 10 KB is almost certainly an error page.
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 10_000:
+                        logger.info(
+                            "WPC QPF: bad response for f%03d (status=%d, len=%d)",
+                            fh, resp.status_code, len(resp.content) if resp.content else 0,
+                        )
                         grib_paths = []
                         break
                     gp = os.path.join(output_dir, f"qpf_{cycle_tag}_f{fh:03d}.grb")
-                    tmp = f"{gp}.tmp.{os.getpid()}"
+                    tmp = f"{gp}.tmp.{os.getpid()}.{tid}"
                     with open(tmp, "wb") as f:
                         f.write(resp.content)
                     os.replace(tmp, gp)
@@ -650,20 +666,28 @@ class QPFFetcher:
         try:
             import rasterio
             from rasterio.mask import mask as rasterio_mask
+            from rasterio.warp import transform_geom
             from shapely.geometry import shape, mapping
 
             storm_shape = shape(storm_geometry)
             buffered = storm_shape.buffer(self.config.cone_buffer_km / 111.0)
-            geoms = [mapping(buffered)]
+            wgs84_geom = mapping(buffered)
 
             accumulator: Optional[np.ndarray] = None
             ref_transform = None
             ref_profile: Optional[dict] = None
+            ref_crs = None
 
             for gp in grib_paths:
                 with rasterio.open(gp) as src:
+                    # WPC QPF is on a Lambert Conformal Conic grid (meters).
+                    # Reproject the WGS84 storm polygon into the grid's CRS
+                    # before clipping — otherwise rasterio.mask reads the
+                    # lat/lon coords as meters in LCC and returns a 1×1
+                    # nodata tile.
+                    src_geom = transform_geom("EPSG:4326", src.crs, wgs84_geom)
                     out_image, out_transform = rasterio_mask(
-                        src, geoms, crop=True, nodata=-9999
+                        src, [src_geom], crop=True, nodata=-9999
                     )
                     # (1, H, W) → (H, W); zero-out nodata so sums are clean
                     arr = out_image[0].astype(np.float32)
@@ -686,8 +710,9 @@ class QPFFetcher:
                 logger.info("WPC QPF: empty clip — storm bbox outside grid")
                 return None
 
+            import threading as _th
             output_path = os.path.join(output_dir, "qpf_rainfall.tif")
-            tmp_path = f"{output_path}.tmp.{os.getpid()}"
+            tmp_path = f"{output_path}.tmp.{os.getpid()}.{_th.get_ident()}"
             ref_profile.update(
                 driver="GTiff",
                 transform=ref_transform,
