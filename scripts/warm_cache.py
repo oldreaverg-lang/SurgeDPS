@@ -195,10 +195,26 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
     lon_max = lon_min + CELL_WIDTH
     lat_max = lat_min + CELL_HEIGHT
 
+    # Track files this cell touched so we can clean up on failure — a half-
+    # finished cell that leaves a truncated depth.tif or buildings.json on
+    # disk would trip the next warm pass (depth.tif "not recognized",
+    # buildings.json "Unterminated string").
+    artifacts_this_run: list[str] = []
+
     try:
         # 1. Surge raster
         raster_path = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
+        # Guard against a zero-byte / truncated .tif left over from an
+        # earlier crashed run. Anything under a few hundred bytes can't be
+        # a valid GeoTIFF for our 200×200 float32 rasters.
+        if os.path.exists(raster_path):
+            try:
+                if os.path.getsize(raster_path) < 512:
+                    os.remove(raster_path)
+            except OSError:
+                pass
         if not os.path.exists(raster_path):
+            artifacts_this_run.append(raster_path)
             generate_surge_raster(
                 lon_min=lon_min, lat_min=lat_min,
                 lon_max=lon_max, lat_max=lat_max,
@@ -215,10 +231,21 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
         # 2. Flood polygons
         flood_path = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
         if not os.path.exists(flood_path):
+            artifacts_this_run.append(flood_path)
             raster_to_geojson(raster_path, flood_path)
 
         # 3. OSM buildings
         buildings_path = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
+        # Drop zero-byte / unreadable remnants before the fetcher's cache
+        # check trusts them.
+        if os.path.exists(buildings_path):
+            try:
+                if os.path.getsize(buildings_path) < 2:
+                    os.remove(buildings_path)
+            except OSError:
+                pass
+        if not os.path.exists(buildings_path):
+            artifacts_this_run.append(buildings_path)
         fetch_buildings(lon_min, lat_min, lon_max, lat_max, buildings_path, cache=True)
 
         with open(buildings_path) as f:
@@ -232,6 +259,8 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
         # from live-computed cells. Visible as a hard rectangular boundary
         # where pre-cached cells meet live-loaded cells.
         damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
+        if not os.path.exists(damage_path):
+            artifacts_this_run.append(damage_path)
         if buildings_data.get('features'):
             # Final-tick HAZUS only. Per-tick bundle is lazy — generated on
             # first /cell_ticks request from the frontend slider.
@@ -282,6 +311,15 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
 
     except Exception as e:
         print(f"    ERROR cell ({col},{row}): {e}")
+        # Remove anything we wrote (or were about to write to) this pass.
+        # Otherwise a half-written .tif or .geojson blocks the retry pass
+        # from regenerating cleanly.
+        for _p in artifacts_this_run:
+            try:
+                if os.path.exists(_p):
+                    os.remove(_p)
+            except OSError:
+                pass
         return False
 
 

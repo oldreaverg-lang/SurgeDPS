@@ -165,8 +165,21 @@ def raster_to_geojson(
         "features": features,
     }
 
-    with open(output_path, "w") as f:
-        json.dump(geojson, f)
+    # Atomic write: stage to .tmp then rename, so a mid-write crash can't
+    # leave a truncated JSON that the next warm-cache pass would load as
+    # an "Unterminated string" JSONDecodeError.
+    tmp_path = output_path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(geojson, f)
+        os.replace(tmp_path, output_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
     logger.info(
         f"Grid output: {len(features)} cells, "

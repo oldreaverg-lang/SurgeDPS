@@ -120,13 +120,23 @@ def fetch_buildings_nsi(
         occtype     - raw NSI occupancy type
     """
     if cache and os.path.exists(output_path):
-        with open(output_path) as f:
-            data = json.load(f)
-        n = len(data.get("features", []))
-        # Check it's an NSI file (has val_struct)
-        if n > 0 and "val_struct" in (data["features"][0].get("properties") or {}):
-            logger.info("[NSI] Cache hit: %d structures from %s", n, output_path)
-            return output_path
+        try:
+            with open(output_path) as f:
+                data = json.load(f)
+            n = len(data.get("features", []))
+            # Check it's an NSI file (has val_struct)
+            if n > 0 and "val_struct" in (data["features"][0].get("properties") or {}):
+                logger.info("[NSI] Cache hit: %d structures from %s", n, output_path)
+                return output_path
+        except (json.JSONDecodeError, OSError, IndexError) as exc:
+            # Corrupt cache (partial write from a killed previous run, etc.)
+            # — refetch rather than blowing up the caller.
+            logger.warning("[NSI] Cached file %s unreadable (%s); refetching",
+                           output_path, exc)
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
     # NSI bbox = closed polygon of lon/lat pairs (counterclockwise rectangle)
     bbox = (
@@ -162,8 +172,18 @@ def fetch_buildings_nsi(
         logger.info("[NSI] API returned 0 features for this bbox — writing empty cache, skipping Overpass")
         empty_fc = {"type": "FeatureCollection", "features": [], "source": "NSI", "nsi_confirmed_empty": True}
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        with open(output_path, "w") as _f:
-            json.dump(empty_fc, _f)
+        _tmp = output_path + ".tmp"
+        try:
+            with open(_tmp, "w") as _f:
+                json.dump(empty_fc, _f)
+            os.replace(_tmp, output_path)
+        except Exception:
+            try:
+                if os.path.exists(_tmp):
+                    os.remove(_tmp)
+            except OSError:
+                pass
+            raise
         return output_path
 
     logger.info("[NSI] %d structures received", len(nsi_features))
@@ -286,8 +306,21 @@ def fetch_buildings_nsi(
 
     geojson = {"type": "FeatureCollection", "features": out_features}
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(geojson, f)
+    # Atomic write — see note in generate_surge_raster. Partial writes leave
+    # an "Unterminated string" JSON on disk that warm_cell would load on the
+    # next pass and fail.
+    _tmp = output_path + ".tmp"
+    try:
+        with open(_tmp, "w") as f:
+            json.dump(geojson, f)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except OSError:
+            pass
+        raise
 
     # Quick value stats
     structs = [f["properties"].get("val_struct", 0) for f in out_features if f["properties"].get("val_struct")]

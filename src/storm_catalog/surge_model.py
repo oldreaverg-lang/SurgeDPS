@@ -312,10 +312,24 @@ def generate_surge_raster(
     transform = from_bounds(lon_min, lat_min, lon_max, lat_max, cols, rows)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with rasterio.open(
-        output_path, 'w', driver='GTiff', height=rows, width=cols,
-        count=1, dtype=data.dtype, crs='+proj=latlong', transform=transform,
-    ) as dst:
-        dst.write(data, 1)
+    # Atomic write: build in a sibling tempfile then rename. Prevents a
+    # SIGKILL/OOM mid-write from leaving a truncated .tif on disk that would
+    # fail with "not recognized as being in a supported file format" on the
+    # next warm-cache pass (which skips regen when the file exists).
+    tmp_path = output_path + ".tmp"
+    try:
+        with rasterio.open(
+            tmp_path, 'w', driver='GTiff', height=rows, width=cols,
+            count=1, dtype=data.dtype, crs='+proj=latlong', transform=transform,
+        ) as dst:
+            dst.write(data, 1)
+        os.replace(tmp_path, output_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
     return output_path

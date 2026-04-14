@@ -316,8 +316,19 @@ def _fetch_microsoft_buildings(
 
     geojson = {"type": "FeatureCollection", "features": features}
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(geojson, f)
+    # Atomic write so a partial .json from a killed process can't survive.
+    _tmp = output_path + ".tmp"
+    try:
+        with open(_tmp, "w") as f:
+            json.dump(geojson, f)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except OSError:
+            pass
+        raise
 
     logger.info("[MSFT] Wrote %d building footprints to %s", len(features), output_path)
     return output_path
@@ -375,12 +386,22 @@ def fetch_buildings(
 
     # ── OSM fallback below ────────────────────────────────────────
     if cache and os.path.exists(output_path):
-        with open(output_path) as f:
-            data = json.load(f)
-        n = len(data.get("features", []))
-        logger.info(f"Using cached buildings ({n} features): {output_path}")
-        print(f"  [cache hit] {n} buildings loaded from {output_path}")
-        return output_path
+        try:
+            with open(output_path) as f:
+                data = json.load(f)
+            n = len(data.get("features", []))
+            logger.info(f"Using cached buildings ({n} features): {output_path}")
+            print(f"  [cache hit] {n} buildings loaded from {output_path}")
+            return output_path
+        except (json.JSONDecodeError, OSError) as exc:
+            # Corrupt cache (partial write from a killed previous run) —
+            # refetch instead of propagating "Unterminated string" up.
+            logger.warning("Cached buildings file %s unreadable (%s); refetching",
+                           output_path, exc)
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
     # Overpass uses (south, west, north, east) ordering
     bbox = (lat_min, lon_min, lat_max, lon_max)
@@ -470,8 +491,20 @@ def fetch_buildings(
     geojson = {"type": "FeatureCollection", "features": features}
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(geojson, f)
+    # Atomic write — partial writes would surface later as "Unterminated
+    # string" JSONDecodeError from warm_cell.
+    _tmp = output_path + ".tmp"
+    try:
+        with open(_tmp, "w") as f:
+            json.dump(geojson, f)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except OSError:
+            pass
+        raise
 
     if skipped:
         logger.info(f"Skipped {skipped} elements with no centroid data")
