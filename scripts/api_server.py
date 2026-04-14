@@ -283,6 +283,15 @@ _active_exposure_region: str = ''  # R11: cached for cell-load lookups
 _rainfall_tif_by_storm: dict[str, str] = {}
 _rainfall_tif_lock = _threading.Lock()
 
+# ── Compound tile server state ──
+# Keyed by storm_id, value is the absolute path to the mosaic VRT/tif that
+# /api/compound_tile serves. Built lazily from the per-cell compound tifs
+# in <cache>/<storm_id>/cell_*_compound.tif the first time /api/compound
+# is hit, then rebuilt whenever new cells have been processed (detected by
+# comparing the mosaic's mtime against the newest per-cell tif).
+_compound_mosaic_by_storm: dict[str, str] = {}
+_compound_lock = _threading.Lock()
+
 # ── Progress tracking for long-running activation ──
 import time as _time
 _progress: dict = {'step': '', 'step_num': 0, 'total_steps': 4, 'started_at': 0.0, 'storm_id': ''}
@@ -629,10 +638,13 @@ def load_cell(col: int, row: int) -> dict:
     _update_building_index(storm.storm_id, col, row, n_buildings)
 
     # 7. Clean up intermediate files to save volume space.
-    #    Keep: damage.geojson, flood.geojson (required for cache hits)
-    #    Remove: surge depth.tif, rainfall.tif, compound.tif, buildings.json
+    #    Keep: damage.geojson, flood.geojson (required for cache hits);
+    #          compound.tif (required for the /api/compound_tile map overlay —
+    #          we stitch all per-cell compound tifs into a storm-wide mosaic
+    #          on first tile request, so the individual cell files stay).
+    #    Remove: surge depth.tif, rainfall.tif, buildings.json, fluvial.tif
     for tmp in (raster_path, buildings_path, rainfall_raster_path,
-                compound_raster_path, _fluvial_raster_path):
+                _fluvial_raster_path):
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -717,6 +729,137 @@ def _transparent_tile_png() -> bytes:
         _Image.new('RGBA', (256, 256), (0, 0, 0, 0)).save(buf, format='PNG', optimize=True)
         _TRANSPARENT_TILE_PNG_CACHE = buf.getvalue()
     return _TRANSPARENT_TILE_PNG_CACHE
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Compound flood raster — surge + rainfall + fluvial at each cell's DEM
+# resolution, stitched across processed cells. Values are depth in feet.
+#
+# Uses a distinct "compound hazard" ramp (pale cyan → teal → indigo →
+# dark violet) so the layer visually reads different from the existing
+# surge polygons (yellow→red) and the rainfall accumulation raster
+# (green→magenta). Avoids the risk of confusing users who see three
+# overlapping hazard views.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_COMPOUND_STOPS_FT = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 14.0, 20.0]
+_COMPOUND_COLORS_RGB = [
+    (200, 240, 245),   # 0.25 ft — pale cyan (nuisance ponding)
+    (150, 215, 230),   # 0.5
+    (100, 190, 220),   # 1.0
+    (60,  155, 210),   # 2.0 — mid teal
+    (40,  120, 200),   # 3.0
+    (55,  80,  190),   # 5.0 — indigo
+    (85,  50,  170),   # 7.0
+    (110, 30,  145),   # 10.0 — purple
+    (130, 20,  110),   # 14.0
+    (150, 10,  80),    # 20.0+ — dark violet
+]
+_COMPOUND_TILE_ALPHA = 200
+
+
+def _compound_rgba(depth_ft, valid_mask):
+    """Apply the compound-hazard colormap to an (H, W) ft array."""
+    import numpy as _np
+    rgba = _np.zeros((*depth_ft.shape, 4), dtype=_np.uint8)
+    idx = _np.searchsorted(_COMPOUND_STOPS_FT, depth_ft, side='right')
+    for bucket in range(1, len(_COMPOUND_STOPS_FT) + 1):
+        sel = (idx == bucket) & valid_mask
+        if not sel.any():
+            continue
+        r, g, b = _COMPOUND_COLORS_RGB[bucket - 1]
+        rgba[sel] = (r, g, b, _COMPOUND_TILE_ALPHA)
+    return rgba
+
+
+def _build_storm_compound_mosaic(storm_id: str) -> tuple[str | None, dict]:
+    """Merge all per-cell compound tifs for a storm into a single mosaic.
+
+    Returns (mosaic_path, stats) where stats carries cell_count, max_depth_ft,
+    and avg_depth_ft. If no cells have compound tifs yet the mosaic_path is
+    None and the caller should respond with available=False.
+
+    Cheap rebuild heuristic: the mosaic gets regenerated whenever any cell
+    tif's mtime is newer than the mosaic's. In practice this triggers once
+    per new cell load — the cost (rasterio.merge of ~100 small tifs) is
+    sub-second on storm-scale data.
+    """
+    import glob as _glob, os as _os
+    import rasterio as _rio
+    from rasterio.merge import merge as _merge
+    import numpy as _np
+
+    cache_dir = _os.path.join(CACHE_DIR, storm_id)
+    if not _os.path.isdir(cache_dir):
+        return None, {'cell_count': 0}
+    cell_tifs = sorted(_glob.glob(_os.path.join(cache_dir, 'cell_*_compound.tif')))
+    if not cell_tifs:
+        return None, {'cell_count': 0}
+
+    mosaic_path = _os.path.join(cache_dir, 'storm_compound.tif')
+    # Rebuild if mosaic missing or stale vs any cell tif.
+    rebuild = True
+    if _os.path.exists(mosaic_path):
+        mo_mtime = _os.path.getmtime(mosaic_path)
+        cell_mtime_max = max(_os.path.getmtime(t) for t in cell_tifs)
+        rebuild = cell_mtime_max > mo_mtime
+
+    if rebuild:
+        datasets = [_rio.open(t) for t in cell_tifs]
+        try:
+            mosaic, transform = _merge(datasets)
+            profile = datasets[0].profile.copy()
+            profile.update(
+                driver='GTiff',
+                height=mosaic.shape[1],
+                width=mosaic.shape[2],
+                transform=transform,
+                count=1,
+                compress='deflate',
+                tiled=True,
+                blockxsize=256,
+                blockysize=256,
+            )
+            with _rio.open(mosaic_path, 'w', **profile) as dst:
+                dst.write(mosaic[0], 1)
+        finally:
+            for d in datasets:
+                d.close()
+
+    # Summary stats for the response badge.
+    with _rio.open(mosaic_path) as src:
+        arr = src.read(1, masked=True)
+        valid = ~arr.mask if hasattr(arr, 'mask') else _np.ones_like(arr, dtype=bool)
+        data = _np.asarray(arr)
+        max_ft = float(data[valid].max()) if valid.any() else 0.0
+        avg_ft = float(data[valid].mean()) if valid.any() else 0.0
+    return mosaic_path, {
+        'cell_count': len(cell_tifs),
+        'max_depth_ft': round(max_ft, 1),
+        'avg_depth_ft': round(avg_ft, 2),
+    }
+
+
+def _render_compound_tile(mosaic_path: str, z: int, x: int, y: int) -> bytes:
+    import io as _io
+    from PIL import Image as _Image
+    try:
+        from rio_tiler.io import Reader as _Reader
+        from rio_tiler.errors import TileOutsideBounds as _TileOOB
+    except ImportError:
+        return _transparent_tile_png()
+    try:
+        with _Reader(mosaic_path) as src:
+            tile = src.tile(x, y, z, tilesize=256)
+    except _TileOOB:
+        return _transparent_tile_png()
+    data = tile.data[0].astype('float32')
+    valid = tile.mask > 0 if tile.mask is not None else (data > 0)
+    rgba = _compound_rgba(data, valid)
+    img = _Image.fromarray(rgba, 'RGBA')
+    buf = _io.BytesIO()
+    img.save(buf, format='PNG', optimize=True)
+    return buf.getvalue()
 
 
 def _render_rainfall_tile(tif_path: str, z: int, x: int, y: int) -> bytes:
@@ -1293,6 +1436,79 @@ class CellHandler(BaseHTTPRequestHandler):
                 png_bytes = _render_rainfall_tile(tif_path, z, x, y)
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=86400')
+            except Exception as e:
+                self._send_error(500, f'tile error: {e}')
+            return
+
+        # ── GET /api/compound?storm_id=<id> ──
+        # Returns storm-wide compound flood raster (surge + rainfall + fluvial)
+        # stats and a XYZ tile URL template. The mosaic is built lazily from
+        # the per-cell compound tifs process_cell writes; only cells the user
+        # has already loaded contribute. Empty-storm case returns
+        # available=false with a hint to load some cells first.
+        if path == '/api/compound':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active')
+                return
+            try:
+                with _compound_lock:
+                    mosaic_path, stats = _build_storm_compound_mosaic(_active_storm.storm_id)
+                    if mosaic_path:
+                        _compound_mosaic_by_storm[_active_storm.storm_id] = mosaic_path
+                if mosaic_path is None:
+                    self._send_json(200, {
+                        'available': False,
+                        'storm_id': _active_storm.storm_id,
+                        'cell_count': 0,
+                        'notes': 'No cells loaded yet — load at least one cell to see compound flooding.',
+                    })
+                    return
+                self._send_json(200, {
+                    'available': True,
+                    'storm_id': _active_storm.storm_id,
+                    'cell_count': stats['cell_count'],
+                    'max_depth_ft': stats['max_depth_ft'],
+                    'avg_depth_ft': stats['avg_depth_ft'],
+                    'tile_url_template': (
+                        f'/api/compound_tile/{{z}}/{{x}}/{{y}}.png?storm_id={_active_storm.storm_id}'
+                    ),
+                    'notes': f"Compound mosaic of {stats['cell_count']} cell(s) — "
+                             f"surge + rainfall + fluvial combined.",
+                })
+            except Exception as e:
+                self._send_error(500, str(e))
+            return
+
+        # ── GET /api/compound_tile/{z}/{x}/{y}.png?storm_id=<id> ──
+        # XYZ PNG tile server for the compound flood mosaic. Mirrors
+        # /api/rainfall_tile but reads the storm_compound.tif mosaic and
+        # uses the depth colormap instead of NWS precipitation.
+        if path.startswith('/api/compound_tile/'):
+            try:
+                storm_id = (params.get('storm_id') or [''])[0]
+                if not storm_id:
+                    self._send_error(400, 'Missing storm_id')
+                    return
+                with _compound_lock:
+                    mosaic_path = _compound_mosaic_by_storm.get(storm_id)
+                    # Lazy first build if client hit the tile endpoint directly.
+                    if mosaic_path is None or not os.path.exists(mosaic_path):
+                        mosaic_path, _ = _build_storm_compound_mosaic(storm_id)
+                        if mosaic_path:
+                            _compound_mosaic_by_storm[storm_id] = mosaic_path
+                if not mosaic_path or not os.path.exists(mosaic_path):
+                    self._send_raw(200, _transparent_tile_png(), content_type='image/png',
+                                   cache_control='no-cache')
+                    return
+                parts = path[len('/api/compound_tile/'):].split('/')
+                if len(parts) != 3 or not parts[2].endswith('.png'):
+                    self._send_error(400, 'Expected /api/compound_tile/{z}/{x}/{y}.png')
+                    return
+                z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
+                png_bytes = _render_compound_tile(mosaic_path, z, x, y)
+                # Mosaic changes as cells load, so cache is shorter than rainfall.
+                self._send_raw(200, png_bytes, content_type='image/png',
+                               cache_control='public, max-age=300')
             except Exception as e:
                 self._send_error(500, f'tile error: {e}')
             return

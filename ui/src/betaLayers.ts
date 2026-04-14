@@ -99,6 +99,55 @@ export async function fetchRainfallOverlay(
 }
 
 // ───────────────────────────────────────────────────────────
+// Compound hazard overlay (surge ∪ rainfall, per-cell mosaic)
+//
+// Backend stitches per-cell compound.tif into a storm-wide
+// mosaic on demand. Returns depth stats + an XYZ tile URL
+// template rendered with a depth colormap (pale cyan → violet).
+// ───────────────────────────────────────────────────────────
+export type CompoundOverlay = {
+  available: boolean;
+  cellCount: number;
+  maxDepthFt: number | null;
+  avgDepthFt: number | null;
+  tileUrlTemplate: string | null;
+  notes: string;
+};
+
+export async function fetchCompoundOverlay(
+  _stormId: string,
+): Promise<CompoundOverlay> {
+  try {
+    const resp = await fetch('/api/compound', {
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText);
+      return {
+        available: false, cellCount: 0,
+        maxDepthFt: null, avgDepthFt: null, tileUrlTemplate: null,
+        notes: `Compound fetch error (${resp.status}): ${text}`,
+      };
+    }
+    const data = await resp.json();
+    return {
+      available: !!data.available,
+      cellCount: data.cell_count ?? 0,
+      maxDepthFt: data.max_depth_ft ?? null,
+      avgDepthFt: data.avg_depth_ft ?? null,
+      tileUrlTemplate: data.tile_url_template ?? null,
+      notes: data.notes ?? '',
+    };
+  } catch (err) {
+    return {
+      available: false, cellCount: 0,
+      maxDepthFt: null, avgDepthFt: null, tileUrlTemplate: null,
+      notes: `Compound unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+// ───────────────────────────────────────────────────────────
 // Stream gauge overlay (NOAA AHPS / NWPS)
 //
 // Returns active flood gauges near the storm landfall as a

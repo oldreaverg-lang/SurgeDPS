@@ -23,6 +23,7 @@ import {
   readBetaLayersEnabled,
   writeBetaLayersEnabled,
   fetchRainfallOverlay,
+  fetchCompoundOverlay,
   fetchGaugeOverlay,
   fetchShelterCapacity,
   fetchVendorCoverage,
@@ -2005,6 +2006,9 @@ function App() {
   const [hazardView, setHazardView] = useState<'surge' | 'rainfall' | 'compound'>('surge');
   const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string; tileUrl: string | null } | null>(null);
   const [rainfallLoading, setRainfallLoading] = useState(false);
+  // ── Compound hazard raster (surge ∪ rainfall ∪ fluvial mosaic) ──
+  const [compoundStats, setCompoundStats] = useState<{ maxFt: number | null; avgFt: number | null; cellCount: number; notes: string; tileUrl: string | null } | null>(null);
+  const [compoundLoading, setCompoundLoading] = useState(false);
   // ── AHPS / NWPS stream gauges layer ──
   // Cheap, immediate value: GeoJSON points colored by flood category.
   const [showGauges, setShowGauges] = useState(false);
@@ -2354,6 +2358,34 @@ function App() {
         }
       })
       .finally(() => { if (!cancelled) setRainfallLoading(false); });
+    return () => { cancelled = true; };
+  }, [hazardView, activeStorm]);
+
+  // ── Compound mosaic (only fetched when user picks Compound view) ──
+  useEffect(() => {
+    if (hazardView !== 'compound' || !activeStorm) {
+      setCompoundStats(null);
+      setCompoundLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setCompoundLoading(true);
+    fetchCompoundOverlay(activeStorm.storm_id)
+      .then((res) => {
+        if (cancelled) return;
+        setCompoundStats({
+          maxFt: res.maxDepthFt,
+          avgFt: res.avgDepthFt,
+          cellCount: res.cellCount,
+          notes: res.notes,
+          tileUrl: res.tileUrlTemplate,
+        });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setCompoundStats({ maxFt: null, avgFt: null, cellCount: 0, notes: err instanceof Error ? err.message : String(err), tileUrl: null });
+      })
+      .finally(() => { if (!cancelled) setCompoundLoading(false); });
     return () => { cancelled = true; };
   }, [hazardView, activeStorm]);
 
@@ -3951,6 +3983,29 @@ ${fieldFlag ? `
             </Source>
           )}
 
+          {/* Compound hazard raster overlay — surge ∪ rainfall ∪ fluvial mosaic
+              stitched from per-cell compound.tif on demand by /api/compound_tile. */}
+          {hazardView === 'compound' && compoundStats?.tileUrl && (
+            <Source
+              id="compound-raster"
+              type="raster"
+              tiles={[compoundStats.tileUrl]}
+              tileSize={256}
+              minzoom={3}
+              maxzoom={14}
+            >
+              <Layer
+                id="compound-raster-layer"
+                type="raster"
+                paint={{
+                  'raster-opacity': 0.78,
+                  'raster-fade-duration': 250,
+                  'raster-resampling': 'linear',
+                }}
+              />
+            </Source>
+          )}
+
           {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
           {allBuildings && mapView === 'damage' && (
@@ -5189,9 +5244,41 @@ ${fieldFlag ? `
                   Stats only — raster GeoTIFF not on disk for this storm yet.
                 </div>
               )}
-              {hazardView === 'compound' && (
-                <div className="text-gray-400 mt-1 italic">
-                  Compound raster (surge + rain + fluvial) already drives loss estimates; standalone map overlay coming next.
+              {hazardView === 'compound' && compoundLoading && (
+                <div className="text-gray-500">Building mosaic…</div>
+              )}
+              {hazardView === 'compound' && !compoundLoading && compoundStats && compoundStats.maxFt != null && (
+                <>
+                  <div>Max depth: <span className="font-semibold">{compoundStats.maxFt.toFixed(1)} ft</span></div>
+                  {compoundStats.avgFt != null && <div>Avg (inundated): {compoundStats.avgFt.toFixed(2)} ft</div>}
+                  <div className="text-gray-500 mt-0.5">{compoundStats.cellCount} cell{compoundStats.cellCount === 1 ? '' : 's'} stitched</div>
+                </>
+              )}
+              {hazardView === 'compound' && !compoundLoading && compoundStats && compoundStats.maxFt == null && (
+                <div className="text-gray-500">{compoundStats.notes}</div>
+              )}
+              {hazardView === 'compound' && compoundStats?.tileUrl && (
+                <div className="mt-1.5 pt-1.5 border-t border-gray-200">
+                  <div className="text-[10px] font-semibold text-gray-600 mb-0.5">Depth (ft)</div>
+                  <div className="flex items-center gap-0.5">
+                    {[
+                      { c: 'rgb(200,240,245)', l: '.25' },
+                      { c: 'rgb(150,215,230)', l: '.5' },
+                      { c: 'rgb(100,190,220)', l: '1' },
+                      { c: 'rgb(60,155,210)',  l: '2' },
+                      { c: 'rgb(40,120,200)',  l: '3' },
+                      { c: 'rgb(55,80,190)',   l: '5' },
+                      { c: 'rgb(85,50,170)',   l: '7' },
+                      { c: 'rgb(110,30,145)',  l: '10' },
+                      { c: 'rgb(130,20,110)',  l: '14' },
+                      { c: 'rgb(150,10,80)',   l: '20+' },
+                    ].map(stop => (
+                      <div key={stop.l} className="flex flex-col items-center" style={{ width: 18 }}>
+                        <div style={{ backgroundColor: stop.c, width: 16, height: 10, border: '1px solid rgba(0,0,0,0.15)' }} />
+                        <div className="text-[8px] text-gray-500">{stop.l}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
