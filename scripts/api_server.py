@@ -2258,6 +2258,49 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, str(e))
             return
 
+        # ── GET /api/flood_zones?west=&south=&east=&north= ──
+        # Proxies FEMA NFHL layer 28 (Flood Hazard Zones) server-side so the
+        # browser avoids CORS issues with hazards.fema.gov.  Returns GeoJSON.
+        if path == '/api/flood_zones':
+            try:
+                west  = params.get('west',  [None])[0]
+                south = params.get('south', [None])[0]
+                east  = params.get('east',  [None])[0]
+                north = params.get('north', [None])[0]
+                if None in (west, south, east, north):
+                    self._send_error(400, 'Missing bbox param (west/south/east/north)')
+                    return
+                envelope = json.dumps({
+                    'xmin': float(west), 'ymin': float(south),
+                    'xmax': float(east), 'ymax': float(north),
+                    'spatialReference': {'wkid': 4326},
+                })
+                from urllib.parse import urlencode
+                qs = urlencode({
+                    'where': '1=1',
+                    'geometry': envelope,
+                    'geometryType': 'esriGeometryEnvelope',
+                    'inSR': '4326',
+                    'outSR': '4326',
+                    'spatialRel': 'esriSpatialRelIntersects',
+                    'outFields': 'FLD_ZONE,SFHA_TF,FLOODWAY',
+                    'returnGeometry': 'true',
+                    'resultRecordCount': '2000',
+                    'f': 'geojson',
+                })
+                fema_url = f'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?{qs}'
+                req = _urllib_request.Request(
+                    fema_url,
+                    headers={'User-Agent': 'SurgeDPS/1.0 (+https://stormdps.com)'},
+                )
+                with _urllib_request.urlopen(req, timeout=20) as resp:
+                    raw = resp.read()
+                self._send_raw(200, raw, content_type='application/json',
+                               cache_control='max-age=3600')
+            except Exception as e:
+                self._send_error(502, f'FEMA NFHL proxy error: {e}')
+            return
+
         # ── GET /api/health ──
         if path == '/api/health':
             self._send_json(200, {'status': 'ok', 'active_storm': _active_storm.storm_id if _active_storm else None})

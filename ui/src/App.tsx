@@ -2496,28 +2496,18 @@ function App() {
   const fetchFloodZones = useCallback((bounds: { west: number; south: number; east: number; north: number }) => {
     if (floodZonesFetchTimer.current) clearTimeout(floodZonesFetchTimer.current);
     floodZonesFetchTimer.current = setTimeout(async () => {
-      const { west, south, east, north } = bounds;
-      const envelope = JSON.stringify({
-        xmin: west, ymin: south, xmax: east, ymax: north,
-        spatialReference: { wkid: 4326 },
+      // Proxy through our backend to avoid CORS issues with hazards.fema.gov
+      const proxyParams = new URLSearchParams({
+        west:  String(bounds.west),
+        south: String(bounds.south),
+        east:  String(bounds.east),
+        north: String(bounds.north),
       });
-      const params = new URLSearchParams({
-        where: '1=1',
-        geometry: envelope,
-        geometryType: 'esriGeometryEnvelope',
-        inSR: '4326',
-        outSR: '4326',
-        spatialRel: 'esriSpatialRelIntersects',
-        outFields: 'FLD_ZONE,SFHA_TF,FLOODWAY',
-        returnGeometry: 'true',
-        resultRecordCount: '2000',
-        f: 'geojson',
-      });
-      const url = `https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?${params}`;
+      const url = `/surgedps/api/flood_zones?${proxyParams}`;
       setFloodZonesLoading(true);
       setFloodZonesError(null);
       const ac = new AbortController();
-      const timeout = setTimeout(() => ac.abort(), 20_000);
+      const timeout = setTimeout(() => ac.abort(), 25_000);
       try {
         const res = await fetch(url, { signal: ac.signal });
         clearTimeout(timeout);
@@ -5470,21 +5460,21 @@ ${fieldFlag ? `
               show an informational badge with MRMS accumulation stats —
               full raster tiles land in Phase 6 via a COG tile server. */}
           {activeStorm && (
-            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden w-[240px]">
               <button
                 onClick={() => setHazardView('surge')}
                 title="Coastal storm surge depth (default)"
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'surge' ? 'bg-sky-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                className={`flex-1 py-1.5 text-xs font-semibold text-center transition-colors ${hazardView === 'surge' ? 'bg-sky-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
               >🌊 Surge</button>
               <button
                 onClick={() => setHazardView('rainfall')}
                 title="MRMS observed rainfall accumulation (stats only — raster tiles coming Phase 6)"
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'rainfall' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                className={`flex-1 py-1.5 text-xs font-semibold text-center transition-colors border-x border-gray-200 ${hazardView === 'rainfall' ? 'bg-indigo-600 text-white border-transparent' : 'text-gray-600 hover:bg-gray-100'}`}
               >🌧️ Rainfall</button>
               <button
                 onClick={() => setHazardView('compound')}
                 title="Surge + rainfall + fluvial combined (the actual damage-model input)"
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'compound' ? 'bg-violet-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                className={`flex-1 py-1.5 text-xs font-semibold text-center transition-colors ${hazardView === 'compound' ? 'bg-violet-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
               >💧 Compound</button>
             </div>
           )}

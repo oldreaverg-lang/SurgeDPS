@@ -231,7 +231,7 @@ export async function fetchGaugeOverlay(
   minCategory: 'action' | 'minor' | 'moderate' | 'major' = 'action',
 ): Promise<GaugeSummary> {
   try {
-    const url = `/api/gauges?radius=${radiusDeg}&category=${minCategory}`;
+    const url = `/surgedps/api/gauges?radius=${radiusDeg}&category=${minCategory}`;
     const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (!resp.ok) {
       return {
