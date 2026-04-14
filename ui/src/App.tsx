@@ -129,12 +129,28 @@ const BUILDING_TYPES: Record<string, string> = {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Critical Facilities (for emergency management)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Keyed off the raw NSI `occtype` prefix (NOT `building_type`). The backend
+// pipeline (nsi_fetcher._nsi_to_hazus) collapses GOV/EDU/REL → "COM" in
+// `building_type` because the depth-damage curves are identical, but it
+// preserves the civic/school/medical distinction in the `occtype` field.
+// We key off occtype so the emergency-management map can still show where
+// the schools, hospitals, and government buildings actually are.
 const CRITICAL_ICONS: Record<string, string> = {
   EDU1: '🏫', EDU2: '🏫',
-  COM6: '➕', COM7: '➕',
+  MED1: '➕', MED2: '➕',        // Hospitals (large + small)
+  COM6: '➕', COM7: '➕',        // Medical clinics — still keyed for
+                                 // pre-mapped legacy building_type data.
   GOV1: '⭐', GOV2: '⭐',
-  RES6: '🛏️',
+  REL1: '⛪',                    // Churches — often informal shelters
+  RES6: '🛏️',                    // Nursing homes
 };
+// Extract the prefix the critical-icon lookup keys on. Prefers occtype
+// (what NSI actually labels the building) and falls back to building_type
+// for legacy cached data that only has the HAZUS-collapsed field.
+function criticalPrefix(p: any): string {
+  const raw = (p?.occtype || p?.building_type || '');
+  return String(raw).replace(/[-_].*$/, '').toUpperCase();
+}
 function friendlyBuildingType(code: string): string {
   if (!code) return 'Unknown';
   const prefix = code.replace(/[-_].*$/, '').toUpperCase();
@@ -3162,13 +3178,14 @@ ${fieldFlag ? `
     if (!allBuildings?.features?.length) return [];
     const counts: Record<string, number> = {};
     for (const f of allBuildings.features) {
-      const bt = (f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase();
+      const bt = criticalPrefix(f.properties);
       if (bt in CRITICAL_ICONS) counts[bt] = (counts[bt] || 0) + 1;
     }
     return [
-      { icon: '➕', label: 'Hospitals / Clinics', count: (counts.COM6 || 0) + (counts.COM7 || 0) },
+      { icon: '➕', label: 'Hospitals / Clinics', count: (counts.MED1 || 0) + (counts.MED2 || 0) + (counts.COM6 || 0) + (counts.COM7 || 0) },
       { icon: '🏫', label: 'Schools / Universities', count: (counts.EDU1 || 0) + (counts.EDU2 || 0) },
       { icon: '⭐', label: 'Government / Emergency', count: (counts.GOV1 || 0) + (counts.GOV2 || 0) },
+      { icon: '⛪', label: 'Places of Worship', count: counts.REL1 || 0 },
       { icon: '🛏️', label: 'Nursing Homes', count: counts.RES6 || 0 },
     ];
   }, [allBuildings]);
@@ -3179,15 +3196,12 @@ ${fieldFlag ? `
   const criticalFacilities = useMemo(() => {
     if (!allBuildings?.features?.length) return null;
     const critical = allBuildings.features
-      .filter((f: any) => {
-        const bt = (f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase();
-        return bt in CRITICAL_ICONS;
-      })
+      .filter((f: any) => criticalPrefix(f.properties) in CRITICAL_ICONS)
       .map((f: any) => ({
         ...f,
         properties: {
           ...f.properties,
-          critical_icon: CRITICAL_ICONS[(f.properties?.building_type || '').replace(/[-_].*$/, '').toUpperCase()],
+          critical_icon: CRITICAL_ICONS[criticalPrefix(f.properties)],
         },
       }));
     if (critical.length === 0) return null;
@@ -3912,7 +3926,14 @@ ${fieldFlag ? `
                   'text-size': ['interpolate', ['linear'], ['zoom'], 12, 16, 16, 24, 18, 32],
                   'text-allow-overlap': true,
                   'text-ignore-placement': false,
-                  'symbol-sort-key': ['case', ['==', ['get', 'critical_icon'], '➕'], 0, ['==', ['get', 'critical_icon'], '🏫'], 1, 2],
+                  'symbol-sort-key': ['case',
+                    ['==', ['get', 'critical_icon'], '➕'], 0,
+                    ['==', ['get', 'critical_icon'], '⭐'], 1,
+                    ['==', ['get', 'critical_icon'], '🏫'], 2,
+                    ['==', ['get', 'critical_icon'], '🛏️'], 3,
+                    ['==', ['get', 'critical_icon'], '⛪'], 4,
+                    5,
+                  ],
                 }}
                 paint={{
                   'text-halo-color': '#fff',
