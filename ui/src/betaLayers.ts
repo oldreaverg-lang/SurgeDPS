@@ -99,6 +99,54 @@ export async function fetchRainfallOverlay(
 }
 
 // ───────────────────────────────────────────────────────────
+// WPC QPF forecast overlay (72-hour precipitation forecast)
+//
+// Companion to fetchRainfallOverlay: MRMS is *observed* rainfall
+// (what already fell); QPF is *forecast* rainfall (what WPC expects
+// in the next 72 hrs). Same colormap on render because both are
+// precip totals in mm.
+// ───────────────────────────────────────────────────────────
+export type QPFOverlay = {
+  available: boolean;
+  maxPrecipMm: number | null;
+  durationHr: number | null;
+  source: string | null;
+  caveat: string | null;
+  tileUrlTemplate: string | null;
+  notes: string;
+};
+
+export async function fetchQPFOverlay(_stormId: string): Promise<QPFOverlay> {
+  try {
+    const resp = await fetch('/api/qpf', { signal: AbortSignal.timeout(30_000) });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText);
+      return {
+        available: false, maxPrecipMm: null, durationHr: null,
+        source: null, caveat: null, tileUrlTemplate: null,
+        notes: `QPF fetch error (${resp.status}): ${text}`,
+      };
+    }
+    const data = await resp.json();
+    return {
+      available: !!data.available,
+      maxPrecipMm: data.max_precip_mm ?? null,
+      durationHr: data.duration_hr ?? null,
+      source: data.source ?? null,
+      caveat: data.caveat ?? null,
+      tileUrlTemplate: data.tile_url_template ?? null,
+      notes: data.caveat ?? '',
+    };
+  } catch (err) {
+    return {
+      available: false, maxPrecipMm: null, durationHr: null,
+      source: null, caveat: null, tileUrlTemplate: null,
+      notes: `QPF unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+// ───────────────────────────────────────────────────────────
 // Compound hazard overlay (surge ∪ rainfall, per-cell mosaic)
 //
 // Backend stitches per-cell compound.tif into a storm-wide

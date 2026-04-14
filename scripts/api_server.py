@@ -292,6 +292,12 @@ _rainfall_tif_lock = _threading.Lock()
 _compound_mosaic_by_storm: dict[str, str] = {}
 _compound_lock = _threading.Lock()
 
+# ── QPF forecast tile server state ──
+# Parallel to _rainfall_tif_by_storm but for the WPC QPF forecast raster.
+# Populated on the first /api/qpf hit per storm; served by /api/qpf_tile.
+_qpf_tif_by_storm: dict[str, str] = {}
+_qpf_tif_lock = _threading.Lock()
+
 # ── Progress tracking for long-running activation ──
 import time as _time
 _progress: dict = {'step': '', 'step_num': 0, 'total_steps': 4, 'started_at': 0.0, 'storm_id': ''}
@@ -1440,6 +1446,35 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, f'tile error: {e}')
             return
 
+        # ── GET /api/qpf_tile/{z}/{x}/{y}.png?storm_id=<id> ──
+        # On-demand PNG tile server for the WPC QPF forecast raster.
+        # Shares the NWS precipitation colormap with /api/rainfall_tile
+        # (both surfaces are precip totals in mm, so the same ramp reads
+        # correctly). Cached for 1 hour because QPF refreshes every 6 hours.
+        if path.startswith('/api/qpf_tile/'):
+            try:
+                storm_id = (params.get('storm_id') or [''])[0]
+                if not storm_id:
+                    self._send_error(400, 'Missing storm_id')
+                    return
+                with _qpf_tif_lock:
+                    tif_path = _qpf_tif_by_storm.get(storm_id)
+                if not tif_path or not os.path.exists(tif_path):
+                    self._send_raw(200, _transparent_tile_png(), content_type='image/png',
+                                   cache_control='no-cache')
+                    return
+                parts = path[len('/api/qpf_tile/'):].split('/')
+                if len(parts) != 3 or not parts[2].endswith('.png'):
+                    self._send_error(400, 'Expected /api/qpf_tile/{z}/{x}/{y}.png')
+                    return
+                z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
+                png_bytes = _render_rainfall_tile(tif_path, z, x, y)
+                self._send_raw(200, png_bytes, content_type='image/png',
+                               cache_control='public, max-age=3600')
+            except Exception as e:
+                self._send_error(500, f'qpf tile error: {e}')
+            return
+
         # ── GET /api/compound?storm_id=<id> ──
         # Returns storm-wide compound flood raster (surge + rainfall + fluvial)
         # stats and a XYZ tile URL template. The mosaic is built lazily from
@@ -1547,6 +1582,12 @@ class CellHandler(BaseHTTPRequestHandler):
                             _cached = json.load(_f)
                         age_hr = (_time_qpf.time() - _cached.get('fetched_at', 0)) / 3600
                         if age_hr < 6 and _cached.get('storm_id') == _active_storm.storm_id:
+                            # Re-register the cached tif with the tile server
+                            # so /api/qpf_tile works after a restart.
+                            _cached_tif = _cached.get('tif_path')
+                            if _cached_tif and os.path.exists(_cached_tif):
+                                with _qpf_tif_lock:
+                                    _qpf_tif_by_storm[_active_storm.storm_id] = _cached_tif
                             self._send_json(200, _cached)
                             return
                     except Exception:
@@ -1598,11 +1639,21 @@ class CellHandler(BaseHTTPRequestHandler):
                     'fetched_at': _time_qpf.time(),
                 }
                 if qpf_result is not None:
+                    _qpf_tif = getattr(qpf_result, 'path', None)
+                    _qpf_tile_tmpl = None
+                    if _qpf_tif and os.path.exists(_qpf_tif) and _active_storm is not None:
+                        with _qpf_tif_lock:
+                            _qpf_tif_by_storm[_active_storm.storm_id] = _qpf_tif
+                        _qpf_tile_tmpl = (
+                            f"/api/qpf_tile/{{z}}/{{x}}/{{y}}.png"
+                            f"?storm_id={_active_storm.storm_id}"
+                        )
                     _meta.update({
                         'duration_hr': 72,
                         'max_precip_mm': round(getattr(qpf_result, 'total_precip_mm', 0), 1),
                         'max_precip_in': round(getattr(qpf_result, 'total_precip_mm', 0) / 25.4, 2),
-                        'tif_path': getattr(qpf_result, 'path', None),
+                        'tif_path': _qpf_tif,
+                        'tile_url_template': _qpf_tile_tmpl,
                         'source': 'wpc_qpf_72hr',
                     })
 

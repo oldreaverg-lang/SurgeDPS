@@ -23,6 +23,7 @@ import {
   readBetaLayersEnabled,
   writeBetaLayersEnabled,
   fetchRainfallOverlay,
+  fetchQPFOverlay,
   fetchCompoundOverlay,
   fetchGaugeOverlay,
   fetchShelterCapacity,
@@ -2006,6 +2007,11 @@ function App() {
   const [hazardView, setHazardView] = useState<'surge' | 'rainfall' | 'compound'>('surge');
   const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string; tileUrl: string | null } | null>(null);
   const [rainfallLoading, setRainfallLoading] = useState(false);
+  // ── QPF sub-mode when hazardView === 'rainfall' ──
+  // 'observed' → MRMS accumulation (default); 'forecast' → WPC QPF 72hr.
+  const [rainfallMode, setRainfallMode] = useState<'observed' | 'forecast'>('observed');
+  const [qpfStats, setQpfStats] = useState<{ maxIn: number | null; caveat: string | null; source: string | null; tileUrl: string | null; notes: string } | null>(null);
+  const [qpfLoading, setQpfLoading] = useState(false);
   // ── Compound hazard raster (surge ∪ rainfall ∪ fluvial mosaic) ──
   const [compoundStats, setCompoundStats] = useState<{ maxFt: number | null; avgFt: number | null; cellCount: number; notes: string; tileUrl: string | null } | null>(null);
   const [compoundLoading, setCompoundLoading] = useState(false);
@@ -2360,6 +2366,34 @@ function App() {
       .finally(() => { if (!cancelled) setRainfallLoading(false); });
     return () => { cancelled = true; };
   }, [hazardView, activeStorm]);
+
+  // ── QPF forecast (only when Rainfall view AND forecast sub-mode) ──
+  useEffect(() => {
+    if (hazardView !== 'rainfall' || rainfallMode !== 'forecast' || !activeStorm) {
+      setQpfStats(null);
+      setQpfLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setQpfLoading(true);
+    fetchQPFOverlay(activeStorm.storm_id)
+      .then((res) => {
+        if (cancelled) return;
+        setQpfStats({
+          maxIn: res.maxPrecipMm != null ? +(res.maxPrecipMm / 25.4).toFixed(1) : null,
+          caveat: res.caveat,
+          source: res.source,
+          tileUrl: res.tileUrlTemplate,
+          notes: res.notes,
+        });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setQpfStats({ maxIn: null, caveat: null, source: null, tileUrl: null, notes: err instanceof Error ? err.message : String(err) });
+      })
+      .finally(() => { if (!cancelled) setQpfLoading(false); });
+    return () => { cancelled = true; };
+  }, [hazardView, rainfallMode, activeStorm]);
 
   // ── Compound mosaic (only fetched when user picks Compound view) ──
   useEffect(() => {
@@ -3962,7 +3996,7 @@ ${fieldFlag ? `
               /api/rainfall_tile endpoint (rio-tiler + NWS precipitation ramp).
               Rendered below the damage bubbles so loss points remain visible;
               opacity tuned so the basemap and FEMA zones still read through. */}
-          {hazardView === 'rainfall' && rainfallStats?.tileUrl && (
+          {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallStats?.tileUrl && (
             <Source
               id="rainfall-raster"
               type="raster"
@@ -3973,6 +4007,27 @@ ${fieldFlag ? `
             >
               <Layer
                 id="rainfall-raster-layer"
+                type="raster"
+                paint={{
+                  'raster-opacity': 0.72,
+                  'raster-fade-duration': 250,
+                  'raster-resampling': 'linear',
+                }}
+              />
+            </Source>
+          )}
+
+          {hazardView === 'rainfall' && rainfallMode === 'forecast' && qpfStats?.tileUrl && (
+            <Source
+              id="qpf-raster"
+              type="raster"
+              tiles={[qpfStats.tileUrl]}
+              tileSize={256}
+              minzoom={3}
+              maxzoom={10}
+            >
+              <Layer
+                id="qpf-raster-layer"
                 type="raster"
                 paint={{
                   'raster-opacity': 0.72,
@@ -5195,23 +5250,48 @@ ${fieldFlag ? `
           {activeStorm && hazardView !== 'surge' && (
             <div className="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px] leading-tight">
               <div className="font-semibold text-gray-900 mb-0.5">
-                {hazardView === 'rainfall' ? '🌧️ Observed rainfall' : '💧 Compound hazard'}
+                {hazardView === 'rainfall'
+                  ? (rainfallMode === 'forecast' ? '🔮 Forecast rainfall (WPC QPF)' : '🌧️ Observed rainfall')
+                  : '💧 Compound hazard'}
               </div>
-              {rainfallLoading && <div className="text-gray-500">Loading MRMS…</div>}
-              {!rainfallLoading && rainfallStats && rainfallStats.maxIn != null && (
+              {hazardView === 'rainfall' && (
+                <div className="flex rounded overflow-hidden border border-gray-300 mb-1 text-[10px]">
+                  <button
+                    onClick={() => setRainfallMode('observed')}
+                    className={`flex-1 px-1.5 py-0.5 font-medium transition-colors ${rainfallMode === 'observed' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >Observed</button>
+                  <button
+                    onClick={() => setRainfallMode('forecast')}
+                    className={`flex-1 px-1.5 py-0.5 font-medium transition-colors ${rainfallMode === 'forecast' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >Forecast (72h)</button>
+                </div>
+              )}
+              {rainfallMode === 'forecast' && qpfLoading && <div className="text-gray-500">Loading WPC QPF…</div>}
+              {rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn != null && (
+                <>
+                  <div>Max forecast: <span className="font-semibold">{qpfStats.maxIn} in</span> / 72 hr</div>
+                  {qpfStats.caveat && <div className="text-[10px] text-amber-700 mt-0.5">{qpfStats.caveat}</div>}
+                  {qpfStats.source && <div className="text-gray-500 mt-0.5">{qpfStats.source}</div>}
+                </>
+              )}
+              {rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn == null && (
+                <div className="text-gray-500">{qpfStats.notes || 'QPF unavailable.'}</div>
+              )}
+              {rainfallMode === 'observed' && rainfallLoading && <div className="text-gray-500">Loading MRMS…</div>}
+              {rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn != null && (
                 <>
                   <div>Max accumulation: <span className="font-semibold">{rainfallStats.maxIn} in</span></div>
                   {rainfallStats.avgIn != null && <div>Avg across storm bbox: {rainfallStats.avgIn} in</div>}
                   {rainfallStats.product && <div className="text-gray-500 mt-0.5">{rainfallStats.product}</div>}
                 </>
               )}
-              {!rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
+              {rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
                 <div className="text-gray-500">{rainfallStats.notes}</div>
               )}
               {/* NWS rainfall legend — shown only when the raster is
                   actually mounted. Each row: color swatch + inch range.
                   Keeps the colors in sync with _NWS_RAIN_* in api_server.py. */}
-              {hazardView === 'rainfall' && rainfallStats?.tileUrl && (
+              {hazardView === 'rainfall' && ((rainfallMode === 'observed' && rainfallStats?.tileUrl) || (rainfallMode === 'forecast' && qpfStats?.tileUrl)) && (
                 <div className="mt-1.5 pt-1.5 border-t border-gray-200">
                   <div className="text-[10px] font-semibold text-gray-600 mb-0.5">Precipitation (in)</div>
                   <div className="flex items-center gap-0.5">
@@ -5239,9 +5319,14 @@ ${fieldFlag ? `
                   </div>
                 </div>
               )}
-              {hazardView === 'rainfall' && !rainfallStats?.tileUrl && !rainfallLoading && (
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && !rainfallStats?.tileUrl && !rainfallLoading && (
                 <div className="text-gray-400 mt-1 italic">
                   Stats only — raster GeoTIFF not on disk for this storm yet.
+                </div>
+              )}
+              {hazardView === 'rainfall' && rainfallMode === 'forecast' && !qpfStats?.tileUrl && !qpfLoading && qpfStats && qpfStats.maxIn != null && (
+                <div className="text-gray-400 mt-1 italic">
+                  Stats only — QPF raster not registered for this storm yet.
                 </div>
               )}
               {hazardView === 'compound' && compoundLoading && (
