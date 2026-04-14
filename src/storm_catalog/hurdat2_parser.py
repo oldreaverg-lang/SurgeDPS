@@ -185,6 +185,12 @@ def parse_hurdat2(filepath: str) -> List[StormEntry]:
         if pres >= 1013 or pres <= 0:
             pres = 1013 - category * 15  # rough estimate
 
+        # Build ISO landfall date string from HURDAT2 "YYYYMMDD" format.
+        raw_date = key_point.get('date', '')
+        landfall_date: str | None = None
+        if len(raw_date) == 8:
+            landfall_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+
         storms.append(StormEntry(
             storm_id=atcf_id.lower(),
             name=display_name,
@@ -200,6 +206,7 @@ def parse_hurdat2(filepath: str) -> List[StormEntry]:
             basin="AL",
             advisory="best-track",
             has_us_landfall=len(us_landfalls) > 0,
+            landfall_date=landfall_date,
         ))
 
     return storms

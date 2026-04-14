@@ -1612,11 +1612,25 @@ class CellHandler(BaseHTTPRequestHandler):
                 mrms_cache = os.path.join(PERSISTENT_DIR, 'mrms')
                 os.makedirs(mrms_cache, exist_ok=True)
                 fetcher = MRMSFetcher(cache_dir=mrms_cache, keep_raw_grib=False)
+                # Pass the storm's actual landfall date as valid_time so the
+                # S3 fetcher retrieves the historically-correct QPE file
+                # rather than the most-recent one (which would be wrong for
+                # any non-active storm).
+                from datetime import datetime, timezone as _tz
+                valid_time = None
+                if not realtime and getattr(_active_storm, 'landfall_date', None):
+                    try:
+                        valid_time = datetime.strptime(
+                            _active_storm.landfall_date, '%Y-%m-%d'
+                        ).replace(hour=18, tzinfo=_tz.utc)
+                    except (ValueError, AttributeError):
+                        pass
                 result = fetcher.fetch_storm_accumulation(
                     storm_bbox=bbox,
                     duration_hr=duration_hr,
                     pass_level=pass_level,
                     realtime=realtime,
+                    valid_time=valid_time,
                 )
                 if result is None:
                     self._send_json(200, {'available': False, 'storm_id': _active_storm.storm_id})
