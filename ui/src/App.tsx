@@ -2507,7 +2507,9 @@ function App() {
       setFloodZonesLoading(true);
       setFloodZonesError(null);
       const ac = new AbortController();
-      const timeout = setTimeout(() => ac.abort(), 25_000);
+      // 60s — first bbox takes up to 20s from FEMA NFHL, then it's cached
+      // permanently on the Railway volume.
+      const timeout = setTimeout(() => ac.abort(), 60_000);
       try {
         const res = await fetch(url, { signal: ac.signal });
         clearTimeout(timeout);

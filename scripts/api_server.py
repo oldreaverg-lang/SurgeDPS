@@ -986,6 +986,55 @@ def _render_compound_tile(mosaic_path: str, z: int, x: int, y: int) -> bytes:
     return buf.getvalue()
 
 
+def _tile_cache_get_or_render(
+    layer: str,
+    storm_id: str,
+    tif_path: str,
+    z: int, x: int, y: int,
+    render_fn,
+) -> bytes:
+    """
+    Persistent XYZ tile cache.
+
+    Tiles are rendered on demand from the source GeoTIFF and stored at
+    PERSISTENT_DIR/cache/tiles/<layer>/<storm_id>/<mtime>/<z>/<x>/<y>.png
+    where <mtime> is the integer mtime of the source tif.  When the source
+    regenerates (e.g. a new cell is loaded into the compound mosaic), its
+    mtime changes and new tiles land in a new subdir; old tiles become
+    orphans that can be pruned later without affecting correctness.
+    """
+    try:
+        src_mtime = int(os.path.getmtime(tif_path))
+    except OSError:
+        return render_fn(tif_path, z, x, y)
+
+    cache_root = os.path.join(
+        PERSISTENT_DIR, 'cache', 'tiles', layer, storm_id, str(src_mtime),
+        str(z), str(x),
+    )
+    cache_path = os.path.join(cache_root, f'{y}.png')
+
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as fh:
+                return fh.read()
+        except OSError:
+            pass  # fall through to re-render
+
+    png_bytes = render_fn(tif_path, z, x, y)
+    try:
+        os.makedirs(cache_root, exist_ok=True)
+        # Atomic write — rename only after the file is fully on disk so
+        # parallel readers never see a half-written PNG.
+        tmp_path = cache_path + '.tmp'
+        with open(tmp_path, 'wb') as fh:
+            fh.write(png_bytes)
+        os.replace(tmp_path, cache_path)
+    except OSError as werr:
+        print(f"[tile-cache] write failed for {layer}/{storm_id}/{z}/{x}/{y}: {werr}")
+    return png_bytes
+
+
 def _render_rainfall_tile(tif_path: str, z: int, x: int, y: int) -> bytes:
     """Render a single XYZ tile as PNG bytes using rio-tiler + NWS colormap."""
     import io as _io
@@ -1562,8 +1611,34 @@ class CellHandler(BaseHTTPRequestHandler):
         # ── GET /api/validation/backtest ── full backtest report
         if path == '/api/validation/backtest':
             try:
+                # Cache the full backtest report to the persistent volume.
+                # The historical ground-truth set is effectively immutable,
+                # so we keep the report forever and refresh only on demand
+                # via ?refresh=1.
+                bt_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'validation')
+                os.makedirs(bt_cache_dir, exist_ok=True)
+                bt_path = os.path.join(bt_cache_dir, 'backtest.json')
+                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+
+                if os.path.exists(bt_path) and not refresh:
+                    with open(bt_path, 'rb') as fh:
+                        self._send_raw(200, fh.read(),
+                                       content_type='application/json',
+                                       cache_control='public, max-age=86400')
+                    return
+
                 report = run_backtest()
-                self._send_json(200, report.to_dict())
+                body = json.dumps(report.to_dict()).encode()
+                try:
+                    tmp = bt_path + '.tmp'
+                    with open(tmp, 'wb') as fh:
+                        fh.write(body)
+                    os.replace(tmp, bt_path)
+                except OSError as werr:
+                    print(f"[validation] backtest cache write failed: {werr}")
+                self._send_raw(200, body,
+                               content_type='application/json',
+                               cache_control='public, max-age=86400')
             except Exception as e:
                 self._send_error(500, str(e))
             return
@@ -1572,10 +1647,34 @@ class CellHandler(BaseHTTPRequestHandler):
         if path.startswith('/api/validation/storm/'):
             try:
                 sid = path.split('/')[4]
+                # Per-storm score cache — same rationale as the full backtest.
+                storm_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'validation', 'storms')
+                os.makedirs(storm_cache_dir, exist_ok=True)
+                cache_path = os.path.join(storm_cache_dir, f'{sid}.json')
+                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+
+                if os.path.exists(cache_path) and not refresh:
+                    with open(cache_path, 'rb') as fh:
+                        self._send_raw(200, fh.read(),
+                                       content_type='application/json',
+                                       cache_control='public, max-age=86400')
+                    return
+
                 score = score_storm(sid)
                 if score:
-                    self._send_json(200, score.to_dict())
+                    body = json.dumps(score.to_dict()).encode()
+                    try:
+                        tmp = cache_path + '.tmp'
+                        with open(tmp, 'wb') as fh:
+                            fh.write(body)
+                        os.replace(tmp, cache_path)
+                    except OSError as werr:
+                        print(f"[validation] storm cache write failed: {werr}")
+                    self._send_raw(200, body,
+                                   content_type='application/json',
+                                   cache_control='public, max-age=86400')
                 else:
+                    # Don't cache "no data" responses — ground truth may land later.
                     self._send_json(200, {'error': 'No ground truth or model run for this storm',
                                            'storm_id': sid,
                                            'has_ground_truth': get_ground_truth(sid) is not None})
@@ -1611,7 +1710,10 @@ class CellHandler(BaseHTTPRequestHandler):
                 )
                 mrms_cache = os.path.join(PERSISTENT_DIR, 'mrms')
                 os.makedirs(mrms_cache, exist_ok=True)
-                fetcher = MRMSFetcher(cache_dir=mrms_cache, keep_raw_grib=False)
+                # Keep everything — raw GRIB + clipped GeoTIFF — on the
+                # persistent volume.  Historical MRMS archives are immutable so
+                # there's no reason to ever expire these files.
+                fetcher = MRMSFetcher(cache_dir=mrms_cache, keep_raw_grib=True)
                 # Pass the storm's actual landfall date as valid_time so the
                 # S3 fetcher retrieves the historically-correct QPE file
                 # rather than the most-recent one (which would be wrong for
@@ -1691,7 +1793,10 @@ class CellHandler(BaseHTTPRequestHandler):
                     self._send_error(400, 'Expected /api/rainfall_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
                 z, x, y = zxy
-                png_bytes = _render_rainfall_tile(tif_path, z, x, y)
+                png_bytes = _tile_cache_get_or_render(
+                    'rainfall', storm_id, tif_path, z, x, y,
+                    _render_rainfall_tile,
+                )
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=86400')
             except Exception as e:
@@ -1722,7 +1827,10 @@ class CellHandler(BaseHTTPRequestHandler):
                     self._send_error(400, 'Expected /api/qpf_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
                 z, x, y = zxy
-                png_bytes = _render_rainfall_tile(tif_path, z, x, y)
+                png_bytes = _tile_cache_get_or_render(
+                    'qpf', storm_id, tif_path, z, x, y,
+                    _render_rainfall_tile,
+                )
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=3600')
             except Exception as e:
@@ -2110,8 +2218,13 @@ class CellHandler(BaseHTTPRequestHandler):
                     self._send_error(400, 'Expected /api/compound_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
                 z, x, y = zxy
-                png_bytes = _render_compound_tile(mosaic_path, z, x, y)
-                # Mosaic changes as cells load, so cache is shorter than rainfall.
+                png_bytes = _tile_cache_get_or_render(
+                    'compound', storm_id, mosaic_path, z, x, y,
+                    _render_compound_tile,
+                )
+                # Mosaic changes as cells load, so browser cache is short.
+                # Disk cache is keyed by mosaic mtime so stale tiles are never
+                # served after the mosaic rebuilds.
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=300')
             except Exception as e:
@@ -2248,9 +2361,25 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(400, 'No storm active')
                 return
             try:
-                from rainfall.ahps_gauges import AHPSClient
                 radius  = float(params.get('radius', ['4.0'])[0])
                 min_cat = params.get('category', ['action'])[0]
+
+                # Persistent disk cache — historical storms never change, so we
+                # keep AHPS responses on the volume forever.  Real-time storms
+                # refresh by passing ?refresh=1.
+                gauges_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'gauges')
+                os.makedirs(gauges_cache_dir, exist_ok=True)
+                cache_key = f"{_active_storm.storm_id}_{radius:.2f}_{min_cat}.json"
+                cache_path = os.path.join(gauges_cache_dir, cache_key)
+                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+
+                if os.path.exists(cache_path) and not refresh:
+                    with open(cache_path, 'rb') as fh:
+                        self._send_raw(200, fh.read(),
+                                       cache_control='public, max-age=86400')
+                    return
+
+                from rainfall.ahps_gauges import AHPSClient
                 client = AHPSClient(cache_ttl_seconds=300)
                 gauges = client.get_gauges_for_storm(
                     landfall_lat=_active_storm.landfall_lat,
@@ -2266,8 +2395,14 @@ class CellHandler(BaseHTTPRequestHandler):
                     'at_or_above_moderate': sum(1 for g in gauges if g.flood_category in ('moderate', 'major')),
                     'at_or_above_minor': sum(1 for g in gauges if g.flood_category in ('minor', 'moderate', 'major')),
                     'gauges': geojson,
+                    '_cached_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                 }).encode()
-                self._send_raw(200, body)
+                try:
+                    with open(cache_path, 'wb') as fh:
+                        fh.write(body)
+                except Exception as werr:
+                    print(f"[gauges] cache write failed: {werr}")
+                self._send_raw(200, body, cache_control='public, max-age=86400')
             except Exception as e:
                 self._send_error(500, str(e))
             return
@@ -2284,9 +2419,29 @@ class CellHandler(BaseHTTPRequestHandler):
                 if None in (west, south, east, north):
                     self._send_error(400, 'Missing bbox param (west/south/east/north)')
                     return
+
+                # Quantize bbox to 0.01° (~1 km) so nearby requests share cache.
+                qw = round(float(west),  2)
+                qs_ = round(float(south), 2)
+                qe = round(float(east),  2)
+                qn = round(float(north), 2)
+
+                fz_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'flood_zones')
+                os.makedirs(fz_cache_dir, exist_ok=True)
+                cache_name = f"fz_{qw:+.2f}_{qs_:+.2f}_{qe:+.2f}_{qn:+.2f}.json"
+                cache_path = os.path.join(fz_cache_dir, cache_name)
+                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+
+                if os.path.exists(cache_path) and not refresh:
+                    with open(cache_path, 'rb') as fh:
+                        self._send_raw(200, fh.read(),
+                                       content_type='application/json',
+                                       cache_control='public, max-age=86400')
+                    return
+
                 envelope = json.dumps({
-                    'xmin': float(west), 'ymin': float(south),
-                    'xmax': float(east), 'ymax': float(north),
+                    'xmin': qw, 'ymin': qs_,
+                    'xmax': qe, 'ymax': qn,
                     'spatialReference': {'wkid': 4326},
                 })
                 from urllib.parse import urlencode
@@ -2309,8 +2464,13 @@ class CellHandler(BaseHTTPRequestHandler):
                 )
                 with _urllib_request.urlopen(req, timeout=20) as resp:
                     raw = resp.read()
+                try:
+                    with open(cache_path, 'wb') as fh:
+                        fh.write(raw)
+                except Exception as werr:
+                    print(f"[flood_zones] cache write failed: {werr}")
                 self._send_raw(200, raw, content_type='application/json',
-                               cache_control='max-age=3600')
+                               cache_control='public, max-age=86400')
             except Exception as e:
                 self._send_error(502, f'FEMA NFHL proxy error: {e}')
             return

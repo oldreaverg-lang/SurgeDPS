@@ -232,7 +232,10 @@ export async function fetchGaugeOverlay(
 ): Promise<GaugeSummary> {
   try {
     const url = `/surgedps/api/gauges?radius=${radiusDeg}&category=${minCategory}`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    // 60s timeout — first hit for a storm makes a slow AHPS call, but the
+    // response is then cached permanently on the Railway volume, so every
+    // subsequent request for that storm returns in <100ms.
+    const resp = await fetch(url, { signal: AbortSignal.timeout(60_000) });
     if (!resp.ok) {
       return {
         available: false, gaugeCount: 0,
