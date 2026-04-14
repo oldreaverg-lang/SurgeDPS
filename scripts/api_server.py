@@ -52,6 +52,7 @@ from data_ingest.census_fetcher import get_population_context
 from validation.run_ledger import record_from_activation
 from validation.backtester import run_backtest, score_storm, predict_loss_range
 from validation.ground_truth import get_ground_truth
+from validation.private_routes import handle_validation_request
 from storm_catalog.forecast_track import fetch_forecast_track, fetch_forecast_cone
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -336,6 +337,21 @@ _compound_lock = _threading.Lock()
 # Populated on the first /api/qpf hit per storm; served by /api/qpf_tile.
 _qpf_tif_by_storm: "_OrderedDict[str, str]" = _OrderedDict()
 _qpf_tif_lock = _threading.Lock()
+
+# Per-cell generation lock for /api/cell_ticks.  Keyed by (storm_id, col, row)
+# so two simultaneous requests for the same cell don't both kick off HAZUS.
+# The outer dict is itself protected by _cell_ticks_locks_lock.
+_cell_ticks_locks: dict = {}
+_cell_ticks_locks_lock = _threading.Lock()
+
+
+def _get_cell_ticks_lock(storm_id: str, col: int, row: int) -> "_threading.Lock":
+    """Return the per-cell generation lock, creating it on first use."""
+    key = (storm_id, col, row)
+    with _cell_ticks_locks_lock:
+        if key not in _cell_ticks_locks:
+            _cell_ticks_locks[key] = _threading.Lock()
+        return _cell_ticks_locks[key]
 
 
 def _lru_set(cache: "_OrderedDict[str, str]", key: str, value: str,
@@ -627,11 +643,41 @@ def load_cell(col: int, row: int) -> dict:
 
             # Choose the best available rainfall/fluvial source
             # Priority: fluvial HAND > parametric rainfall > surge only
+            # Both fluvial and parametric rainfall rasters are in METERS;
+            # the surge raster and compound pipeline expect FEET.  The
+            # fluvial path is already converted (see HAND block above).
+            # Convert parametric rainfall here before merging.
             _rain_source = None
             if _fluvial_available:
                 _rain_source = _fluvial_raster_path
             elif _rainfall_raster_available:
-                _rain_source = rainfall_raster_path
+                _rainfall_raster_ft_path = os.path.join(
+                    sdir, f'cell_{col}_{row}_rainfall_ft.tif'
+                )
+                if not os.path.exists(_rainfall_raster_ft_path):
+                    try:
+                        import rasterio as _rio_rain
+                        import numpy as _np_rain
+                        _M_TO_FT_R = 3.280839895
+                        with _rio_rain.open(rainfall_raster_path) as _src_r:
+                            _data_r_m = _src_r.read(1)
+                            _prof_r = _src_r.profile.copy()
+                            _nd_r = _src_r.nodata
+                        _valid_r = (_data_r_m != (_nd_r if _nd_r is not None else -9999))
+                        _data_r_ft = _np_rain.where(
+                            _valid_r, _data_r_m * _M_TO_FT_R, -9999
+                        ).astype('float32')
+                        _prof_r.update(
+                            dtype='float32', nodata=-9999,
+                            compress='deflate', tiled=True,
+                        )
+                        with _rio_rain.open(_rainfall_raster_ft_path, 'w', **_prof_r) as _dst_r:
+                            _dst_r.write(_data_r_ft, 1)
+                            _dst_r.update_tags(1, units='ft', converted_from='m')
+                    except Exception as _conv_err:
+                        print(f"  [compound] Rainfall m→ft conversion failed: {_conv_err}")
+                        _rainfall_raster_ft_path = None
+                _rain_source = _rainfall_raster_ft_path or rainfall_raster_path
 
             if _rain_source:
                 comp = merge_compound_flood(
@@ -720,8 +766,9 @@ def load_cell(col: int, row: int) -> dict:
     #          by peril_timeseries to generate the ticks bundle lazily on the
     #          first /api/cell_ticks request.  They're small (~1–2 MB/cell)
     #          and keeping them is cheaper than re-running the full pipeline.
-    #    Remove: rainfall.tif, fluvial.tif (neither is needed post-merge)
-    for tmp in (rainfall_raster_path, _fluvial_raster_path):
+    #    Remove: rainfall.tif, rainfall_ft.tif, fluvial.tif (not needed post-merge)
+    _rainfall_ft_path = os.path.join(sdir, f'cell_{col}_{row}_rainfall_ft.tif')
+    for tmp in (rainfall_raster_path, _rainfall_ft_path, _fluvial_raster_path):
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -978,6 +1025,12 @@ class CellHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip('/')
         params = parse_qs(parsed.query)
 
+        # ── Private validation namespace (token-gated, not linked from UI)
+        #    Requires env VALIDATION_TOKEN; returns 404 otherwise.
+        if path == '/__val' or path.startswith('/__val/'):
+            handle_validation_request(self, path, params)
+            return
+
         # ── GET /api/seasons ── list of {year, count} for accordion (2015+)
         if path == '/api/seasons':
             try:
@@ -1205,17 +1258,41 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(404, f"Storm '{sid_param}' not active"); return
             try:
                 sdir = _storm_cache_dir(_active_storm)
-                ticks_path = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
+                ticks_path  = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
                 depth_path  = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
                 bldgs_path  = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
                 damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
 
-                # Serve cached bundle immediately if available.
+                def _serve_raw_ticks() -> bool:
+                    """Read ticks file and send raw bytes; return True on success."""
+                    try:
+                        with open(ticks_path, 'rb') as _tf:
+                            raw = _tf.read()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(raw)))
+                        self.send_header('Cache-Control', 'public, max-age=3600')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return True
+                    except Exception:
+                        return False
+
+                # Serve cached bundle — but invalidate if buildings.json is
+                # newer than the bundle (cell was reloaded with fresh data).
                 if os.path.exists(ticks_path):
-                    with open(ticks_path) as _tf:
-                        bundle = json.load(_tf)
-                    self._send_json(200, bundle, cache_seconds=3600)
-                    return
+                    ticks_ok = True
+                    if os.path.exists(bldgs_path):
+                        try:
+                            if os.path.getmtime(bldgs_path) > os.path.getmtime(ticks_path):
+                                ticks_ok = False  # stale — fall through to regenerate
+                        except OSError:
+                            pass
+                    if ticks_ok:
+                        if _serve_raw_ticks():
+                            return
+                        # File disappeared between exists() and open(); regenerate.
 
                 # Both rasters must exist to generate; return 404 for legacy cells.
                 if not os.path.exists(depth_path) or not os.path.exists(bldgs_path):
@@ -1226,27 +1303,49 @@ class CellHandler(BaseHTTPRequestHandler):
                     ))
                     return
 
-                # Lazy generation — runs synchronously (frontend fetches async).
-                from damage_model.peril_timeseries import (
-                    estimate_damage_timeseries_from_raster as _run_ts,
-                )
-                _run_ts(
-                    depth_raster_path=depth_path,
-                    buildings_geojson_path=bldgs_path,
-                    ticks_output_path=ticks_path,
-                    final_geojson_path=damage_path,  # keeps _damage.geojson current
-                    storm_id=_active_storm.storm_id,
-                    landfall_lat=_active_storm.landfall_lat,
-                    landfall_lon=_active_storm.landfall_lon,
-                    max_wind_kt=_active_storm.max_wind_kt,
-                    storm_speed_kt=_active_storm.speed_kt,
-                    storm_heading_deg=_active_storm.heading_deg,
-                )
-                if not os.path.exists(ticks_path):
-                    self._send_error(500, 'Ticks generation produced no output'); return
-                with open(ticks_path) as _tf:
-                    bundle = json.load(_tf)
-                self._send_json(200, bundle, cache_seconds=3600)
+                # Per-cell lock: if two requests race for the same bundle,
+                # only one runs HAZUS; the other waits then reads the result.
+                _cell_lock = _get_cell_ticks_lock(_active_storm.storm_id, col, row)
+                with _cell_lock:
+                    # Re-check after acquiring the lock — the winner may have
+                    # already written the bundle while we waited.
+                    if os.path.exists(ticks_path):
+                        ticks_ok = True
+                        if os.path.exists(bldgs_path):
+                            try:
+                                if os.path.getmtime(bldgs_path) > os.path.getmtime(ticks_path):
+                                    ticks_ok = False
+                            except OSError:
+                                pass
+                        if ticks_ok:
+                            if _serve_raw_ticks():
+                                return
+
+                    # Lazy generation — runs synchronously (frontend fetches async).
+                    # Write to a temp path then rename for atomicity so a concurrent
+                    # reader never sees a half-written file.
+                    from damage_model.peril_timeseries import (
+                        estimate_damage_timeseries_from_raster as _run_ts,
+                    )
+                    _ticks_tmp = ticks_path + '.tmp'
+                    _run_ts(
+                        depth_raster_path=depth_path,
+                        buildings_geojson_path=bldgs_path,
+                        ticks_output_path=_ticks_tmp,
+                        final_geojson_path=damage_path,  # keeps _damage.geojson current
+                        storm_id=_active_storm.storm_id,
+                        landfall_lat=_active_storm.landfall_lat,
+                        landfall_lon=_active_storm.landfall_lon,
+                        max_wind_kt=_active_storm.max_wind_kt,
+                        storm_speed_kt=_active_storm.speed_kt,
+                        storm_heading_deg=_active_storm.heading_deg,
+                    )
+                    if not os.path.exists(_ticks_tmp):
+                        self._send_error(500, 'Ticks generation produced no output'); return
+                    os.replace(_ticks_tmp, ticks_path)
+
+                if not _serve_raw_ticks():
+                    self._send_error(500, 'Ticks file unreadable after generation')
             except Exception as e:
                 print(f'[cell_ticks] error col={col} row={row}: {e}')
                 self._send_error(500, f'cell_ticks error: {e}')

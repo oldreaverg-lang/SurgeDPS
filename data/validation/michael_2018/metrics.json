@@ -1,0 +1,28 @@
+{
+  "storm_id": "michael_2018",
+  "source": "usgs_hwm",
+  "n_total": 303,
+  "n_sampled": 303,
+  "bias_ft": -1.304,
+  "mae_ft": 2.056,
+  "rmse_ft": 2.55,
+  "pct_within_1ft": 26.4,
+  "pct_within_2ft": 58.7,
+  "max_under_ft": -8.161,
+  "max_over_ft": 7.702,
+  "r2": -0.774,
+  "hits": 133,
+  "misses": 151,
+  "false_alarms": 4,
+  "correct_neg": 15,
+  "pod": 0.46830985915492956,
+  "far": 0.029197080291970802,
+  "csi": 0.4618055555555556,
+  "bias_ratio": 0.4823943661971831,
+  "tier": "fair",
+  "insights": [
+    "Model under-predicts depth by -1.30 ft on average. Check cell coverage and surge extrapolation at landfall.",
+    "POD = 0.47: model misses more than half of observed flooded locations. Likely extent is too narrow.",
+    "Extent bias ratio 0.48: under-predicting flooded area."
+  ]
+}
