@@ -364,9 +364,8 @@ const GRID_LAYERS: LayerDef[] = [
     paint: { 'fill-color': '#6366f1', 'fill-opacity': 0.05 } },
   { id: 'grid-available-border',type: 'line',   filter: ['==', ['get', 'status'], 'available'],
     paint: { 'line-color': '#a5b4fc', 'line-width': 1.5, 'line-opacity': 0.6, 'line-dasharray': [6, 3] } },
-  { id: 'grid-available-label', type: 'symbol', filter: ['==', ['get', 'status'], 'available'],
-    layout: { 'text-field': '+ Click to load', 'text-size': 13, 'text-font': ['Open Sans Semibold'] },
-    paint: { 'text-color': '#c7d2fe', 'text-opacity': 0.85, 'text-halo-color': '#000', 'text-halo-width': 1.2 } },
+  // Label rendered inline (see Source for grid-data) with a hover-only filter
+  // so we don't paint "+ Click to load" on every unloaded cell.
   { id: 'grid-loading-fill',    type: 'fill',   filter: ['==', ['get', 'status'], 'loading'],
     paint: { 'fill-color': '#facc15', 'fill-opacity': 0.1 } },
   { id: 'grid-loading-border',  type: 'line',   filter: ['==', ['get', 'status'], 'loading'],
@@ -662,7 +661,8 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
   const [activeNHC, setActiveNHC] = useState<StormInfo[]>([]);
   const [expandedYear, setExpandedYear] = useState<number | null>(null);
   const [yearStorms, setYearStorms] = useState<StormInfo[]>([]);
-  const [historicOpen, setHistoricOpen] = useState(false);
+  const [historicOpen, setHistoricOpen] = useState(true);
+  const [seasonsOpen, setSeasonsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<StormInfo[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -708,7 +708,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
   }, [onSelectStorm, onClose]);
 
   return (
-    <div className={`w-72 shrink-0 bg-slate-900 border-r border-slate-700/50 flex flex-col h-screen overflow-hidden absolute inset-y-0 left-0 z-30 lg:relative transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
+    <div className={`w-72 shrink-0 bg-slate-900 border-r border-slate-700/50 flex flex-col h-screen overflow-hidden absolute inset-y-0 left-0 z-30 lg:relative transition-all duration-300 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full lg:w-0 lg:min-w-0 lg:border-r-0'}`}>
       {/* Header */}
       <div className="px-4 py-4 border-b border-slate-700/50 shrink-0">
         <div className="flex items-center justify-between">
@@ -724,8 +724,9 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
             </a>
             <button
               onClick={onClose}
-              className="lg:hidden text-slate-400 hover:text-white transition-colors p-1 rounded"
-              aria-label="Close sidebar"
+              className="text-slate-400 hover:text-white transition-colors p-1 rounded"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
             >✕</button>
           </div>
         </div>
@@ -816,33 +817,50 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
             )}
           </div>
 
-          {/* Season-by-season accordion (2015+) */}
-          {seasons.map(({ year, count }) => {
-            const isOpen = expandedYear === year;
-            return (
-              <div key={year} className="mb-1">
-                <button
-                  onClick={() => toggleYear(year)}
-                  className="w-full flex items-center justify-between px-3 py-2.5 bg-slate-800/50 hover:bg-slate-800 rounded-lg transition-colors"
-                >
-                  <span className="text-sm font-semibold text-slate-200">{year} Season</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-indigo-400 font-medium">{count}</span>
-                    <span className={`text-slate-500 text-xs transition-transform ${isOpen ? 'rotate-90' : ''}`}>▸</span>
-                  </div>
-                </button>
-                {isOpen && (
-                  <div className="mt-1 ml-1 pl-2 border-l border-slate-700/50 space-y-0.5">
-                    {yearStorms.length === 0 ? (
-                      <p className="text-xs text-slate-500 py-2 px-3">Loading...</p>
-                    ) : (
-                      [...yearStorms].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)
-                    )}
-                  </div>
-                )}
+          {/* Browse by Season — wraps all the season accordions behind
+              one collapsed toggle so the sidebar stays tight. */}
+          <div className="mb-1 mt-2">
+            <button
+              onClick={() => setSeasonsOpen(!seasonsOpen)}
+              className="w-full flex items-center justify-between px-3 py-2.5 bg-slate-800/50 hover:bg-slate-800 rounded-lg transition-colors"
+            >
+              <span className="text-sm font-semibold text-slate-200">Browse by Season</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-indigo-400 font-medium">{seasons.length}</span>
+                <span className={`text-slate-500 text-xs transition-transform ${seasonsOpen ? 'rotate-90' : ''}`}>▸</span>
               </div>
-            );
-          })}
+            </button>
+            {seasonsOpen && (
+              <div className="mt-1 ml-1 pl-2 border-l border-slate-700/50 space-y-0.5">
+                {seasons.map(({ year, count }) => {
+                  const isOpen = expandedYear === year;
+                  return (
+                    <div key={year}>
+                      <button
+                        onClick={() => toggleYear(year)}
+                        className="w-full flex items-center justify-between px-3 py-2 bg-slate-800/30 hover:bg-slate-800 rounded-lg transition-colors"
+                      >
+                        <span className="text-xs font-semibold text-slate-300">{year} Season</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-indigo-400 font-medium">{count}</span>
+                          <span className={`text-slate-500 text-[10px] transition-transform ${isOpen ? 'rotate-90' : ''}`}>▸</span>
+                        </div>
+                      </button>
+                      {isOpen && (
+                        <div className="mt-1 ml-1 pl-2 border-l border-slate-700/50 space-y-0.5">
+                          {yearStorms.length === 0 ? (
+                            <p className="text-xs text-slate-500 py-2 px-3">Loading...</p>
+                          ) : (
+                            [...yearStorms].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -4230,6 +4248,13 @@ ${fieldFlag ? `
           }}
         >
           <NavigationControl position="top-right" />
+          {activeStorm && (
+            <button
+              onClick={handleResetView}
+              title="Reset view to storm landfall"
+              className="absolute z-10 right-[10px] top-[108px] w-[29px] h-[29px] bg-white border border-gray-300 rounded shadow flex items-center justify-center text-gray-700 hover:bg-gray-100 text-base leading-none"
+            >↺</button>
+          )}
 
           {showCounties && countiesGeoJSON && (
             <SourceLayers id="county-boundaries" data={countiesGeoJSON} layers={COUNTY_LAYERS} />
@@ -4569,7 +4594,19 @@ ${fieldFlag ? `
           )}
 
           {showGrid && activeStorm && (
-            <SourceLayers id="grid-data" data={gridGeoJson} layers={GRID_LAYERS} />
+            <Source id="grid-data" type="geojson" data={gridGeoJson}>
+              {GRID_LAYERS.map(({ id: lid, ...rest }) => <Layer key={lid} id={lid} {...(rest as any)} />)}
+              {/* Hover-only "+ Click to load" label — replaces the old
+                  painted-on-every-cell label. Filter matches only the
+                  grid cell currently under the cursor. */}
+              <Layer
+                id="grid-available-label-hover"
+                type="symbol"
+                filter={['all', ['==', ['get', 'status'], 'available'], ['==', ['get', 'key'], hoverInfo?.type === 'grid' ? hoverInfo.feature?.properties?.key ?? '' : '']]}
+                layout={{ 'text-field': '+ Click to load', 'text-size': 13, 'text-font': ['Open Sans Semibold'] } as any}
+                paint={{ 'text-color': '#c7d2fe', 'text-opacity': 0.95, 'text-halo-color': '#000', 'text-halo-width': 1.2 } as any}
+              />
+            </Source>
           )}
 
           {/* ── Forecast cone overlay (active storms only) ── */}
@@ -4612,8 +4649,11 @@ ${fieldFlag ? `
             </Marker>
           )}
 
+          {/* Omit `anchor` so MapLibre auto-positions the popup based on
+              the cursor's position in the viewport — keeps the popup on-
+              screen when hovering near the top, edges, or corners. */}
           {(pinnedInfo || hoverInfo) && (
-            <Popup longitude={pinnedInfo?.lng ?? hoverInfo?.lng} latitude={pinnedInfo?.lat ?? hoverInfo?.lat} closeButton={pinnedInfo ? true : false} closeOnClick={false} anchor="bottom" className="z-50" onClose={() => pinnedInfo && setPinnedInfo(null)}>
+            <Popup longitude={pinnedInfo?.lng ?? hoverInfo?.lng} latitude={pinnedInfo?.lat ?? hoverInfo?.lat} closeButton={pinnedInfo ? true : false} closeOnClick={false} className="z-50" onClose={() => pinnedInfo && setPinnedInfo(null)}>
               <div className="p-2 min-w-[200px]">
                 {(pinnedInfo ?? hoverInfo).type === 'grid' ? (
                   <div className="text-center">
@@ -4953,12 +4993,13 @@ ${fieldFlag ? `
           )}
         </Map>
 
-        {/* ── Mobile sidebar toggle — always visible on small screens ── */}
+        {/* ── Sidebar reopen toggle — visible whenever sidebar is collapsed ── */}
         {!sidebarOpen && (
           <button
             onClick={() => setSidebarOpen(true)}
-            className="lg:hidden absolute top-3 left-3 z-20 bg-slate-900/95 backdrop-blur text-white rounded-lg shadow-lg border border-slate-700 w-10 h-10 flex items-center justify-center text-lg hover:bg-slate-800 transition-colors"
+            className="absolute top-3 left-3 z-20 bg-slate-900/95 backdrop-blur text-white rounded-lg shadow-lg border border-slate-700 w-10 h-10 flex items-center justify-center text-lg hover:bg-slate-800 transition-colors"
             aria-label="Open storm browser"
+            title="Open storm browser"
           >☰</button>
         )}
 
@@ -5440,44 +5481,41 @@ ${fieldFlag ? `
 
         {/* ── Basemap toggle + map controls (bottom-left of map) — always visible ── */}
         <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
-          {/* View mode pill: Damage vs Population. Swaps the bubble pipeline
-              (same county → city → building hierarchy) between damage-weighted
-              and population-displaced metrics. */}
+          {/* Group 1 — Metric + Hazard on a single row.
+              Damage/Population toggles the bubble pipeline; Surge/Rainfall/
+              Compound toggles the hazard raster. Kept side-by-side to
+              reclaim vertical real estate. */}
           {activeStorm && (
-            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-              <button
-                onClick={() => setMapView('damage')}
-                title="Color/size bubbles by building damage & loss"
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${mapView === 'damage' ? 'bg-rose-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-              >🏚️ Damage</button>
-              <button
-                onClick={() => setMapView('population')}
-                title="Color/size bubbles by estimated displaced population"
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${mapView === 'population' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-              >👥 Population</button>
-            </div>
-          )}
-          {/* Hazard view pill: Surge | Rainfall | Compound.
-              Surge is the current default; Rainfall and Compound currently
-              show an informational badge with MRMS accumulation stats —
-              full raster tiles land in Phase 6 via a COG tile server. */}
-          {activeStorm && (
-            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden w-[240px]">
-              <button
-                onClick={() => setHazardView('surge')}
-                title="Coastal storm surge depth (default)"
-                className={`flex-1 py-1.5 text-xs font-semibold text-center transition-colors ${hazardView === 'surge' ? 'bg-sky-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-              >🌊 Surge</button>
-              <button
-                onClick={() => setHazardView('rainfall')}
-                title="MRMS observed rainfall accumulation (stats only — raster tiles coming Phase 6)"
-                className={`flex-1 py-1.5 text-xs font-semibold text-center transition-colors border-x border-gray-200 ${hazardView === 'rainfall' ? 'bg-indigo-600 text-white border-transparent' : 'text-gray-600 hover:bg-gray-100'}`}
-              >🌧️ Rainfall</button>
-              <button
-                onClick={() => setHazardView('compound')}
-                title="Surge + rainfall + fluvial combined (the actual damage-model input)"
-                className={`flex-1 py-1.5 text-xs font-semibold text-center transition-colors ${hazardView === 'compound' ? 'bg-violet-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-              >💧 Compound</button>
+            <div className="flex gap-1.5 flex-wrap">
+              <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+                <button
+                  onClick={() => setMapView('damage')}
+                  title="Color/size bubbles by building damage & loss"
+                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${mapView === 'damage' ? 'bg-rose-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                >🏚️ Damage</button>
+                <button
+                  onClick={() => setMapView('population')}
+                  title="Color/size bubbles by estimated displaced population"
+                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${mapView === 'population' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                >👥 Pop</button>
+              </div>
+              <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+                <button
+                  onClick={() => setHazardView('surge')}
+                  title="Coastal storm surge depth (default)"
+                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'surge' ? 'bg-sky-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                >🌊 Surge</button>
+                <button
+                  onClick={() => setHazardView('rainfall')}
+                  title="MRMS observed rainfall accumulation"
+                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors border-x border-gray-200 ${hazardView === 'rainfall' ? 'bg-indigo-600 text-white border-transparent' : 'text-gray-600 hover:bg-gray-100'}`}
+                >🌧️ Rain</button>
+                <button
+                  onClick={() => setHazardView('compound')}
+                  title="Surge + rainfall + fluvial combined"
+                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'compound' ? 'bg-violet-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                >💧 Compound</button>
+              </div>
             </div>
           )}
           {/* Rainfall / Compound informational badge — shown only when
@@ -5648,22 +5686,26 @@ ${fieldFlag ? `
               </div>
             </div>
           )}
-          <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-            {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setBasemap(key)}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors ${basemap === key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-              >{label}</button>
-            ))}
-          </div>
-          {activeStorm && (
-            <>
-              <button
-                onClick={handleResetView}
-                className="bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors text-center"
-              >↺ Reset View</button>
-              <div className="flex gap-1.5">
+          {/* Group 2 — Basemap + overlay toggles, collapsed by default to
+              reclaim map space. Uses a native <details> so no extra state
+              needed. Click the summary to expand the panel. */}
+          <details className="group">
+            <summary className="list-none cursor-pointer bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 inline-flex items-center gap-1.5 select-none">
+              <span>🗺️ Layers</span>
+              <span className="text-gray-400 group-open:rotate-180 transition-transform">▾</span>
+            </summary>
+            <div className="mt-1.5 flex flex-col gap-1.5">
+              <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+                {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setBasemap(key)}
+                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${basemap === key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                  >{label}</button>
+                ))}
+              </div>
+              {activeStorm && (
+              <div className="flex gap-1.5 flex-wrap">
                 <button
                   onClick={() => setShowCounties(c => !c)}
                   title={countiesError ?? (countiesLoading ? 'Loading county boundaries…' : showCounties ? `${countiesGeoJSON?.features?.length ?? 0} counties in view — click to hide` : 'Show county boundaries (Census TIGER)')}
@@ -5727,16 +5769,17 @@ ${fieldFlag ? `
                   {sheltersError && !sheltersLoading && <span className="text-[10px]">⚠</span>}
                 </button>
               </div>
-              {(countiesError || floodZonesError || gaugesError || sheltersError) && (
-                <div className="bg-red-50 border border-red-200 text-red-700 text-[10px] rounded-lg px-2 py-1.5 max-w-[220px] leading-tight">
-                  {countiesError && <div>{countiesError}</div>}
-                  {floodZonesError && <div>{floodZonesError}</div>}
-                  {gaugesError && <div>{gaugesError}</div>}
-                  {sheltersError && <div>{sheltersError}</div>}
-                  <div className="text-red-500 mt-0.5">Check browser console for details, or pan the map to retry.</div>
-                </div>
               )}
-            </>
+            </div>
+          </details>
+          {activeStorm && (countiesError || floodZonesError || gaugesError || sheltersError) && (
+            <div className="bg-red-50 border border-red-200 text-red-700 text-[10px] rounded-lg px-2 py-1.5 max-w-[220px] leading-tight">
+              {countiesError && <div>{countiesError}</div>}
+              {floodZonesError && <div>{floodZonesError}</div>}
+              {gaugesError && <div>{gaugesError}</div>}
+              {sheltersError && <div>{sheltersError}</div>}
+              <div className="text-red-500 mt-0.5">Check browser console for details, or pan the map to retry.</div>
+            </div>
           )}
         </div>
       </div>
