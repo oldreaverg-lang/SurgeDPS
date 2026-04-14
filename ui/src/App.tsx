@@ -2022,6 +2022,15 @@ function App() {
   const [gaugesLoading, setGaugesLoading] = useState(false);
   const [gaugesError, setGaugesError] = useState<string | null>(null);
   const [gaugesSummary, setGaugesSummary] = useState<{ major: number; moderate: number; minor: number; count: number } | null>(null);
+  // ── Shelter capacity overlay (E5) ──
+  const [showShelters, setShowShelters] = useState(false);
+  const [sheltersData, setSheltersData] = useState<{
+    features: Array<{ id: string; name: string; lat: number; lon: number; capacity: number; occupancy: number | null; operator: string; isAccessible: boolean; isPetFriendly: boolean }>;
+    totalCapacity: number;
+    totalOccupancy: number | null;
+  } | null>(null);
+  const [sheltersLoading, setSheltersLoading] = useState(false);
+  const [sheltersError, setSheltersError] = useState<string | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   // Building flags — keyed by "lon,lat" for uniqueness. Values: 'confirmed_destroyed' | 'shelter_in_place' | 'inspected' | 'inaccessible' | ''
   const [buildingFlags, setBuildingFlags] = useState<Record<string, string>>({});
@@ -2366,6 +2375,43 @@ function App() {
       .finally(() => { if (!cancelled) setRainfallLoading(false); });
     return () => { cancelled = true; };
   }, [hazardView, activeStorm]);
+
+  // ── Shelter capacity (E5) — fetched when toggle flipped on ──
+  useEffect(() => {
+    if (!showShelters || !activeStorm) {
+      setSheltersData(null);
+      setSheltersError(null);
+      setSheltersLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSheltersLoading(true);
+    setSheltersError(null);
+    fetchShelterCapacity(activeStorm.storm_id, null, 200)
+      .then((res) => {
+        if (cancelled) return;
+        if (!res.available) {
+          setSheltersError(res.notes);
+          setSheltersData(null);
+        } else {
+          setSheltersData({
+            features: res.shelters.map(s => ({
+              id: s.id, name: s.name, lat: s.lat, lon: s.lon,
+              capacity: s.capacity, occupancy: s.occupancy,
+              operator: s.operator,
+              isAccessible: s.isAccessible, isPetFriendly: s.isPetFriendly,
+            })),
+            totalCapacity: res.totalCapacity,
+            totalOccupancy: res.totalOccupancy,
+          });
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setSheltersError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => { if (!cancelled) setSheltersLoading(false); });
+    return () => { cancelled = true; };
+  }, [showShelters, activeStorm]);
 
   // ── QPF forecast (only when Rainfall view AND forecast sub-mode) ──
   useEffect(() => {
@@ -3992,6 +4038,80 @@ ${fieldFlag ? `
             </Source>
           )}
 
+          {/* Shelter capacity markers (E5) — sized by capacity, colored
+              by occupancy fullness (green → amber → red), hollow when
+              occupancy is unknown. Backend: /api/shelters. */}
+          {showShelters && sheltersData && sheltersData.features.length > 0 && (() => {
+            const fc: any = {
+              type: 'FeatureCollection',
+              features: sheltersData.features.map(s => ({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+                properties: {
+                  name: s.name,
+                  capacity: s.capacity,
+                  occupancy: s.occupancy,
+                  fullness: s.occupancy != null && s.capacity > 0
+                    ? Math.min(1, s.occupancy / s.capacity) : -1,
+                  operator: s.operator,
+                },
+              })),
+            };
+            return (
+              <Source id="shelter-markers" type="geojson" data={fc}>
+                <Layer
+                  id="shelter-markers-halo"
+                  type="circle"
+                  paint={{
+                    'circle-radius': ['interpolate', ['linear'], ['get', 'capacity'], 50, 8, 500, 18, 2000, 28],
+                    'circle-color': [
+                      'case',
+                      ['<', ['get', 'fullness'], 0], '#94a3b8',
+                      ['<', ['get', 'fullness'], 0.6], '#16a34a',
+                      ['<', ['get', 'fullness'], 0.9], '#f59e0b',
+                      '#dc2626',
+                    ],
+                    'circle-opacity': 0.25,
+                  }}
+                />
+                <Layer
+                  id="shelter-markers-dot"
+                  type="circle"
+                  paint={{
+                    'circle-radius': ['interpolate', ['linear'], ['get', 'capacity'], 50, 4, 500, 8, 2000, 12],
+                    'circle-color': [
+                      'case',
+                      ['<', ['get', 'fullness'], 0], '#f1f5f9',
+                      ['<', ['get', 'fullness'], 0.6], '#16a34a',
+                      ['<', ['get', 'fullness'], 0.9], '#f59e0b',
+                      '#dc2626',
+                    ],
+                    'circle-stroke-color': '#0f172a',
+                    'circle-stroke-width': 1.5,
+                  }}
+                />
+                <Layer
+                  id="shelter-markers-label"
+                  type="symbol"
+                  minzoom={9}
+                  layout={{
+                    'text-field': ['get', 'name'],
+                    'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+                    'text-size': 10,
+                    'text-anchor': 'top',
+                    'text-offset': [0, 0.9],
+                    'text-allow-overlap': false,
+                  }}
+                  paint={{
+                    'text-color': '#0f172a',
+                    'text-halo-color': '#fff',
+                    'text-halo-width': 1.5,
+                  }}
+                />
+              </Source>
+            );
+          })()}
+
           {/* Rainfall raster overlay — served on-demand as PNG tiles by the
               /api/rainfall_tile endpoint (rio-tiler + NWS precipitation ramp).
               Rendered below the damage bubbles so loss points remain visible;
@@ -4838,7 +4958,7 @@ ${fieldFlag ? `
           setConfidence({ level: 'unvalidated', count: 0 }); setEli({ value: 0, tier: 'unavailable' });
           setValidatedDps({ value: 0, adj: 0, reason: '' }); setManifest({});
           setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
-          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setShowGauges(false); setHazardView('surge'); setBuildingFlags({});
+          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setShowGauges(false); setShowShelters(false); setHazardView('surge'); setBuildingFlags({});
           setSimMode(false); setSimResult(null); setForecastCone(null); setForecastTrack([]);
         }} />
 
@@ -5428,12 +5548,31 @@ ${fieldFlag ? `
                   )}
                   {gaugesError && !gaugesLoading && <span className="text-[10px]">⚠</span>}
                 </button>
+                <button
+                  onClick={() => setShowShelters(s => !s)}
+                  title={sheltersError ?? (sheltersLoading ? 'Loading shelter manifest…' : showShelters
+                    ? `${sheltersData?.features.length ?? 0} shelter(s) in range${sheltersData?.totalCapacity ? ` · ${sheltersData.totalCapacity.toLocaleString()} beds` : ''} — click to hide`
+                    : 'Show shelter capacity (beta — reads PERSISTENT_DIR/shelters/shelters.geojson)')}
+                  className={`rounded-lg shadow-lg border px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    sheltersError ? 'bg-amber-500 text-white border-amber-600'
+                    : showShelters ? 'bg-emerald-600 text-white border-gray-200'
+                    : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100 border-gray-200'
+                  }`}
+                >
+                  <span>🏠 Shelters</span>
+                  {sheltersLoading && <span className="w-2.5 h-2.5 rounded-full border-2 border-white border-t-transparent animate-spin" />}
+                  {showShelters && sheltersData && sheltersData.features.length > 0 && !sheltersLoading && (
+                    <span className="text-[10px] bg-white/25 rounded px-1">{sheltersData.features.length}</span>
+                  )}
+                  {sheltersError && !sheltersLoading && <span className="text-[10px]">⚠</span>}
+                </button>
               </div>
-              {(countiesError || floodZonesError || gaugesError) && (
+              {(countiesError || floodZonesError || gaugesError || sheltersError) && (
                 <div className="bg-red-50 border border-red-200 text-red-700 text-[10px] rounded-lg px-2 py-1.5 max-w-[220px] leading-tight">
                   {countiesError && <div>{countiesError}</div>}
                   {floodZonesError && <div>{floodZonesError}</div>}
                   {gaugesError && <div>{gaugesError}</div>}
+                  {sheltersError && <div>{sheltersError}</div>}
                   <div className="text-red-500 mt-0.5">Check browser console for details, or pan the map to retry.</div>
                 </div>
               )}

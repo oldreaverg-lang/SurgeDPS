@@ -1481,6 +1481,83 @@ class CellHandler(BaseHTTPRequestHandler):
         # the per-cell compound tifs process_cell writes; only cells the user
         # has already loaded contribute. Empty-storm case returns
         # available=false with a hint to load some cells first.
+        # ── GET /api/shelters?radius_km=<n>&include_far=<0|1> ──
+        # Returns shelter capacity/occupancy data for the active storm.
+        # v1 source: an optional shelters.geojson dropped into
+        # PERSISTENT_DIR/shelters/ by operators (exported from state EM
+        # portals, Red Cross iAM, or FEMA NSS). If the file is absent
+        # returns available=false with guidance. Properties expected on
+        # each Feature: id, name, capacity, occupancy (nullable),
+        # operator, accessible (bool), pet_friendly (bool), last_updated.
+        if path == '/api/shelters':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active'); return
+            try:
+                shelters_dir = os.path.join(PERSISTENT_DIR, 'shelters')
+                sfile = os.path.join(shelters_dir, 'shelters.geojson')
+                radius_km = float((params.get('radius_km') or ['200'])[0])
+                if not os.path.exists(sfile):
+                    self._send_json(200, {
+                        'available': False,
+                        'shelters': [],
+                        'total_capacity': 0,
+                        'total_occupancy': None,
+                        'notes': (
+                            'No shelter manifest found. Drop a shelters.geojson '
+                            'at PERSISTENT_DIR/shelters/shelters.geojson (Red Cross iAM '
+                            'export, state EM feed, or FEMA NSS) to enable this layer.'
+                        ),
+                    })
+                    return
+                with open(sfile) as _sf:
+                    gj = json.load(_sf)
+                feats = gj.get('features', []) if isinstance(gj, dict) else []
+                clat = _active_storm.landfall_lat; clon = _active_storm.landfall_lon
+                out = []; total_cap = 0; any_unknown = False; total_occ = 0
+                # Rough km-per-degree at the landfall latitude.
+                import math as _m
+                km_per_deg_lat = 111.32
+                km_per_deg_lon = 111.32 * max(_m.cos(_m.radians(clat)), 0.1)
+                rad_deg_lat = radius_km / km_per_deg_lat
+                rad_deg_lon = radius_km / km_per_deg_lon
+                for f in feats:
+                    g = f.get('geometry') or {}
+                    if g.get('type') != 'Point': continue
+                    lon, lat = g.get('coordinates', [None, None])[:2]
+                    if lon is None or lat is None: continue
+                    if abs(lat - clat) > rad_deg_lat or abs(lon - clon) > rad_deg_lon:
+                        continue
+                    p = f.get('properties') or {}
+                    cap = int(p.get('capacity') or 0)
+                    if cap <= 0: continue
+                    occ_raw = p.get('occupancy')
+                    occ = int(occ_raw) if (occ_raw is not None and str(occ_raw).strip() != '') else None
+                    if occ is None: any_unknown = True
+                    else: total_occ += occ
+                    total_cap += cap
+                    out.append({
+                        'id': str(p.get('id') or f.get('id') or f'{lat:.4f},{lon:.4f}'),
+                        'name': p.get('name') or 'Unnamed shelter',
+                        'lat': lat, 'lon': lon,
+                        'capacity': cap,
+                        'occupancy': occ,
+                        'operator': p.get('operator') or 'Unknown',
+                        'is_accessible': bool(p.get('accessible') or p.get('is_accessible')),
+                        'is_pet_friendly': bool(p.get('pet_friendly') or p.get('is_pet_friendly')),
+                        'last_updated': p.get('last_updated'),
+                        'notes': p.get('notes'),
+                    })
+                self._send_json(200, {
+                    'available': True,
+                    'shelters': out,
+                    'total_capacity': total_cap,
+                    'total_occupancy': None if any_unknown else total_occ,
+                    'notes': f'{len(out)} shelter{"" if len(out)==1 else "s"} within {radius_km:.0f} km of landfall',
+                })
+            except Exception as e:
+                self._send_error(500, f'shelters error: {e}')
+            return
+
         if path == '/api/compound':
             if _active_storm is None:
                 self._send_error(400, 'No storm active')

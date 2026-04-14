@@ -295,20 +295,51 @@ export type ShelterCapacityLayer = {
   notes: string;
 };
 
-// TODO(backend): wire to /surgedps/api/shelters?lat=&lon=&radius_km=
-// Should accept a bounding box or radius around the active storm's
-// landfall location and return the ShelterCapacityLayer shape.
+/**
+ * Fetch shelter capacity/occupancy for the active storm.
+ * Calls GET /api/shelters?radius_km=<n>. Backend sources from a
+ * shelters.geojson dropped into PERSISTENT_DIR/shelters/; a future
+ * iteration will blend live feeds (Red Cross iAM, FEMA NSS).
+ */
 export async function fetchShelterCapacity(
   _stormId: string,
   _center: { lat: number; lon: number } | null,
+  radiusKm = 200,
 ): Promise<ShelterCapacityLayer> {
-  return {
-    available: false,
-    shelters: [],
-    totalCapacity: 0,
-    totalOccupancy: null,
-    notes: 'Shelter capacity layer not yet integrated. Candidate sources: Red Cross Open API, FEMA OpenFEMA shelter registry, or state EM feeds. Endpoint /surgedps/api/shelters pending.',
-  };
+  try {
+    const resp = await fetch(`/api/shelters?radius_km=${radiusKm}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) {
+      return {
+        available: false, shelters: [], totalCapacity: 0, totalOccupancy: null,
+        notes: `Shelter fetch error (${resp.status}): ${resp.statusText}`,
+      };
+    }
+    const data = await resp.json();
+    const shelters: Shelter[] = (data.shelters || []).map((s: any) => ({
+      id: s.id, name: s.name, lat: s.lat, lon: s.lon,
+      capacity: s.capacity ?? 0,
+      occupancy: s.occupancy ?? null,
+      operator: s.operator ?? 'Unknown',
+      isAccessible: !!s.is_accessible,
+      isPetFriendly: !!s.is_pet_friendly,
+      lastUpdated: s.last_updated ?? null,
+      notes: s.notes,
+    }));
+    return {
+      available: !!data.available,
+      shelters,
+      totalCapacity: data.total_capacity ?? 0,
+      totalOccupancy: data.total_occupancy ?? null,
+      notes: data.notes ?? '',
+    };
+  } catch (err) {
+    return {
+      available: false, shelters: [], totalCapacity: 0, totalOccupancy: null,
+      notes: `Shelter data unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 // ───────────────────────────────────────────────────────────
