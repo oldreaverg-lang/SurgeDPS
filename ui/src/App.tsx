@@ -5584,7 +5584,7 @@ ${fieldFlag ? `
               {hazardView === 'rainfall' && rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn == null && (
                 <div className="text-gray-500">{qpfStats.notes || 'QPF unavailable.'}</div>
               )}
-              {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallLoading && <div className="text-gray-500">Loading MRMS…</div>}
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallLoading && <div className="text-gray-500">Processing MRMS data… (first load ~2 min)</div>}
               {hazardView === 'rainfall' && rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn != null && (
                 <>
                   <div>Max accumulation: <span className="font-semibold">{rainfallStats.maxIn} in</span></div>

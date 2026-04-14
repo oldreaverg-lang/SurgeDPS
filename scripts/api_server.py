@@ -323,6 +323,118 @@ _STORM_TRACKER_CAP = 32
 _rainfall_tif_by_storm: "_OrderedDict[str, str]" = _OrderedDict()
 _rainfall_tif_lock = _threading.Lock()
 
+# ── Background MRMS job registry ─────────────────────────────────────────────
+# IEM historical fetch downloads 72 GRIB2 files + parses them sequentially
+# (~90-120 s cold).  Doing this inside the HTTP handler blocks the request
+# thread and almost always hits Railway's connection timeout.  Instead we
+# spawn a daemon thread and return {"status":"pending"} immediately; the
+# frontend polls /api/rainfall every 5 s until status == "ready".
+#
+# _mrms_jobs: storm_id → {"status": "pending"|"ready"|"error",
+#                          "result": <serialisable dict or None>,
+#                          "started_at": float}
+_mrms_jobs: dict = {}
+_mrms_jobs_lock = _threading.Lock()
+
+
+def _mrms_background_fetch(storm_id: str, fetcher, bbox, duration_hr: int,
+                             pass_level: int, realtime: bool, valid_time,
+                             mrms_cache: str, storm_obj) -> None:
+    """Run in a daemon thread.  Populates _mrms_jobs[storm_id] when done."""
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.join(BASE_DIR, 'src'))
+
+    def _finish(payload: dict) -> None:
+        with _mrms_jobs_lock:
+            _mrms_jobs[storm_id] = {"status": "ready", "result": payload,
+                                     "started_at": _mrms_jobs.get(storm_id, {}).get("started_at", 0)}
+        # Also register tif path for tile serving if present
+        tif = payload.get("tif_path") or payload.get("clipped_tif_path")
+        if tif and _os.path.exists(tif):
+            with _rainfall_tif_lock:
+                _lru_set(_rainfall_tif_by_storm, storm_id, tif)
+
+    try:
+        result = fetcher.fetch_storm_accumulation(
+            storm_bbox=bbox, duration_hr=duration_hr,
+            pass_level=pass_level, realtime=realtime, valid_time=valid_time,
+        )
+        # IEM historical fallback (pre-2020 storms)
+        if result is None and valid_time is not None and not realtime:
+            try:
+                result = fetcher.fetch_iem_historical(
+                    storm_bbox=bbox, valid_time=valid_time, duration_hr=duration_hr,
+                )
+            except Exception as _ie:
+                print(f"[mrms_bg] IEM fallback failed for {storm_id}: {_ie}")
+
+        if result is not None:
+            # Register tif for tile server
+            if result.clipped_tif_path and _os.path.exists(result.clipped_tif_path):
+                with _rainfall_tif_lock:
+                    _lru_set(_rainfall_tif_by_storm, storm_id, result.clipped_tif_path)
+            tile_url = (f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm_id}"
+                        if result.clipped_tif_path else None)
+            _finish({
+                "available": True, "storm_id": storm_id,
+                "product": result.product, "valid_time": result.valid_time.isoformat() if result.valid_time else None,
+                "duration_hr": result.duration_hr,
+                "max_precip_mm": round(result.max_precip_mm, 1),
+                "avg_precip_mm": round(result.avg_precip_mm, 1),
+                "max_precip_in": round(result.max_precip_mm / 25.4, 2),
+                "bbox": list(bbox), "tif_path": result.clipped_tif_path,
+                "tile_url_template": tile_url, "source": result.source,
+            })
+            return
+
+        # Parametric fallback — only when no real data exists
+        from flood_model.rainfall import estimate_rainfall_flooding
+        parametric_tif = _os.path.join(mrms_cache, f'parametric_{storm_id}.tif')
+        if not _os.path.exists(parametric_tif):
+            rain_result = estimate_rainfall_flooding(
+                center_lat=storm_obj.landfall_lat,
+                center_lon=storm_obj.landfall_lon,
+                max_wind_kt=storm_obj.max_wind_kt,
+                storm_speed_kt=getattr(storm_obj, 'speed_kt', 10.0),
+                rmax_nm=getattr(storm_obj, 'rmax_nm', 25.0),
+                heading_deg=getattr(storm_obj, 'heading_deg', 0.0),
+                output_dir=mrms_cache,
+                storm_id=f'_{storm_id}_stormwide',
+                extent_km=450.0, grid_resolution_deg=0.02, runoff_coefficient=0.5,
+            )
+            if hasattr(rain_result, 'total_precip_path') and _os.path.exists(rain_result.total_precip_path):
+                _os.replace(rain_result.total_precip_path, parametric_tif)
+            if hasattr(rain_result, 'depth_raster_path') and _os.path.exists(rain_result.depth_raster_path):
+                try: _os.remove(rain_result.depth_raster_path)
+                except OSError: pass
+        if _os.path.exists(parametric_tif):
+            import rasterio as _rio, numpy as _np
+            with _rio.open(parametric_tif) as _src:
+                _d = _src.read(1)
+            _valid = _d[_d > 0]
+            _max_mm = float(_np.nanmax(_valid)) if _valid.size else 0.0
+            _avg_mm = float(_np.nanmean(_valid)) if _valid.size else 0.0
+            with _rainfall_tif_lock:
+                _lru_set(_rainfall_tif_by_storm, storm_id, parametric_tif)
+            _finish({
+                "available": True, "storm_id": storm_id,
+                "product": "Lonfat_parametric_72H", "valid_time": None,
+                "duration_hr": duration_hr,
+                "max_precip_mm": round(_max_mm, 1), "avg_precip_mm": round(_avg_mm, 1),
+                "max_precip_in": round(_max_mm / 25.4, 2),
+                "bbox": list(bbox), "tif_path": parametric_tif,
+                "tile_url_template": f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm_id}",
+                "source": "parametric",
+            })
+        else:
+            _finish({"available": False, "storm_id": storm_id, "notes": "No data available"})
+    except Exception as _ex:
+        import traceback as _tb
+        _tb.print_exc()
+        with _mrms_jobs_lock:
+            _mrms_jobs[storm_id]["status"] = "error"
+        print(f"[mrms_bg] fatal error for {storm_id}: {_ex}")
+
 # ── Compound tile server state ──
 # Keyed by storm_id, value is the absolute path to the mosaic VRT/tif that
 # /api/compound_tile serves. Built lazily from the per-cell compound tifs
@@ -1818,182 +1930,110 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, str(e))
             return
 
-        # ── GET /api/rainfall?storm_id=<id>&duration=72&pass=2 ──
-        # Returns MRMS QPE overlay GeoTIFF stats + bounding box for the active storm.
-        # Used by the frontend Rainfall (obs) map toggle.
+        # ── GET /api/rainfall?duration=72&pass=2 ──
+        # Background-job pattern: spawns IEM/S3 download in a daemon thread
+        # and returns {"status":"pending"} immediately so the handler thread
+        # is never blocked for the 90-120 s that a cold IEM fetch takes.
+        # Frontend polls every 5 s; once status=="ready" the full result is
+        # returned.  Stale parametric TIFs are purged so IEM gets a clean shot.
         if path == '/api/rainfall':
             if _active_storm is None:
                 self._send_error(400, 'No storm active')
                 return
             try:
+                import time as _time
                 sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
                 from rainfall.mrms_fetcher import MRMSFetcher, storm_bbox_from_catalog_entry
                 duration_hr = int(params.get('duration', ['72'])[0])
                 pass_level  = int(params.get('pass',     ['2'])[0])
                 realtime    = params.get('realtime', ['0'])[0] == '1'
+                sid = _active_storm.storm_id
+                mrms_cache = os.path.join(PERSISTENT_DIR, 'mrms')
+                os.makedirs(mrms_cache, exist_ok=True)
+
+                # ── Purge stale parametric TIF so IEM can replace it ──────
+                # Old deploys wrote parametric_{sid}.tif before cfgrib was
+                # installed.  If a real IEM TIF now exists alongside it we
+                # delete the parametric one; if the job is still running we
+                # leave it alone.
+                parametric_tif = os.path.join(mrms_cache, f'parametric_{sid}.tif')
+                iem_pattern = os.path.join(mrms_cache, 'iem_*.tif')
+                import glob as _glob
+                if os.path.exists(parametric_tif) and _glob.glob(iem_pattern):
+                    try:
+                        os.remove(parametric_tif)
+                        print(f"[rainfall] purged stale parametric tif for {sid}")
+                    except OSError:
+                        pass
+
+                # ── Return cached result if job already finished ───────────
+                with _mrms_jobs_lock:
+                    job = _mrms_jobs.get(sid)
+                if job and job['status'] == 'ready':
+                    self._send_json(200, job['result'])
+                    return
+                if job and job['status'] == 'pending':
+                    self._send_json(200, {'status': 'pending', 'storm_id': sid})
+                    return
+
+                # ── Check on-disk IEM TIF cache (server restart case) ─────
                 bbox = storm_bbox_from_catalog_entry(
                     _active_storm.landfall_lat, _active_storm.landfall_lon, buffer_deg=4.0
                 )
-                mrms_cache = os.path.join(PERSISTENT_DIR, 'mrms')
-                os.makedirs(mrms_cache, exist_ok=True)
-                # Keep everything — raw GRIB + clipped GeoTIFF — on the
-                # persistent volume.  Historical MRMS archives are immutable so
-                # there's no reason to ever expire these files.
                 fetcher = MRMSFetcher(cache_dir=mrms_cache, keep_raw_grib=True)
-                # Pass the storm's actual landfall date as valid_time so the
-                # S3 fetcher retrieves the historically-correct QPE file
-                # rather than the most-recent one (which would be wrong for
-                # any non-active storm).
+                # If an IEM TIF already exists on disk, return it immediately
+                import hashlib as _hl
                 from datetime import datetime, timezone as _tz, timedelta as _td
                 valid_time = None
                 if not realtime and getattr(_active_storm, 'landfall_date', None):
                     try:
-                        # End the N-hour window 48 h *after* landfall so the
-                        # accumulation spans pre-landfall rain bands + peak
-                        # rain + trailing moisture (e.g., Harvey's heaviest
-                        # totals fell 24-72 h after initial landfall).
                         valid_time = datetime.strptime(
                             _active_storm.landfall_date, '%Y-%m-%d'
                         ).replace(hour=18, tzinfo=_tz.utc) + _td(hours=48)
                     except (ValueError, AttributeError):
                         pass
-                result = fetcher.fetch_storm_accumulation(
-                    storm_bbox=bbox,
-                    duration_hr=duration_hr,
-                    pass_level=pass_level,
-                    realtime=realtime,
-                    valid_time=valid_time,
-                )
-                # ── IEM historical fallback (2015-10 → 2020-10) ─────────
-                # NOAA S3 starts 2020-10-14. Iowa State mirrors hourly
-                # MRMS GaugeCorr_QPE_01H grib2 back to ~mid-2015, which
-                # covers Matthew/Harvey/Irma/Maria/Florence/Michael/Dorian
-                # etc. Sum N hourly files → real observed QPE. We only
-                # reach here if S3 had nothing AND a valid_time is known
-                # (no point trying IEM for unnamed active storms).
-                if result is None and valid_time is not None and not realtime:
-                    try:
-                        iem_result = fetcher.fetch_iem_historical(
-                            storm_bbox=bbox,
-                            valid_time=valid_time,
-                            duration_hr=duration_hr,
-                        )
-                        if iem_result is not None:
-                            result = iem_result
-                    except Exception as _iem_err:
-                        import traceback as _tb
-                        _tb.print_exc()
-                        print(f"[rainfall] IEM historical fallback failed: {_iem_err}")
-
-                if result is None:
-                    # ── Parametric fallback ───────────────────────────
-                    # Reached only if both S3 (post-2020) and IEM
-                    # (2015-2020) returned nothing — meaning the storm
-                    # pre-dates the MRMS archive entirely (Katrina 2005,
-                    # Ike 2008, Sandy 2012, etc.). Generate a Lonfat
-                    # parametric total-precipitation raster from storm
-                    # parameters so the rainfall layer still renders.
-                    # Source is labelled "parametric" in the response.
-                    try:
-                        from flood_model.rainfall import estimate_rainfall_flooding
-                        parametric_tif = os.path.join(
-                            mrms_cache, f'parametric_{_active_storm.storm_id}.tif'
-                        )
-                        if not os.path.exists(parametric_tif):
-                            rain_result = estimate_rainfall_flooding(
-                                center_lat=_active_storm.landfall_lat,
-                                center_lon=_active_storm.landfall_lon,
-                                max_wind_kt=_active_storm.max_wind_kt,
-                                storm_speed_kt=getattr(_active_storm, 'speed_kt', 10.0),
-                                rmax_nm=getattr(_active_storm, 'rmax_nm', 25.0),
-                                heading_deg=getattr(_active_storm, 'heading_deg', 0.0),
-                                output_dir=mrms_cache,
-                                storm_id=f'_{_active_storm.storm_id}_stormwide',
-                                # Storm-scale footprint (~4° buffer matches MRMS bbox)
-                                extent_km=450.0,
-                                # Coarser grid than cell-level: 0.02° ≈ 2 km — keeps
-                                # raster ~500x500 for fast tile rendering
-                                grid_resolution_deg=0.02,
-                                runoff_coefficient=0.5,
-                            )
-                            # estimate_rainfall_flooding writes precip_*.tif and
-                            # depth_rainfall_*.tif. We want precip (mm) for the
-                            # rainfall tile renderer. Move to stable name.
-                            src_tif = rain_result.total_precip_path
-                            if os.path.exists(src_tif):
-                                os.replace(src_tif, parametric_tif)
-                            # Clean up the depth raster (not used for this layer)
-                            if os.path.exists(rain_result.depth_raster_path):
-                                try: os.remove(rain_result.depth_raster_path)
-                                except OSError: pass
-                        if os.path.exists(parametric_tif):
-                            with _rainfall_tif_lock:
-                                _lru_set(_rainfall_tif_by_storm, _active_storm.storm_id, parametric_tif)
-                            # Read stats from the parametric tif
-                            import rasterio as _rio
-                            import numpy as _np
-                            with _rio.open(parametric_tif) as _src:
-                                _data = _src.read(1)
-                            _valid = _data[_data > 0]
-                            _max_mm = float(_np.nanmax(_valid)) if _valid.size else 0.0
-                            _avg_mm = float(_np.nanmean(_valid)) if _valid.size else 0.0
-                            self._send_json(200, {
-                                'available': True,
-                                'storm_id': _active_storm.storm_id,
-                                'product': 'Lonfat_parametric_72H',
-                                'valid_time': None,
-                                'duration_hr': duration_hr,
-                                'max_precip_mm': round(_max_mm, 1),
-                                'avg_precip_mm': round(_avg_mm, 1),
-                                'max_precip_in': round(_max_mm / 25.4, 2),
-                                'bbox': list(bbox),
-                                'tif_path': parametric_tif,
-                                'tile_url_template': (
-                                    f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png"
-                                    f"?storm_id={_active_storm.storm_id}"
-                                ),
-                                'source': 'parametric',
-                            })
-                            return
-                    except Exception as _param_err:
-                        import traceback as _tb
-                        _tb.print_exc()
-                        print(f"[rainfall] Parametric fallback failed: {_param_err}")
-                        self._send_json(200, {
-                            'available': False,
-                            'storm_id': _active_storm.storm_id,
-                            '_debug': f'parametric_fallback_error: {type(_param_err).__name__}: {_param_err}'[:300],
-                        })
+                if valid_time is not None:
+                    bbox_str = "_".join(f"{v:.3f}" for v in bbox)
+                    cache_token = f"iem|{valid_time.isoformat()}|{duration_hr}|{bbox_str}"
+                    ck = _hl.md5(cache_token.encode()).hexdigest()[:12]
+                    iem_tif = os.path.join(mrms_cache, f'iem_{ck}.tif')
+                    if os.path.exists(iem_tif):
+                        with _rainfall_tif_lock:
+                            _lru_set(_rainfall_tif_by_storm, sid, iem_tif)
+                        import rasterio as _rio, numpy as _np
+                        with _rio.open(iem_tif) as _src:
+                            _d = _src.read(1)
+                        _v = _d[_d > 0]
+                        result_payload = {
+                            'available': True, 'status': 'ready', 'storm_id': sid,
+                            'product': f'IEM_GaugeCorr_QPE_{duration_hr:02d}H',
+                            'valid_time': valid_time.isoformat(),
+                            'duration_hr': duration_hr,
+                            'max_precip_mm': round(float(_np.nanmax(_v)), 1) if _v.size else 0.0,
+                            'avg_precip_mm': round(float(_np.nanmean(_v)), 1) if _v.size else 0.0,
+                            'max_precip_in': round(float(_np.nanmax(_v)) / 25.4, 2) if _v.size else 0.0,
+                            'bbox': list(bbox), 'tif_path': iem_tif,
+                            'tile_url_template': f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={sid}",
+                            'source': 'mrms_iem',
+                        }
+                        with _mrms_jobs_lock:
+                            _mrms_jobs[sid] = {'status': 'ready', 'result': result_payload,
+                                               'started_at': _time.time()}
+                        self._send_json(200, result_payload)
                         return
-                    self._send_json(200, {
-                        'available': False,
-                        'storm_id': _active_storm.storm_id,
-                        '_debug': 'parametric_fallback_not_triggered',
-                    })
-                    return
-                # Register the clipped GeoTIFF with the tile server so
-                # /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=… can find it.
-                if result.clipped_tif_path and os.path.exists(result.clipped_tif_path):
-                    with _rainfall_tif_lock:
-                        _lru_set(_rainfall_tif_by_storm, _active_storm.storm_id, result.clipped_tif_path)
-                tile_url_template = (
-                    f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png"
-                    f"?storm_id={_active_storm.storm_id}"
-                ) if result.clipped_tif_path else None
-                self._send_json(200, {
-                    'available': True,
-                    'storm_id': _active_storm.storm_id,
-                    'product': result.product,
-                    'valid_time': result.valid_time.isoformat() if result.valid_time else None,
-                    'duration_hr': result.duration_hr,
-                    'max_precip_mm': round(result.max_precip_mm, 1),
-                    'avg_precip_mm': round(result.avg_precip_mm, 1),
-                    'max_precip_in': round(result.max_precip_mm / 25.4, 2),
-                    'bbox': list(result.bbox),
-                    'tif_path': result.clipped_tif_path,
-                    'tile_url_template': tile_url_template,
-                    'source': result.source,
-                })
+
+                # ── Spawn background job ───────────────────────────────────
+                with _mrms_jobs_lock:
+                    _mrms_jobs[sid] = {'status': 'pending', 'result': None,
+                                       'started_at': _time.time()}
+                t = _threading.Thread(
+                    target=_mrms_background_fetch,
+                    args=(sid, fetcher, bbox, duration_hr, pass_level,
+                          realtime, valid_time, mrms_cache, _active_storm),
+                    daemon=True,
+                )
+                t.start()
+                self._send_json(200, {'status': 'pending', 'storm_id': sid})
             except Exception as e:
                 self._send_error(500, str(e))
             return

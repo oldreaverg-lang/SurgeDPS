@@ -77,30 +77,19 @@ export async function fetchRainfallOverlay(
   durationHr = 72,
   passLevel = 2,
 ): Promise<RainfallOverlay> {
-  try {
-    const url = `/surgedps/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
-    // First fetch of a pre-2020 storm spins up the IEM historical aggregator,
-    // which downloads and sums 72 hourly MRMS grib2 files (~90 s cold, <1 s
-    // warm once the clipped GeoTIFF is cached on the persistent volume).
-    // 180 s gives the server enough headroom even on a cold Railway container.
-    const resp = await fetch(url, { signal: AbortSignal.timeout(180_000) });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => resp.statusText);
-      return {
-        available: false, source: 'none', tileUrlTemplate: null,
-        validTime: null, bboxInches: null, maxPrecipMm: null,
-        avgPrecipMm: null, durationHr: null, product: null,
-        notes: `MRMS fetch error (${resp.status}): ${text}`,
-      };
-    }
-    const data = await resp.json();
-    const maxIn  = data.max_precip_mm != null ? data.max_precip_mm / 25.4 : null;
-    const avgIn  = data.avg_precip_mm != null ? data.avg_precip_mm / 25.4 : null;
+  // Backend now uses a background-job pattern: first response may be
+  // {status:"pending"} while IEM downloads 72 GRIB2 files (~90-120 s cold).
+  // We poll every 5 s for up to 3 minutes before giving up.
+  const url = `/surgedps/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
+  const POLL_INTERVAL_MS = 5_000;
+  const MAX_POLLS = 36; // 3 minutes total
+
+  const _parse = (data: any): RainfallOverlay => {
+    const maxIn = data.max_precip_mm != null ? data.max_precip_mm / 25.4 : null;
+    const avgIn = data.avg_precip_mm != null ? data.avg_precip_mm / 25.4 : null;
     return {
       available: true,
       source: 'mrms',
-      // Phase 6: backend returns a XYZ tile URL template (NWS colormap PNGs).
-      // Server falls back to null if the MRMS clipped tif isn't on disk yet.
       tileUrlTemplate: prefixTileUrl(data.tile_url_template),
       validTime: data.valid_time ?? null,
       bboxInches: maxIn != null && avgIn != null ? [0, +maxIn.toFixed(1)] : null,
@@ -110,13 +99,41 @@ export async function fetchRainfallOverlay(
       product: data.product ?? null,
       notes: `MRMS ${data.product ?? ''} · source: ${data.source ?? 'unknown'} · max ${maxIn != null ? maxIn.toFixed(1) + ' in' : '—'}`,
     };
-  } catch (err) {
-    return {
-      available: false, source: 'none', tileUrlTemplate: null,
+  };
+
+  try {
+    for (let poll = 0; poll < MAX_POLLS; poll++) {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => resp.statusText);
+        return { available: false, source: 'none', tileUrlTemplate: null,
+          validTime: null, bboxInches: null, maxPrecipMm: null,
+          avgPrecipMm: null, durationHr: null, product: null,
+          notes: `MRMS fetch error (${resp.status}): ${text}` };
+      }
+      const data = await resp.json();
+      if (data.status === 'pending') {
+        // Background job still running — wait and retry
+        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+        continue;
+      }
+      if (data.available === false) {
+        return { available: false, source: 'none', tileUrlTemplate: null,
+          validTime: null, bboxInches: null, maxPrecipMm: null,
+          avgPrecipMm: null, durationHr: null, product: null,
+          notes: data.notes ?? 'MRMS data unavailable for this storm' };
+      }
+      return _parse(data);
+    }
+    return { available: false, source: 'none', tileUrlTemplate: null,
       validTime: null, bboxInches: null, maxPrecipMm: null,
       avgPrecipMm: null, durationHr: null, product: null,
-      notes: `MRMS unavailable: ${err instanceof Error ? err.message : String(err)}`,
-    };
+      notes: 'MRMS processing timed out — data may appear after page refresh' };
+  } catch (err) {
+    return { available: false, source: 'none', tileUrlTemplate: null,
+      validTime: null, bboxInches: null, maxPrecipMm: null,
+      avgPrecipMm: null, durationHr: null, product: null,
+      notes: `MRMS unavailable: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
