@@ -367,17 +367,37 @@ export type VendorCoverageLayer = {
   notes: string;
 };
 
-// TODO(backend): wire to /surgedps/api/vendor_coverage?storm_id=
-// Can be driven by a future MCP connector or a static GeoJSON
-// coverage file per vendor. See PHASE5_DATA_CONTRACTS.md §3.
+/**
+ * Fetch vendor coverage for the active storm. Hits /api/vendor_coverage
+ * which reads PERSISTENT_DIR/vendors/vendors.json and computes each
+ * vendor's coverage % against the storm footprint. See
+ * PHASE5_DATA_CONTRACTS.md §3.
+ */
 export async function fetchVendorCoverage(
   _stormId: string,
 ): Promise<VendorCoverageLayer> {
-  return {
-    available: false,
-    vendors: [],
-    notes: 'Vendor coverage layer not yet integrated. Will be driven by a per-vendor polygon set or an MCP connector query. Endpoint /surgedps/api/vendor_coverage pending.',
-  };
+  try {
+    const resp = await fetch('/api/vendor_coverage', {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) {
+      return { available: false, vendors: [],
+        notes: `Vendor coverage fetch error (${resp.status}): ${resp.statusText}` };
+    }
+    const data = await resp.json();
+    const vendors: VendorCoverage[] = (data.vendors || []).map((v: any) => ({
+      vendorId: v.vendor_id,
+      vendorName: v.vendor_name,
+      specialties: v.specialties || [],
+      coveragePct: v.coverage_pct ?? 0,
+      contactUrl: v.contact_url ?? null,
+      notes: v.notes,
+    }));
+    return { available: !!data.available, vendors, notes: data.notes ?? '' };
+  } catch (err) {
+    return { available: false, vendors: [],
+      notes: `Vendor coverage unavailable: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 // ───────────────────────────────────────────────────────────
@@ -407,19 +427,48 @@ export type TimeToAccessLayer = {
   notes: string;
 };
 
-// TODO(backend): wire to /surgedps/api/time_to_access?storm_id=
-// Input: the hotspot list as currently sent to the UI. Output:
-// one AccessEstimate per hotspot rank. See §4 in data-contracts.
+/**
+ * Fetch time-to-access estimates for a set of hotspot ranks. Calls
+ * GET /api/time_to_access?ranks=1,2,3 — the backend uses GET (not POST
+ * as documented) because the payload is trivially small. v1 returns
+ * heuristic ETAs (confidence='low'); OSM × depth reachability is
+ * the next upgrade. See PHASE5_DATA_CONTRACTS.md §4.
+ */
 export async function fetchTimeToAccess(
   _stormId: string,
-  _hotspotRanks: number[],
+  hotspotRanks: number[],
 ): Promise<TimeToAccessLayer> {
-  return {
-    available: false,
-    estimates: [],
-    generatedAt: null,
-    notes: 'Time-to-access estimate not yet integrated. Requires OSM road network overlay and depth-over-road reachability analysis. Endpoint /surgedps/api/time_to_access pending.',
-  };
+  try {
+    if (!hotspotRanks.length) {
+      return { available: false, estimates: [], generatedAt: null,
+        notes: 'No hotspots to estimate.' };
+    }
+    const qs = encodeURIComponent(hotspotRanks.join(','));
+    const resp = await fetch(`/api/time_to_access?ranks=${qs}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) {
+      return { available: false, estimates: [], generatedAt: null,
+        notes: `Time-to-access fetch error (${resp.status}): ${resp.statusText}` };
+    }
+    const data = await resp.json();
+    const estimates: AccessEstimate[] = (data.estimates || []).map((e: any) => ({
+      hotspotRank: e.hotspot_rank,
+      etaHours: e.eta_hours ?? null,
+      limitingFactor: e.limiting_factor ?? 'unknown',
+      confidence: e.confidence ?? 'low',
+      notes: e.notes,
+    }));
+    return {
+      available: !!data.available,
+      estimates,
+      generatedAt: data.generated_at ?? null,
+      notes: data.notes ?? '',
+    };
+  } catch (err) {
+    return { available: false, estimates: [], generatedAt: null,
+      notes: `Time-to-access unavailable: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 // ───────────────────────────────────────────────────────────

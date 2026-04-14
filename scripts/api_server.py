@@ -1558,6 +1558,123 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, f'shelters error: {e}')
             return
 
+        # ── GET /api/vendor_coverage ──
+        # Reads PERSISTENT_DIR/vendors/vendors.json (an array of
+        # { vendor_id, vendor_name, specialties, contact_url, notes,
+        #   service_area: <GeoJSON Polygon|MultiPolygon> }) and computes
+        # each vendor's coverage % against the active storm footprint
+        # (4° box around landfall — intentionally coarse for v1).
+        # Future: compute against the union of hotspot polygons.
+        if path == '/api/vendor_coverage':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active'); return
+            try:
+                vdir = os.path.join(PERSISTENT_DIR, 'vendors')
+                vfile = os.path.join(vdir, 'vendors.json')
+                if not os.path.exists(vfile):
+                    self._send_json(200, {
+                        'available': False, 'vendors': [],
+                        'notes': (
+                            'No vendor manifest. Drop a vendors.json at '
+                            'PERSISTENT_DIR/vendors/vendors.json — each entry needs '
+                            'a GeoJSON service_area polygon. See PHASE5_DATA_CONTRACTS.md §3.'
+                        ),
+                    })
+                    return
+                from shapely.geometry import shape as _shape, box as _shbox
+                with open(vfile) as _vf:
+                    vendors_in = json.load(_vf)
+                if not isinstance(vendors_in, list):
+                    vendors_in = vendors_in.get('vendors', []) if isinstance(vendors_in, dict) else []
+                clat = _active_storm.landfall_lat; clon = _active_storm.landfall_lon
+                storm_footprint = _shbox(clon - 4, clat - 4, clon + 4, clat + 4)
+                storm_area = storm_footprint.area or 1.0
+                out = []
+                for v in vendors_in:
+                    sa = v.get('service_area')
+                    if not sa:
+                        coverage = 0.0
+                    else:
+                        try:
+                            poly = _shape(sa)
+                            inter = poly.intersection(storm_footprint)
+                            coverage = float(inter.area / storm_area * 100.0)
+                        except Exception:
+                            coverage = 0.0
+                    out.append({
+                        'vendor_id': str(v.get('vendor_id') or v.get('id') or v.get('vendor_name', '')),
+                        'vendor_name': v.get('vendor_name') or v.get('name') or 'Unknown vendor',
+                        'specialties': v.get('specialties') or [],
+                        'coverage_pct': round(max(0.0, min(100.0, coverage)), 1),
+                        'contact_url': v.get('contact_url'),
+                        'notes': v.get('notes'),
+                    })
+                out.sort(key=lambda r: r['coverage_pct'], reverse=True)
+                self._send_json(200, {
+                    'available': True, 'vendors': out,
+                    'notes': f'Coverage computed against a 4° bbox around landfall ({len(out)} vendor(s) in manifest).',
+                })
+            except Exception as e:
+                self._send_error(500, f'vendor_coverage error: {e}')
+            return
+
+        # ── GET /api/time_to_access?ranks=1,2,3 ──
+        # Hotspot access-time heuristic. For v1 this is a deliberately
+        # coarse estimate (confidence='low') based on the storm's
+        # max_surge and each hotspot's rank: higher rank ≈ more damage
+        # and/or more inland, so longer access window. The contract
+        # documents a POST endpoint, but because the payload is tiny
+        # (a handful of small integers) a GET with a comma-separated
+        # list is simpler and avoids a POST handler. Shape is
+        # identical to the documented TimeToAccessLayer.
+        if path == '/api/time_to_access':
+            if _active_storm is None:
+                self._send_error(400, 'No storm active'); return
+            try:
+                raw = (params.get('ranks') or [''])[0]
+                ranks = [int(r) for r in raw.split(',') if r.strip().isdigit()]
+                if not ranks:
+                    self._send_json(200, {
+                        'available': False, 'estimates': [], 'generated_at': None,
+                        'notes': 'No ranks supplied. Pass ?ranks=1,2,3 with the hotspot rank list.',
+                    })
+                    return
+                # Simple model: base ETA scales with max_surge; each rank
+                # adds ~2h because higher-rank hotspots are more damaged.
+                try:
+                    max_surge = float(getattr(_active_storm, 'max_surge_ft', 0) or 0)
+                except Exception:
+                    max_surge = 0.0
+                base_hr = 6.0 + max_surge * 2.0   # ~6h for no surge, ~36h at 15ft
+                import datetime as _dt
+                estimates = []
+                for r in ranks:
+                    eta = base_hr + r * 2.0
+                    # Above rank 10 or very high surge, label surge as limiting;
+                    # otherwise debris/road closures dominate.
+                    if max_surge >= 10:
+                        limiting = 'surge'
+                    elif r > 10:
+                        limiting = 'debris'
+                    else:
+                        limiting = 'road_closure'
+                    estimates.append({
+                        'hotspot_rank': r,
+                        'eta_hours': round(eta, 1),
+                        'limiting_factor': limiting,
+                        'confidence': 'low',
+                        'notes': 'Heuristic — depth × road-network model pending (see PHASE5_DATA_CONTRACTS.md §4).',
+                    })
+                self._send_json(200, {
+                    'available': True,
+                    'estimates': estimates,
+                    'generated_at': _dt.datetime.utcnow().isoformat() + 'Z',
+                    'notes': f'Heuristic ETAs for {len(estimates)} hotspot(s) based on max_surge={max_surge:.1f} ft.',
+                })
+            except Exception as e:
+                self._send_error(500, f'time_to_access error: {e}')
+            return
+
         if path == '/api/compound':
             if _active_storm is None:
                 self._send_error(400, 'No storm active')
