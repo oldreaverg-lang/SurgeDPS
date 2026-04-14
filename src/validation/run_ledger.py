@@ -21,9 +21,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional
+
+# Serialises load+modify+save against concurrent record_run() calls under
+# ThreadingHTTPServer. Without this, two threads can load N entries, each
+# append one, and the second save overwrites the first — a silent data loss.
+_LEDGER_LOCK = threading.Lock()
 
 # Persistent storage — paths centralised in storage.py
 from persistent_paths import VALIDATION_DIR, LEDGER_FILE
@@ -77,16 +83,35 @@ def _load_ledger() -> List[dict]:
 
 
 def _save_ledger(entries: List[dict]):
-    """Write the full ledger to disk."""
-    with open(_LEDGER_PATH, 'w') as f:
-        json.dump(entries, f, indent=2)
+    """Write the full ledger to disk atomically.
+
+    Non-atomic writes would leave truncated JSON on disk if the process is
+    killed mid-write; _load_ledger swallows JSONDecodeError and returns [],
+    so a bad write would silently erase the entire history on next read.
+    """
+    os.makedirs(os.path.dirname(_LEDGER_PATH) or ".", exist_ok=True)
+    tmp = f"{_LEDGER_PATH}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(entries, f, indent=2)
+        os.replace(tmp, _LEDGER_PATH)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def record_run(run: ModelRun):
     """Append a model run to the persistent ledger."""
-    entries = _load_ledger()
-    entries.append(run.to_dict())
-    _save_ledger(entries)
+    # Lock covers load+append+save so concurrent writers don't clobber each
+    # other. record_run is called from HTTP handler threads.
+    with _LEDGER_LOCK:
+        entries = _load_ledger()
+        entries.append(run.to_dict())
+        _save_ledger(entries)
 
 
 def get_runs(storm_id: Optional[str] = None) -> List[dict]:

@@ -929,8 +929,13 @@ def _build_storm_compound_mosaic(storm_id: str) -> tuple[str | None, dict]:
         rebuild = cell_mtime_max > mo_mtime
 
     if rebuild:
-        datasets = [_rio.open(t) for t in cell_tifs]
+        # Open datasets one at a time so a failure partway through still
+        # closes the already-opened handles. The old list-comprehension
+        # leaked handles if any _rio.open raised.
+        datasets: list = []
         try:
+            for t in cell_tifs:
+                datasets.append(_rio.open(t))
             mosaic, transform = _merge(datasets)
             profile = datasets[0].profile.copy()
             profile.update(
@@ -944,11 +949,21 @@ def _build_storm_compound_mosaic(storm_id: str) -> tuple[str | None, dict]:
                 blockxsize=256,
                 blockysize=256,
             )
-            with _rio.open(mosaic_path, 'w', **profile) as dst:
+            # Atomic write — _render_compound_tile opens mosaic_path via
+            # rio_tiler on every tile request; writing in place truncates
+            # the file and a concurrent tile render would read an empty
+            # or half-written raster.
+            import threading as _th_m
+            _tmp = f'{mosaic_path}.tmp.{_os.getpid()}.{_th_m.get_ident()}'
+            with _rio.open(_tmp, 'w', **profile) as dst:
                 dst.write(mosaic[0], 1)
+            _os.replace(_tmp, mosaic_path)
         finally:
             for d in datasets:
-                d.close()
+                try:
+                    d.close()
+                except Exception:
+                    pass
 
     # Summary stats for the response badge.
     with _rio.open(mosaic_path) as src:
@@ -1385,7 +1400,10 @@ class CellHandler(BaseHTTPRequestHandler):
                     from damage_model.peril_timeseries import (
                         estimate_damage_timeseries_from_raster as _run_ts,
                     )
-                    _ticks_tmp = ticks_path + '.tmp'
+                    # pid+tid suffix so two threads lazy-generating the same
+                    # ticks file can't stomp each other's partial write.
+                    import threading as _th_ticks
+                    _ticks_tmp = f'{ticks_path}.tmp.{os.getpid()}.{_th_ticks.get_ident()}'
                     _run_ts(
                         depth_raster_path=depth_path,
                         buildings_geojson_path=bldgs_path,
@@ -1634,7 +1652,8 @@ class CellHandler(BaseHTTPRequestHandler):
                 report = run_backtest()
                 body = json.dumps(report.to_dict()).encode()
                 try:
-                    tmp = bt_path + '.tmp'
+                    import threading as _th_bt
+                    tmp = f'{bt_path}.tmp.{os.getpid()}.{_th_bt.get_ident()}'
                     with open(tmp, 'wb') as fh:
                         fh.write(body)
                     os.replace(tmp, bt_path)
@@ -1668,7 +1687,8 @@ class CellHandler(BaseHTTPRequestHandler):
                 if score:
                     body = json.dumps(score.to_dict()).encode()
                     try:
-                        tmp = cache_path + '.tmp'
+                        import threading as _th_sv
+                        tmp = f'{cache_path}.tmp.{os.getpid()}.{_th_sv.get_ident()}'
                         with open(tmp, 'wb') as fh:
                             fh.write(body)
                         os.replace(tmp, cache_path)
@@ -2532,8 +2552,15 @@ class CellHandler(BaseHTTPRequestHandler):
                     '_cached_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                 }).encode()
                 try:
-                    with open(cache_path, 'wb') as fh:
+                    # Non-atomic `open(cache_path, 'wb')` could serve a
+                    # partial JSON to a concurrent reader hitting the
+                    # `os.path.exists(cache_path)` fast path. Write to
+                    # pid+tid-keyed tmp then os.replace.
+                    import threading as _th_g
+                    _tmp = f'{cache_path}.tmp.{os.getpid()}.{_th_g.get_ident()}'
+                    with open(_tmp, 'wb') as fh:
                         fh.write(body)
+                    os.replace(_tmp, cache_path)
                 except Exception as werr:
                     print(f"[gauges] cache write failed: {werr}")
                 self._send_raw(200, body, cache_control='public, max-age=86400')

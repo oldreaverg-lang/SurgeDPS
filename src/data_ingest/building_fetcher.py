@@ -317,7 +317,8 @@ def _fetch_microsoft_buildings(
     geojson = {"type": "FeatureCollection", "features": features}
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     # Atomic write so a partial .json from a killed process can't survive.
-    _tmp = output_path + ".tmp"
+    import threading as _th_bld
+    _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_bld.get_ident()}"
     try:
         with open(_tmp, "w") as f:
             json.dump(geojson, f)
@@ -493,7 +494,8 @@ def fetch_buildings(
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     # Atomic write — partial writes would surface later as "Unterminated
     # string" JSONDecodeError from warm_cell.
-    _tmp = output_path + ".tmp"
+    import threading as _th_bld
+    _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_bld.get_ident()}"
     try:
         with open(_tmp, "w") as f:
             json.dump(geojson, f)

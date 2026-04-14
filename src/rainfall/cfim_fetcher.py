@@ -102,7 +102,8 @@ def _http_get_json(url: str) -> Optional[dict]:
 
 def _download_file(url: str, local_path: str) -> bool:
     """Download url → local_path. Returns True on success."""
-    tmp = local_path + ".tmp"
+    import threading as _th_cf
+    tmp = f"{local_path}.tmp.{os.getpid()}.{_th_cf.get_ident()}"
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": "SurgeDPS/1.0 (flood model)"}

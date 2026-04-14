@@ -447,8 +447,12 @@ class MRMSFetcher:
                 n_cols, n_rows,
             )
 
+            # Atomic write — concurrent /api/rainfall callers hit the
+            # cache-hit fast path via `os.path.exists(out_tif)`, so a
+            # partial file would be served as a valid tif.
+            tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
             with rasterio.open(
-                out_tif, "w",
+                tif_tmp, "w",
                 driver="GTiff", dtype="float32", count=1,
                 width=n_cols, height=n_rows,
                 crs="EPSG:4326", transform=transform,
@@ -461,6 +465,7 @@ class MRMSFetcher:
                     product=os.path.basename(grib_path),
                     units="mm",
                 )
+            os.replace(tif_tmp, out_tif)
             ds.close()
             return True
 
@@ -511,8 +516,9 @@ class MRMSFetcher:
                 float(lons_arr.max()), float(lats_arr.max()),
                 len(lons_arr), len(lats_arr),
             )
+            tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
             with rasterio.open(
-                out_tif, "w",
+                tif_tmp, "w",
                 driver="GTiff", dtype="float32", count=1,
                 width=len(lons_arr), height=len(lats_arr),
                 crs="EPSG:4326", transform=transform,
@@ -520,6 +526,7 @@ class MRMSFetcher:
                 compress="deflate", predictor=3,
             ) as dst:
                 dst.write(data, 1)
+            os.replace(tif_tmp, out_tif)
             os.remove(csv_path)
             return True
         except Exception as exc:
@@ -800,7 +807,11 @@ class MRMSFetcher:
             if count:
                 max_mm = running_max
                 avg_mm = total / count
-        except Exception:
+        except Exception as exc:
+            # Surface corrupt/unreadable tif paths instead of silently
+            # returning (0, 0) stats — makes it visible in logs when the
+            # tile server later fails to render the same file.
+            logger.warning("MRMS _result_from_tif failed on %s: %s", tif_path, exc)
             max_mm, avg_mm = 0.0, 0.0
 
         return MRMSResult(
@@ -840,10 +851,17 @@ def point_precip_mm(tif_path: str, lat: float, lon: float) -> Optional[float]:
     try:
         import rasterio
         with rasterio.open(tif_path) as src:
-            row, col = src.index(lon, lat)
-            data = src.read(1)
-            nodata = src.nodata or -9999
-            val = float(data[row, col])
+            # Bounds check — src.index on an out-of-raster point returns
+            # negative or out-of-range indices; a naive data[row, col] then
+            # either IndexError or silently wraps and returns a bogus pixel.
+            if not (src.bounds.left <= lon <= src.bounds.right and
+                    src.bounds.bottom <= lat <= src.bounds.top):
+                return None
+            # `src.nodata or -9999` collapses a legitimate nodata=0 to -9999.
+            nodata = src.nodata if src.nodata is not None else -9999
+            # src.sample reads a single pixel via windowed IO instead of
+            # pulling the full ~100 MB array into memory per call.
+            val = float(next(src.sample([(lon, lat)]))[0])
             if val == nodata or val < 0:
                 return None
             return val

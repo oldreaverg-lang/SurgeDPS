@@ -90,7 +90,7 @@ def raster_to_geojson(
 
     with rasterio.open(raster_path) as src:
         data = src.read(1)
-        nodata = src.nodata or -9999
+        nodata = src.nodata if src.nodata is not None else -9999
         transform = src.transform
 
     rows, cols = data.shape
@@ -168,7 +168,10 @@ def raster_to_geojson(
     # Atomic write: stage to .tmp then rename, so a mid-write crash can't
     # leave a truncated JSON that the next warm-cache pass would load as
     # an "Unterminated string" JSONDecodeError.
-    tmp_path = output_path + ".tmp"
+    # pid+tid-keyed tmp so two concurrent rasterize calls on the same
+    # output path can't stomp each other's partial JSON.
+    import threading as _th_pm
+    tmp_path = f"{output_path}.tmp.{os.getpid()}.{_th_pm.get_ident()}"
     try:
         with open(tmp_path, "w") as f:
             json.dump(geojson, f)

@@ -305,7 +305,8 @@ def get_cell_ticks(
         from damage_model.peril_timeseries import (
             estimate_damage_timeseries_from_raster as _run_ts,
         )
-        ticks_tmp = ticks_path + ".tmp"
+        import threading as _th_tk
+        ticks_tmp = f"{ticks_path}.tmp.{os.getpid()}.{_th_tk.get_ident()}"
         _run_ts(
             depth_raster_path=depth_path,
             buildings_geojson_path=bldgs_path,

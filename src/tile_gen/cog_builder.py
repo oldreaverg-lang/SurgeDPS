@@ -83,6 +83,10 @@ def build_cog(
             src.crs, target_crs, src.width, src.height, *src.bounds
         )
 
+        # Respect the source's declared nodata — `src.nodata or -9999`
+        # would collapse a legitimate nodata=0 to -9999.
+        _src_nodata = src.nodata if src.nodata is not None else -9999
+
         profile = {
             "driver": "GTiff",
             "crs": target_crs,
@@ -91,7 +95,7 @@ def build_cog(
             "height": dst_height,
             "count": 1,
             "dtype": dtype,
-            "nodata": src.nodata or -9999,
+            "nodata": _src_nodata,
             "compress": "deflate",
             "predictor": 3 if "float" in dtype else 2,
             "tiled": True,
@@ -99,8 +103,11 @@ def build_cog(
             "blockysize": tile_size,
         }
 
-        # Intermediate reprojected file
-        temp_path = output_path + ".tmp.tif"
+        # Intermediate reprojected file — pid+tid keyed so concurrent
+        # build_cog calls on the same output don't stomp each other's
+        # temp file mid-reproject.
+        import threading as _th_cog
+        temp_path = f"{output_path}.tmp.{os.getpid()}.{_th_cog.get_ident()}.tif"
 
         with rasterio.open(temp_path, "w", **profile) as dst:
             reproject(
@@ -111,7 +118,8 @@ def build_cog(
                 dst_transform=dst_transform,
                 dst_crs=target_crs,
                 resampling=resamp,
-                dst_nodata=src.nodata or -9999,
+                src_nodata=_src_nodata,
+                dst_nodata=_src_nodata,
             )
 
     # Step 2: Build overviews
@@ -189,7 +197,7 @@ def build_classified_cog(
 
     with rasterio.open(input_path) as src:
         depth = src.read(1)
-        nodata = src.nodata or -9999
+        nodata = src.nodata if src.nodata is not None else -9999
         valid = depth != nodata
 
         classified = np.zeros_like(depth, dtype=np.uint8)

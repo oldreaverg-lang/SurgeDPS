@@ -179,7 +179,7 @@ def handle_model(event: dict, context: Any) -> dict:
             corrected_path = os.path.join(model_dir, "surge_tide_corrected.tif")
             with rasterio.open(surge_path) as src:
                 data = src.read(1)
-                nodata = src.nodata or -9999
+                nodata = src.nodata if src.nodata is not None else -9999
                 profile = src.profile.copy()
 
             valid = data != nodata
@@ -865,19 +865,27 @@ def _generate_rainfall_depth(
     with rasterio.open(dem_path) as dem_src:
         dem = dem_src.read(1)
         profile = dem_src.profile.copy()
-        dem_nodata = dem_src.nodata or -9999
+        dem_nodata = dem_src.nodata if dem_src.nodata is not None else -9999
+        # Capture these before the with-block closes — accessing transform
+        # and crs on a closed DatasetReader isn't a stable contract.
+        dem_transform = dem_src.transform
+        dem_crs = dem_src.crs
 
     with rasterio.open(qpf_path) as qpf_src:
-        # Resample QPF to DEM grid
-        qpf = np.empty_like(dem)
+        # Resample QPF to DEM grid. np.empty_like leaves uninitialized
+        # floats in cells reproject doesn't touch — those garbage values
+        # would then pass the `qpf != -9999` validity check downstream
+        # and feed bogus rainfall depths into the flood calc.
+        qpf = np.full_like(dem, -9999, dtype=dem.dtype)
         reproject(
             source=rasterio.band(qpf_src, 1),
             destination=qpf,
             src_transform=qpf_src.transform,
             src_crs=qpf_src.crs,
-            dst_transform=dem_src.transform,
-            dst_crs=dem_src.crs,
+            dst_transform=dem_transform,
+            dst_crs=dem_crs,
             resampling=Resampling.bilinear,
+            src_nodata=qpf_src.nodata,
             dst_nodata=-9999,
         )
 

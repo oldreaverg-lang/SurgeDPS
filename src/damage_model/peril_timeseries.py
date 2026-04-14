@@ -158,7 +158,7 @@ def estimate_damage_timeseries_from_raster(
     with rasterio.open(depth_raster_path) as src:
         depth_band = src.read(1)
         transform = src.transform
-        nodata = src.nodata or -9999
+        nodata = src.nodata if src.nodata is not None else -9999
 
         for i, feat in enumerate(features):
             props = feat.get("properties") or {}

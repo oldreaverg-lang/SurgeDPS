@@ -89,14 +89,25 @@ def run_bathtub_model(
 
     # Read surge raster — may need reprojection/resampling to match DEM
     with rasterio.open(surge_path) as surge_src:
+        # Explicit None check — nodata=0 is legitimate for some surge products
+        # and `src.nodata or -9999` would collapse it to -9999.
+        _src_nodata_raw = surge_src.nodata if surge_src.nodata is not None else -9999
+        _transforms_match = (
+            surge_src.transform.almost_equals(dem_transform, precision=1e-6)
+            if hasattr(surge_src.transform, "almost_equals")
+            else surge_src.transform == dem_transform
+        )
         if (
             str(surge_src.crs) != dem_crs
-            or surge_src.transform != dem_transform
+            or not _transforms_match
             or surge_src.shape != dem_data.shape
         ):
-            # Reproject/resample surge to match DEM grid
+            # Reproject/resample surge to match DEM grid.
+            # Pre-fill with dst_nodata so cells outside the surge footprint
+            # aren't left as uninitialized garbage that leaks through the
+            # valid-data mask.
             logger.info("Reprojecting surge raster to match DEM grid")
-            surge_data = np.empty_like(dem_data)
+            surge_data = np.full_like(dem_data, -9999, dtype=dem_data.dtype)
             reproject(
                 source=rasterio.band(surge_src, 1),
                 destination=surge_data,
@@ -105,11 +116,16 @@ def run_bathtub_model(
                 dst_transform=dem_transform,
                 dst_crs=dem_crs,
                 resampling=Resampling.bilinear,
+                src_nodata=_src_nodata_raw,
                 dst_nodata=-9999,
             )
+            # After reproject, the meaningful nodata sentinel is the dst one,
+            # not the source's. Using src nodata here misclassified uncovered
+            # cells (filled with -9999) as valid when src nodata was e.g. 0.
+            surge_nodata = -9999
         else:
             surge_data = surge_src.read(1)
-        surge_nodata = surge_src.nodata or -9999
+            surge_nodata = _src_nodata_raw
 
     # ── Core Bathtub Calculation ───────────────────────────────
     # flood_depth = surge_height - elevation (where positive)

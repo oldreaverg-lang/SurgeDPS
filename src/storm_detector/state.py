@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Set
 
 from .nhc_feed import AdvisoryInfo
@@ -118,10 +118,12 @@ class AdvisoryStateTracker:
         """
         guid = advisory.advisory_id
         self._seen_cache.add(guid)
-        now = datetime.utcnow().isoformat() + "Z"
-        ttl_epoch = int(
-            (datetime.utcnow() + timedelta(days=TTL_DAYS)).timestamp()
-        )
+        # datetime.utcnow() returns a naive datetime; .timestamp() then
+        # interprets it as LOCAL time, so TTL on a non-UTC host was off
+        # by the timezone offset. Use tz-aware utcnow.
+        _now_dt = datetime.now(tz=timezone.utc)
+        now = _now_dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        ttl_epoch = int((_now_dt + timedelta(days=TTL_DAYS)).timestamp())
 
         if self.dry_run or self._table is None:
             self._mark_local(storm_id, guid, now)
@@ -161,8 +163,8 @@ class AdvisoryStateTracker:
         try:
             # Scan for items processed in the last 7 days
             cutoff = (
-                datetime.utcnow() - timedelta(days=7)
-            ).isoformat() + "Z"
+                datetime.now(tz=timezone.utc) - timedelta(days=7)
+            ).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
 
             response = self._table.scan(
                 FilterExpression="processed_at > :cutoff",

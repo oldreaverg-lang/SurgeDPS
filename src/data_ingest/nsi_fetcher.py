@@ -172,7 +172,10 @@ def fetch_buildings_nsi(
         logger.info("[NSI] API returned 0 features for this bbox — writing empty cache, skipping Overpass")
         empty_fc = {"type": "FeatureCollection", "features": [], "source": "NSI", "nsi_confirmed_empty": True}
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        _tmp = output_path + ".tmp"
+        # pid+tid-keyed tmp so two simultaneous fetches on the same
+        # output_path can't stomp each other's partial JSON.
+        import threading as _th_nsi
+        _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_nsi.get_ident()}"
         try:
             with open(_tmp, "w") as _f:
                 json.dump(empty_fc, _f)
@@ -309,7 +312,8 @@ def fetch_buildings_nsi(
     # Atomic write — see note in generate_surge_raster. Partial writes leave
     # an "Unterminated string" JSON on disk that warm_cell would load on the
     # next pass and fail.
-    _tmp = output_path + ".tmp"
+    import threading as _th_nsi2
+    _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_nsi2.get_ident()}"
     try:
         with open(_tmp, "w") as f:
             json.dump(geojson, f)

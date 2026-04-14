@@ -119,12 +119,16 @@ class DEMClipper:
             else:
                 clip_geom = buffered
 
-            # Mask (clip) to storm extent
+            # Mask (clip) to storm extent.
+            # `src.nodata or -9999` collapses nodata=0 to -9999 — for DEMs
+            # that declare 0 as nodata this wrongly treats sea-level cells
+            # as valid elevations. Respect the source's declared nodata.
+            _dem_nodata = src.nodata if src.nodata is not None else -9999
             out_image, out_transform = rasterio_mask(
                 src,
                 [mapping(clip_geom)],
                 crop=True,
-                nodata=src.nodata or -9999,
+                nodata=_dem_nodata,
                 filled=True,
             )
 
@@ -150,15 +154,20 @@ class DEMClipper:
                 transform=dst_transform,
                 width=dst_width,
                 height=dst_height,
-                nodata=src.nodata or -9999,
+                nodata=_dem_nodata,
                 compress="deflate",
                 tiled=True,
                 blockxsize=256,
                 blockysize=256,
             )
 
-            dst_data = np.empty(
-                (src.count, dst_height, dst_width), dtype=src.dtypes[0]
+            # Pre-fill with nodata instead of np.empty — cells outside the
+            # reprojection source footprint otherwise keep uninitialized
+            # float bytes that can read as extreme elevations downstream.
+            dst_data = np.full(
+                (src.count, dst_height, dst_width),
+                _dem_nodata,
+                dtype=src.dtypes[0],
             )
 
             reproject(
@@ -168,7 +177,8 @@ class DEMClipper:
                 src_crs=src.crs,
                 dst_transform=dst_transform,
                 dst_crs=dst_crs,
-                dst_nodata=src.nodata or -9999,
+                src_nodata=_dem_nodata,
+                dst_nodata=_dem_nodata,
             )
 
             with rasterio.open(output_path, "w", **profile) as dst:

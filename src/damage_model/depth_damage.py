@@ -1192,7 +1192,7 @@ def estimate_damage_from_raster(
     # Open depth raster
     with rasterio.open(depth_raster_path) as src:
         depth_band = src.read(1)
-        nodata = src.nodata or -9999
+        nodata = src.nodata if src.nodata is not None else -9999
         transform = src.transform
 
         buildings = []
@@ -1472,8 +1472,21 @@ def _write_damage_geojson(
     geojson = {"type": "FeatureCollection", "features": features}
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(geojson, f)
+    # Atomic write: partial GeoJSON on disk after a SIGKILL mid-write fails
+    # json.load on the next request and blocks the cell from serving.
+    import threading as _th_dd
+    _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_dd.get_ident()}"
+    try:
+        with open(_tmp, "w") as f:
+            json.dump(geojson, f)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except OSError:
+            pass
+        raise
 
     logger.info(f"Damage GeoJSON: {len(features)} buildings -> {output_path}")
     return output_path

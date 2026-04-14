@@ -391,7 +391,9 @@ class NWMFetcher:
         os.makedirs(output_dir, exist_ok=True)
 
         if not forecast_date:
-            forecast_date = datetime.utcnow().strftime("%Y%m%d")
+            # datetime.utcnow() is deprecated in 3.12+; use a tz-aware now
+            # and format. Keeps the YYYYMMDD output identical.
+            forecast_date = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
 
         # Try to read NWM from S3 Open Data
         discharge_data = self._fetch_from_s3(
@@ -603,8 +605,18 @@ class QPFFetcher:
             tid = _th.get_ident()
 
             def _head_ok(u: str) -> bool:
+                # requests.Session is NOT thread-safe; sharing self.session
+                # across ThreadPoolExecutor workers can corrupt its
+                # connection pool. Use the module-level requests.head which
+                # spins up a fresh connection per call — cost is negligible
+                # for 3 HEADs per cycle.
                 try:
-                    return self.session.head(u, timeout=10, allow_redirects=True).status_code == 200
+                    return requests.head(
+                        u,
+                        timeout=10,
+                        allow_redirects=True,
+                        headers={"User-Agent": self.config.user_agent},
+                    ).status_code == 200
                 except Exception:
                     return False
 
@@ -954,8 +966,17 @@ class USGSGaugeFetcher:
             geo = site_info.get("geoLocation", {}).get(
                 "geogLocation", {}
             )
-            lat = geo.get("latitude", 0)
-            lon = geo.get("longitude", 0)
+            lat = geo.get("latitude")
+            lon = geo.get("longitude")
+            # Skip gauges with no coordinates — defaulting to (0, 0)
+            # put them in the Gulf of Guinea and polluted the map.
+            if lat is None or lon is None:
+                continue
+            try:
+                lat = float(lat)
+                lon = float(lon)
+            except (TypeError, ValueError):
+                continue
 
             variable = ts.get("variable", {})
             var_code = variable.get("variableCode", [{}])[0].get(

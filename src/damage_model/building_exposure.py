@@ -123,8 +123,20 @@ def _load_from_file(
                 })
 
         geojson = {"type": "FeatureCollection", "features": features}
-        with open(output_path, "w") as f:
-            json.dump(geojson, f)
+        # Atomic write to avoid partial GeoJSON blocking subsequent reads.
+        import threading as _th_be
+        _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_be.get_ident()}"
+        try:
+            with open(_tmp, "w") as f:
+                json.dump(geojson, f)
+            os.replace(_tmp, output_path)
+        except Exception:
+            try:
+                if os.path.exists(_tmp):
+                    os.remove(_tmp)
+            except OSError:
+                pass
+            raise
 
         logger.info(f"Loaded {len(features)} buildings from {data_path}")
         return BuildingInventory(
@@ -239,8 +251,19 @@ def _generate_synthetic_buildings(
         })
 
     geojson = {"type": "FeatureCollection", "features": features}
-    with open(output_path, "w") as f:
-        json.dump(geojson, f)
+    import threading as _th_be2
+    _tmp = f"{output_path}.tmp.{os.getpid()}.{_th_be2.get_ident()}"
+    try:
+        with open(_tmp, "w") as f:
+            json.dump(geojson, f)
+        os.replace(_tmp, output_path)
+    except Exception:
+        try:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+        except OSError:
+            pass
+        raise
 
     logger.info(f"Generated {len(features)} synthetic buildings in {bounds}")
     return BuildingInventory(

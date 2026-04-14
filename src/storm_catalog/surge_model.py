@@ -316,7 +316,8 @@ def generate_surge_raster(
     # SIGKILL/OOM mid-write from leaving a truncated .tif on disk that would
     # fail with "not recognized as being in a supported file format" on the
     # next warm-cache pass (which skips regen when the file exists).
-    tmp_path = output_path + ".tmp"
+    import threading as _th_srg
+    tmp_path = f"{output_path}.tmp.{os.getpid()}.{_th_srg.get_ident()}"
     try:
         with rasterio.open(
             tmp_path, 'w', driver='GTiff', height=rows, width=cols,

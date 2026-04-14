@@ -236,7 +236,12 @@ def run_hand_model(
     import rasterio
     with rasterio.open(catchment_path) as src:
         catch_data = src.read(1).astype(np.int64)
-        catch_nodata = src.nodata or -9999
+        # Catchment rasters commonly declare nodata=0 (outside any
+        # NHDPlus basin). `src.nodata or -9999` collapses 0 → -9999,
+        # which then matches no cells — so ocean/outside-basin cells
+        # with reach_id=0 leak into the "valid" mask and can match an
+        # actual reach_id=0 discharge entry.
+        catch_nodata = int(src.nodata) if src.nodata is not None else -9999
 
     # ── Compute Flood Depth Per Reach ──────────────────────────
     flood_depth = np.full_like(hand_data, -9999, dtype=np.float32)
@@ -375,7 +380,7 @@ def run_rainfall_hand_model(
     # Read rainfall
     with rasterio.open(rainfall_path) as src:
         rainfall = src.read(1)
-        rain_nodata = src.nodata or -9999
+        rain_nodata = src.nodata if src.nodata is not None else -9999
 
     # Compute rainfall excess using SCS CN method
     valid_rain = rainfall != rain_nodata
@@ -386,7 +391,7 @@ def run_rainfall_hand_model(
     # Read catchment raster to aggregate excess per reach
     with rasterio.open(catchment_path) as src:
         catch_data = src.read(1).astype(np.int64)
-        catch_nodata = src.nodata or -9999
+        catch_nodata = int(src.nodata) if src.nodata is not None else -9999
         cell_area_m2 = abs(src.transform.a * src.transform.e)
 
     # Accumulate excess volume per reach and convert to added discharge
