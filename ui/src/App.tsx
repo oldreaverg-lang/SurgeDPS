@@ -5552,25 +5552,25 @@ ${fieldFlag ? `
                 </div>
               )}
               {rainfallMode === 'forecast' && qpfLoading && <div className="text-gray-500">Loading WPC QPF…</div>}
-              {rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn != null && (
+              {hazardView === 'rainfall' && rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn != null && (
                 <>
                   <div>Max forecast: <span className="font-semibold">{qpfStats.maxIn} in</span> / 72 hr</div>
                   {qpfStats.caveat && <div className="text-[10px] text-amber-700 mt-0.5">{qpfStats.caveat}</div>}
                   {qpfStats.source && <div className="text-gray-500 mt-0.5">{qpfStats.source}</div>}
                 </>
               )}
-              {rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn == null && (
+              {hazardView === 'rainfall' && rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn == null && (
                 <div className="text-gray-500">{qpfStats.notes || 'QPF unavailable.'}</div>
               )}
-              {rainfallMode === 'observed' && rainfallLoading && <div className="text-gray-500">Loading MRMS…</div>}
-              {rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn != null && (
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallLoading && <div className="text-gray-500">Loading MRMS…</div>}
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn != null && (
                 <>
                   <div>Max accumulation: <span className="font-semibold">{rainfallStats.maxIn} in</span></div>
                   {rainfallStats.avgIn != null && <div>Avg across storm bbox: {rainfallStats.avgIn} in</div>}
                   {rainfallStats.product && <div className="text-gray-500 mt-0.5">{rainfallStats.product}</div>}
                 </>
               )}
-              {rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
                 <div className="text-gray-500">{rainfallStats.notes}</div>
               )}
               {/* NWS rainfall legend — shown only when the raster is
