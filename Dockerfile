@@ -6,7 +6,8 @@ COPY ui/package*.json ./
 RUN npm ci
 
 COPY ui/ ./
-RUN npm run build
+# Cap Node heap to 512 MB so tsc doesn't OOM-kill (Railway builder ~2 GB RAM).
+RUN NODE_OPTIONS="--max-old-space-size=512" npm run build
 # Output: /app/ui/dist/
 
 
