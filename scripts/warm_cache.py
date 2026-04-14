@@ -201,18 +201,57 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
     # buildings.json "Unterminated string").
     artifacts_this_run: list[str] = []
 
-    try:
-        # 1. Surge raster
-        raster_path = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
-        # Guard against a zero-byte / truncated .tif left over from an
-        # earlier crashed run. Anything under a few hundred bytes can't be
-        # a valid GeoTIFF for our 200×200 float32 rasters.
-        if os.path.exists(raster_path):
+    # Precompute artifact paths up front so cleanup-on-failure can nuke
+    # every one of them regardless of where in the pipeline we died.
+    raster_path    = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
+    flood_path     = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
+    buildings_path = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
+    damage_path    = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
+    all_cell_artifacts = [raster_path, flood_path, buildings_path, damage_path]
+
+    # Validate any existing cached files by actually opening them. A file
+    # that passes a size check can still be an unrecoverable truncated
+    # GeoTIFF ("not recognized as being in a supported file format") or a
+    # 0-byte JSON ("Expecting value: line 1 column 1"). Delete corrupt
+    # caches so the pipeline below regenerates them cleanly.
+    if os.path.exists(raster_path):
+        _ok = False
+        try:
+            import rasterio  # local import — module is used below too
+            with rasterio.open(raster_path) as _src:
+                if _src.width > 0 and _src.height > 0:
+                    _ok = True
+        except Exception:
+            _ok = False
+        if not _ok:
             try:
-                if os.path.getsize(raster_path) < 512:
-                    os.remove(raster_path)
+                os.remove(raster_path)
             except OSError:
                 pass
+    if os.path.exists(buildings_path):
+        _ok = False
+        try:
+            if os.path.getsize(buildings_path) >= 2:
+                with open(buildings_path) as _f:
+                    json.load(_f)
+                _ok = True
+        except Exception:
+            _ok = False
+        if not _ok:
+            try:
+                os.remove(buildings_path)
+            except OSError:
+                pass
+    # A flood.geojson paired with a now-missing raster is suspect — drop
+    # it so it gets rebuilt from a fresh raster.
+    if os.path.exists(flood_path) and not os.path.exists(raster_path):
+        try:
+            os.remove(flood_path)
+        except OSError:
+            pass
+
+    try:
+        # 1. Surge raster
         if not os.path.exists(raster_path):
             artifacts_this_run.append(raster_path)
             generate_surge_raster(
@@ -229,21 +268,11 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
             )
 
         # 2. Flood polygons
-        flood_path = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
         if not os.path.exists(flood_path):
             artifacts_this_run.append(flood_path)
             raster_to_geojson(raster_path, flood_path)
 
         # 3. OSM buildings
-        buildings_path = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
-        # Drop zero-byte / unreadable remnants before the fetcher's cache
-        # check trusts them.
-        if os.path.exists(buildings_path):
-            try:
-                if os.path.getsize(buildings_path) < 2:
-                    os.remove(buildings_path)
-            except OSError:
-                pass
         if not os.path.exists(buildings_path):
             artifacts_this_run.append(buildings_path)
         fetch_buildings(lon_min, lat_min, lon_max, lat_max, buildings_path, cache=True)
@@ -258,7 +287,6 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
         # rainfall — and pre-cached cells end up systematically different
         # from live-computed cells. Visible as a hard rectangular boundary
         # where pre-cached cells meet live-loaded cells.
-        damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
         if not os.path.exists(damage_path):
             artifacts_this_run.append(damage_path)
         if buildings_data.get('features'):
@@ -311,10 +339,11 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
 
     except Exception as e:
         print(f"    ERROR cell ({col},{row}): {e}")
-        # Remove anything we wrote (or were about to write to) this pass.
-        # Otherwise a half-written .tif or .geojson blocks the retry pass
-        # from regenerating cleanly.
-        for _p in artifacts_this_run:
+        # Nuke every artifact for this cell — not just what we wrote this
+        # pass. A corrupt cached file we inherited (depth.tif that rasterio
+        # can't open, buildings.json with 0 bytes) would otherwise survive
+        # and re-trigger the same exception on the retry pass.
+        for _p in all_cell_artifacts:
             try:
                 if os.path.exists(_p):
                     os.remove(_p)
