@@ -3972,12 +3972,14 @@ ${fieldFlag ? `
             <Source id="critical-facilities" type="geojson" data={criticalFacilities}>
               {/* Colored circle behind each icon — category glance-read.
                   Hospitals=red, gov/emergency=gold, schools=blue,
-                  nursing=teal, churches=purple. MinZoom 12 keeps them
-                  from cluttering the county/state overview. */}
+                  nursing=teal, churches=purple. MinZoom 15 keeps them
+                  hidden until the user is fully drilled into the
+                  individual-building view, so the neighbourhood/city
+                  sweep isn't cluttered. */}
               <Layer id="critical-icon-halos" type="circle"
-                minzoom={12}
+                minzoom={15}
                 paint={{
-                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 14, 18, 20],
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 10, 17, 14, 19, 20],
                   'circle-color': ['match', ['get', 'critical_icon'],
                     '➕',  '#dc2626',   // Hospitals/Clinics — red
                     '⭐',  '#f59e0b',   // Government / Emergency — gold
@@ -3992,10 +3994,10 @@ ${fieldFlag ? `
                 }}
               />
               <Layer id="critical-icons" type="symbol"
-                minzoom={12}
+                minzoom={15}
                 layout={{
                   'text-field': ['get', 'critical_icon'],
-                  'text-size': ['interpolate', ['linear'], ['zoom'], 12, 12, 16, 18, 18, 24],
+                  'text-size': ['interpolate', ['linear'], ['zoom'], 15, 12, 17, 18, 19, 24],
                   'text-allow-overlap': true,
                   'text-ignore-placement': true,
                   'symbol-sort-key': ['case',
