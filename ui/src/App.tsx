@@ -23,6 +23,7 @@ import {
   readBetaLayersEnabled,
   writeBetaLayersEnabled,
   fetchRainfallOverlay,
+  fetchGaugeOverlay,
   fetchShelterCapacity,
   fetchVendorCoverage,
   fetchTimeToAccess,
@@ -1997,6 +1998,20 @@ function App() {
   const [floodZonesLoading, setFloodZonesLoading] = useState(false);
   const [floodZonesError, setFloodZonesError] = useState<string | null>(null);
   const floodZonesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ── Rainfall hazard view (Option A: fold rainfall into the hazard control) ──
+  // 'surge'    → existing surge-driven polygons/bubbles (default)
+  // 'rainfall' → show MRMS observed accumulation stats badge (raster tiles Phase 6)
+  // 'compound' → surge + rainfall + fluvial (same as damage model input); raster Phase 6
+  const [hazardView, setHazardView] = useState<'surge' | 'rainfall' | 'compound'>('surge');
+  const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string } | null>(null);
+  const [rainfallLoading, setRainfallLoading] = useState(false);
+  // ── AHPS / NWPS stream gauges layer ──
+  // Cheap, immediate value: GeoJSON points colored by flood category.
+  const [showGauges, setShowGauges] = useState(false);
+  const [gaugesGeoJSON, setGaugesGeoJSON] = useState<any>(null);
+  const [gaugesLoading, setGaugesLoading] = useState(false);
+  const [gaugesError, setGaugesError] = useState<string | null>(null);
+  const [gaugesSummary, setGaugesSummary] = useState<{ major: number; moderate: number; minor: number; count: number } | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   // Building flags — keyed by "lon,lat" for uniqueness. Values: 'confirmed_destroyed' | 'shelter_in_place' | 'inspected' | 'inaccessible' | ''
   const [buildingFlags, setBuildingFlags] = useState<Record<string, string>>({});
@@ -2271,6 +2286,75 @@ function App() {
       setFloodZonesLoading(false);
     }
   }, [showFloodZones, fetchFloodZones]);
+
+  // ── Stream gauges (AHPS / NWPS) ──
+  // Fires when user toggles the gauges overlay on AND a storm is active.
+  // Backend /api/gauges returns GeoJSON + category counts within ~4° of landfall.
+  useEffect(() => {
+    if (!showGauges || !activeStorm) {
+      setGaugesGeoJSON(null);
+      setGaugesSummary(null);
+      setGaugesError(null);
+      setGaugesLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setGaugesLoading(true);
+    setGaugesError(null);
+    fetchGaugeOverlay(activeStorm.storm_id, 4.0, 'action')
+      .then((res: Awaited<ReturnType<typeof fetchGaugeOverlay>>) => {
+        if (cancelled) return;
+        if (!res.available) {
+          setGaugesError(res.notes);
+          setGaugesGeoJSON(null);
+          setGaugesSummary(null);
+        } else {
+          setGaugesGeoJSON(res.geojson);
+          setGaugesSummary({
+            major: res.atOrAboveMajor,
+            moderate: res.atOrAboveModerate,
+            minor: res.atOrAboveMinor,
+            count: res.gaugeCount,
+          });
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setGaugesError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setGaugesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [showGauges, activeStorm]);
+
+  // ── Rainfall stats (only fetched when user picks Rainfall/Compound view) ──
+  // Phase 5: returns accumulation stats only (tile raster comes in Phase 6).
+  useEffect(() => {
+    if (hazardView === 'surge' || !activeStorm) {
+      setRainfallStats(null);
+      setRainfallLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setRainfallLoading(true);
+    fetchRainfallOverlay(activeStorm.storm_id, 72, 2)
+      .then((res: RainfallOverlay) => {
+        if (cancelled) return;
+        if (!res.available) {
+          setRainfallStats({ maxIn: null, avgIn: null, product: null, validTime: null, notes: res.notes });
+        } else {
+          setRainfallStats({
+            maxIn: res.maxPrecipMm != null ? +(res.maxPrecipMm / 25.4).toFixed(1) : null,
+            avgIn: res.avgPrecipMm != null ? +(res.avgPrecipMm / 25.4).toFixed(1) : null,
+            product: res.product,
+            validTime: res.validTime,
+            notes: res.notes,
+          });
+        }
+      })
+      .finally(() => { if (!cancelled) setRainfallLoading(false); });
+    return () => { cancelled = true; };
+  }, [hazardView, activeStorm]);
 
   // Fetch imagery acquisition date when switching to satellite, clear when switching away
   useEffect(() => {
@@ -3781,6 +3865,66 @@ ${fieldFlag ? `
             </Source>
           )}
 
+          {/* AHPS / NWPS stream gauges — color-coded by active flood category.
+              Cheap high-value layer: no tile server needed, just GeoJSON points.
+              Categories ordered worst→best so the halo ring stays readable. */}
+          {showGauges && gaugesGeoJSON && (
+            <Source id="stream-gauges" type="geojson" data={gaugesGeoJSON}>
+              <Layer
+                id="stream-gauges-halo"
+                type="circle"
+                paint={{
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 8, 10, 14, 14, 20],
+                  'circle-color': [
+                    'match', ['get', 'category'],
+                    'major',    '#7f1d1d',
+                    'moderate', '#ef4444',
+                    'minor',    '#fb923c',
+                    'action',   '#facc15',
+                    '#94a3b8',
+                  ],
+                  'circle-opacity': 0.25,
+                  'circle-stroke-width': 0,
+                }}
+              />
+              <Layer
+                id="stream-gauges-dot"
+                type="circle"
+                paint={{
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 3, 10, 5, 14, 7],
+                  'circle-color': [
+                    'match', ['get', 'category'],
+                    'major',    '#7f1d1d',
+                    'moderate', '#ef4444',
+                    'minor',    '#fb923c',
+                    'action',   '#facc15',
+                    '#94a3b8',
+                  ],
+                  'circle-stroke-color': '#fff',
+                  'circle-stroke-width': 1.5,
+                }}
+              />
+              <Layer
+                id="stream-gauges-label"
+                type="symbol"
+                minzoom={9}
+                layout={{
+                  'text-field': ['coalesce', ['get', 'name'], ['get', 'nws_lid'], ''],
+                  'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+                  'text-size': 10,
+                  'text-anchor': 'top',
+                  'text-offset': [0, 0.8],
+                  'text-allow-overlap': false,
+                }}
+                paint={{
+                  'text-color': '#0f172a',
+                  'text-halo-color': '#fff',
+                  'text-halo-width': 1.5,
+                }}
+              />
+            </Source>
+          )}
+
           {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
           {allBuildings && mapView === 'damage' && (
@@ -4558,7 +4702,7 @@ ${fieldFlag ? `
           setConfidence({ level: 'unvalidated', count: 0 }); setEli({ value: 0, tier: 'unavailable' });
           setValidatedDps({ value: 0, adj: 0, reason: '' }); setManifest({});
           setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
-          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setBuildingFlags({});
+          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setShowGauges(false); setHazardView('surge'); setBuildingFlags({});
           setSimMode(false); setSimResult(null); setForecastCone(null); setForecastTrack([]);
         }} />
 
@@ -4939,6 +5083,57 @@ ${fieldFlag ? `
               >👥 Population</button>
             </div>
           )}
+          {/* Hazard view pill: Surge | Rainfall | Compound.
+              Surge is the current default; Rainfall and Compound currently
+              show an informational badge with MRMS accumulation stats —
+              full raster tiles land in Phase 6 via a COG tile server. */}
+          {activeStorm && (
+            <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+              <button
+                onClick={() => setHazardView('surge')}
+                title="Coastal storm surge depth (default)"
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'surge' ? 'bg-sky-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >🌊 Surge</button>
+              <button
+                onClick={() => setHazardView('rainfall')}
+                title="MRMS observed rainfall accumulation (stats only — raster tiles coming Phase 6)"
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'rainfall' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >🌧️ Rainfall</button>
+              <button
+                onClick={() => setHazardView('compound')}
+                title="Surge + rainfall + fluvial combined (the actual damage-model input)"
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'compound' ? 'bg-violet-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              >💧 Compound</button>
+            </div>
+          )}
+          {/* Rainfall / Compound informational badge — shown only when
+              those views are selected. Gives immediate value today (max/avg
+              accumulation for the storm bbox) while the raster pipeline is
+              still stubbed. When tileUrlTemplate lands this whole badge can
+              be replaced by the real legend. */}
+          {activeStorm && hazardView !== 'surge' && (
+            <div className="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px] leading-tight">
+              <div className="font-semibold text-gray-900 mb-0.5">
+                {hazardView === 'rainfall' ? '🌧️ Observed rainfall' : '💧 Compound hazard'}
+              </div>
+              {rainfallLoading && <div className="text-gray-500">Loading MRMS…</div>}
+              {!rainfallLoading && rainfallStats && rainfallStats.maxIn != null && (
+                <>
+                  <div>Max accumulation: <span className="font-semibold">{rainfallStats.maxIn} in</span></div>
+                  {rainfallStats.avgIn != null && <div>Avg across storm bbox: {rainfallStats.avgIn} in</div>}
+                  {rainfallStats.product && <div className="text-gray-500 mt-0.5">{rainfallStats.product}</div>}
+                </>
+              )}
+              {!rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
+                <div className="text-gray-500">{rainfallStats.notes}</div>
+              )}
+              <div className="text-gray-400 mt-1 italic">
+                {hazardView === 'rainfall'
+                  ? 'Raster overlay coming in Phase 6 (COG tiles). Loss estimates already include rainfall contribution.'
+                  : 'Compound raster (surge + rain + fluvial) already drives loss estimates; standalone overlay coming Phase 6.'}
+              </div>
+            </div>
+          )}
           <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
             {Object.entries(BASEMAP_LABELS).map(([key, label]) => (
               <button
@@ -4981,11 +5176,30 @@ ${fieldFlag ? `
                   {floodZonesLoading && <span className="w-2.5 h-2.5 rounded-full border-2 border-white border-t-transparent animate-spin" />}
                   {floodZonesError && !floodZonesLoading && <span className="text-[10px]">⚠</span>}
                 </button>
+                <button
+                  onClick={() => setShowGauges(g => !g)}
+                  title={gaugesError ?? (gaugesLoading ? 'Loading AHPS stream gauges…' : showGauges
+                    ? `${gaugesSummary?.count ?? 0} gauges in view${gaugesSummary?.major ? ` · ${gaugesSummary.major} at major stage` : ''} — click to hide`
+                    : 'Show NOAA AHPS/NWPS stream gauges colored by active flood stage')}
+                  className={`rounded-lg shadow-lg border px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    gaugesError ? 'bg-red-600 text-white border-red-700'
+                    : showGauges ? 'bg-cyan-600 text-white border-gray-200'
+                    : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100 border-gray-200'
+                  }`}
+                >
+                  <span>Gauges</span>
+                  {gaugesLoading && <span className="w-2.5 h-2.5 rounded-full border-2 border-white border-t-transparent animate-spin" />}
+                  {showGauges && gaugesSummary && gaugesSummary.count > 0 && !gaugesLoading && (
+                    <span className="text-[10px] bg-white/25 rounded px-1">{gaugesSummary.count}</span>
+                  )}
+                  {gaugesError && !gaugesLoading && <span className="text-[10px]">⚠</span>}
+                </button>
               </div>
-              {(countiesError || floodZonesError) && (
+              {(countiesError || floodZonesError || gaugesError) && (
                 <div className="bg-red-50 border border-red-200 text-red-700 text-[10px] rounded-lg px-2 py-1.5 max-w-[220px] leading-tight">
                   {countiesError && <div>{countiesError}</div>}
                   {floodZonesError && <div>{floodZonesError}</div>}
+                  {gaugesError && <div>{gaugesError}</div>}
                   <div className="text-red-500 mt-0.5">Check browser console for details, or pan the map to retry.</div>
                 </div>
               )}
