@@ -582,14 +582,19 @@ function windWaterSplit(windMph: number, interiorFloodFt: number): { windPct: nu
 // Comparable loss evidence — find similar buildings within radius
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const COMP_RADIUS_KM = 0.4; // ~0.25 mi — used in findComparables and UI label
+// Group by HAZUS occupancy class (e.g. RES1, COM1) rather than structural
+// material (wood-frame, masonry).  Occupancy class determines the HAZUS
+// depth-damage curve used, so comparables sharing the same class are
+// economically meaningful.  Strip sub-type suffixes (e.g. RES1-1SNB → RES1).
 function findComparables(
-  features: any[], buildingType: string, lon: number, lat: number, radiusKm: number = COMP_RADIUS_KM
+  features: any[], occtype: string, lon: number, lat: number, radiusKm: number = COMP_RADIUS_KM
 ): { count: number; avgLoss: number; minLoss: number; maxLoss: number } {
   const comps: number[] = [];
-  const typePrefix = (buildingType || '').replace(/[-_].*$/, '').toUpperCase();
+  const typePrefix = (occtype || '').replace(/[-_].*$/, '').toUpperCase();
+  if (!typePrefix) return { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
   for (const f of features) {
     const p = f.properties || {};
-    const fType = (p.building_type || '').replace(/[-_].*$/, '').toUpperCase();
+    const fType = (p.occtype || '').replace(/[-_].*$/, '').toUpperCase();
     if (fType !== typePrefix) continue;
     const [bLon, bLat] = f.geometry?.coordinates || [0, 0];
     const d = haversineKm(lat, lon, bLat, bLon);
@@ -2392,9 +2397,14 @@ function App() {
   const floodZonesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // ── Rainfall hazard view (Option A: fold rainfall into the hazard control) ──
   // 'surge'    → existing surge-driven polygons/bubbles (default)
-  // 'rainfall' → show MRMS observed accumulation stats badge (raster tiles Phase 6)
-  // 'compound' → surge + rainfall + fluvial (same as damage model input); raster Phase 6
-  const [hazardView, setHazardView] = useState<'surge' | 'rainfall' | 'compound'>('surge');
+  // Independent layer toggles — both on → compound derived view.
+  // layerSurge is on by default; layerRainfall is off until the user enables it.
+  const [layerSurge, setLayerSurge] = useState(true);
+  const [layerRainfall, setLayerRainfall] = useState(false);
+  // Derived view string — all existing hazardView references stay intact.
+  const hazardView: 'surge' | 'rainfall' | 'compound' =
+    layerSurge && layerRainfall ? 'compound' :
+    layerRainfall ? 'rainfall' : 'surge';
   const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string; tileUrl: string | null } | null>(null);
   const [rainfallLoading, setRainfallLoading] = useState(false);
   // ── QPF sub-mode when hazardView === 'rainfall' ──
@@ -3208,7 +3218,7 @@ function App() {
 
     // Comparable properties
     const comps = allBuildings?.features
-      ? findComparables(allBuildings.features, p.building_type, lon, lat)
+      ? findComparables(allBuildings.features, p.occtype || '', lon, lat)
       : { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
 
     const flagKey = `${lon.toFixed(5)},${lat.toFixed(5)}`;
@@ -4784,7 +4794,7 @@ ${fieldFlag ? `
                     // ── Comparable Loss Evidence ──
                     const popupInfo = pinnedInfo ?? hoverInfo;
                     const comps = allBuildings?.features
-                      ? findComparables(allBuildings.features, p.building_type, popupInfo.lng, popupInfo.lat)
+                      ? findComparables(allBuildings.features, p.occtype || '', popupInfo.lng, popupInfo.lat)
                       : { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
 
                     // ── Wind vs Water Attribution ──
@@ -5121,7 +5131,7 @@ ${fieldFlag ? `
           setConfidence({ level: 'unvalidated', count: 0 }); setEli({ value: 0, tier: 'unavailable' });
           setValidatedDps({ value: 0, adj: 0, reason: '' }); setManifest({});
           setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
-          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setShowGauges(false); setShowShelters(false); setHazardView('surge'); setBuildingFlags({});
+          setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setShowGauges(false); setShowShelters(false); setLayerSurge(true); setLayerRainfall(false); setBuildingFlags({});
           setSimMode(false); setSimResult(null); setForecastCone(null); setForecastTrack([]);
           setTickIdx(-1); setTickHours([]); setPeril('cumulative'); buildingTicksRef.current = {};
         }} />
@@ -5520,22 +5530,18 @@ ${fieldFlag ? `
                   className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${mapView === 'population' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
                 >👥 Pop</button>
               </div>
-              <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+              {/* Hazard layer toggles — independent checkboxes; both on → compound */}
+              <div className="flex gap-1">
                 <button
-                  onClick={() => setHazardView('surge')}
-                  title="Coastal storm surge depth (default)"
-                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'surge' ? 'bg-sky-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                  onClick={() => setLayerSurge(v => !v)}
+                  title="Toggle coastal storm surge depth raster"
+                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg shadow-lg border transition-colors ${layerSurge ? 'bg-sky-600 text-white border-sky-700' : 'bg-white/90 backdrop-blur border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                 >🌊 Surge</button>
                 <button
-                  onClick={() => setHazardView('rainfall')}
-                  title="MRMS observed rainfall accumulation"
-                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors border-x border-gray-200 ${hazardView === 'rainfall' ? 'bg-indigo-600 text-white border-transparent' : 'text-gray-600 hover:bg-gray-100'}`}
-                >🌧️ Rain</button>
-                <button
-                  onClick={() => setHazardView('compound')}
-                  title="Surge + rainfall + fluvial combined"
-                  className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${hazardView === 'compound' ? 'bg-violet-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
-                >💧 Compound</button>
+                  onClick={() => setLayerRainfall(v => !v)}
+                  title={layerSurge ? 'Toggle rainfall — enable alongside Surge to see compound hazard' : 'Toggle MRMS observed rainfall accumulation'}
+                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg shadow-lg border transition-colors ${layerRainfall ? (layerSurge ? 'bg-violet-600 text-white border-violet-700' : 'bg-indigo-600 text-white border-indigo-700') : 'bg-white/90 backdrop-blur border-gray-200 text-gray-600 hover:bg-gray-100'}`}
+                >{layerSurge && layerRainfall ? '💧 Compound' : '🌧️ Rain'}</button>
               </div>
             </div>
           )}
@@ -5591,26 +5597,30 @@ ${fieldFlag ? `
               )}
               {/* NWS rainfall legend — shown only when the raster is
                   actually mounted. Each row: color swatch + inch range.
-                  Keeps the colors in sync with _NWS_RAIN_* in api_server.py. */}
+                  Keeps the colors in sync with _NWS_RAIN_* in api_server.py.
+                  Extended to 30" to cover Harvey / Helene-class events. */}
               {hazardView === 'rainfall' && ((rainfallMode === 'observed' && rainfallStats?.tileUrl) || (rainfallMode === 'forecast' && qpfStats?.tileUrl)) && (
                 <div className="mt-1.5 pt-1.5 border-t border-gray-200">
                   <div className="text-[10px] font-semibold text-gray-600 mb-0.5">Precipitation (in)</div>
-                  <div className="flex items-center gap-0.5">
+                  <div className="flex flex-wrap items-end gap-0.5">
                     {[
-                      { c: '#c8ffc8', l: '.01' },
-                      { c: '#64e664', l: '.1' },
-                      { c: '#32b432', l: '.25' },
-                      { c: '#008200', l: '.5' },
-                      { c: '#aac83c', l: '.75' },
-                      { c: '#ffff00', l: '1' },
-                      { c: '#ffc800', l: '1.5' },
-                      { c: '#ff8c00', l: '2' },
-                      { c: '#ff3c00', l: '3' },
-                      { c: '#c80000', l: '4' },
-                      { c: '#960064', l: '6' },
-                      { c: '#6e00b4', l: '8' },
-                      { c: '#4600c8', l: '10' },
-                      { c: '#ffffff', l: '15+' },
+                      { c: 'rgb(200,255,200)', l: '.01' },
+                      { c: 'rgb(100,230,100)', l: '.1' },
+                      { c: 'rgb(50,180,50)',   l: '.25' },
+                      { c: 'rgb(0,130,0)',     l: '.5' },
+                      { c: 'rgb(170,200,60)',  l: '.75' },
+                      { c: 'rgb(255,255,0)',   l: '1' },
+                      { c: 'rgb(255,200,0)',   l: '1.5' },
+                      { c: 'rgb(255,140,0)',   l: '2' },
+                      { c: 'rgb(255,60,0)',    l: '3' },
+                      { c: 'rgb(200,0,0)',     l: '4' },
+                      { c: 'rgb(150,0,100)',   l: '6' },
+                      { c: 'rgb(110,0,180)',   l: '8' },
+                      { c: 'rgb(70,0,200)',    l: '10' },
+                      { c: 'rgb(120,0,220)',   l: '15' },
+                      { c: 'rgb(180,0,220)',   l: '20' },
+                      { c: 'rgb(220,40,180)',  l: '25' },
+                      { c: 'rgb(255,100,200)', l: '30+' },
                     ].map(stop => (
                       <div key={stop.l} className="flex flex-col items-center" style={{ width: 14 }}>
                         <div style={{ backgroundColor: stop.c, width: 12, height: 10, border: '1px solid rgba(0,0,0,0.15)' }} />
@@ -5789,7 +5799,7 @@ ${fieldFlag ? `
                   onClick={() => setShowShelters(s => !s)}
                   title={sheltersError ?? (sheltersLoading ? 'Loading shelter manifest…' : showShelters
                     ? `${sheltersData?.features.length ?? 0} shelter(s) in range${sheltersData?.totalCapacity ? ` · ${sheltersData.totalCapacity.toLocaleString()} beds` : ''} — click to hide`
-                    : 'Show shelter capacity (beta — reads PERSISTENT_DIR/shelters/shelters.geojson)')}
+                    : 'Show shelter capacity (beta — requires operator-loaded shelter data')}
                   className={`rounded-lg shadow-lg border px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
                     sheltersError ? 'bg-amber-500 text-white border-amber-600'
                     : showShelters ? 'bg-emerald-600 text-white border-gray-200'

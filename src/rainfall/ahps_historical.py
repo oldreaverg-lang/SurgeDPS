@@ -87,7 +87,10 @@ def fetch_historical_gauges(
     """
     Fetch and cache historical peak-stage gauges for one storm.
 
-    Idempotent: if the cache file already exists, returns its content.
+    Idempotent: if the cache file already exists *and* represents a
+    successful fetch (no ``_fetch_error`` flag), returns its content.
+    Error-flagged caches are treated as misses so the next request
+    automatically retries the upstream USGS / NWPS calls.
 
     Args:
         storm_id:        e.g. "harvey_2017"
@@ -107,11 +110,30 @@ def fetch_historical_gauges(
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{storm_id}.json")
 
-    # Serve cached copy immediately if present
+    # Serve cached copy if present — but skip caches that represent a failed
+    # or incomplete fetch.  Two cases require a retry:
+    #
+    # 1. New caches written with ``_fetch_error: true`` — upstream NWIS call
+    #    failed during warm_cache; these must not be served as "no gauges".
+    #
+    # 2. Legacy caches written before the ``_fetch_error`` field was added
+    #    (i.e., the field is absent) that have gauge_count == 0.  These were
+    #    written when NWIS returned zero timeSeries for the bbox (most likely
+    #    because the old URL lacked ``siteType=ST`` causing an oversize
+    #    request to be silently truncated or rate-limited).  Re-fetching with
+    #    the corrected URL will recover actual gauge data.
     if os.path.exists(cache_path):
         try:
             with open(cache_path) as f:
-                return json.load(f)
+                cached = json.load(f)
+            has_error_field = "_fetch_error" in cached
+            is_error = cached.get("_fetch_error", False)
+            is_legacy_empty = not has_error_field and cached.get("gauge_count", -1) == 0
+            if not is_error and not is_legacy_empty:
+                return cached
+            reason = "_fetch_error flag set" if is_error else "legacy 0-gauge cache (pre-siteType=ST fix)"
+            logger.info("historical gauges cache for %s needs refresh (%s) — refetching",
+                        storm_id, reason)
         except Exception as e:
             logger.warning("historical gauges cache corrupt for %s: %s — refetching", storm_id, e)
 
@@ -126,7 +148,7 @@ def fetch_historical_gauges(
     end_dt   = landfall_dt + timedelta(days=window_days)
 
     # 1) Fetch all NWIS IV site-peaks in the bbox during the window
-    site_peaks = _fetch_nwis_iv_peaks(
+    site_peaks, nwis_fetch_ok = _fetch_nwis_iv_peaks(
         lon_min=landfall_lon - radius_deg,
         lat_min=landfall_lat - radius_deg,
         lon_max=landfall_lon + radius_deg,
@@ -134,9 +156,9 @@ def fetch_historical_gauges(
         start=start_dt,
         end=end_dt,
     )
-    logger.info("USGS NWIS: %d site-peaks for %s in window %s/%s",
+    logger.info("USGS NWIS: %d site-peaks for %s in window %s/%s (fetch_ok=%s)",
                 len(site_peaks), storm_id,
-                start_dt.date(), end_dt.date())
+                start_dt.date(), end_dt.date(), nwis_fetch_ok)
 
     # 2) For each site, look up NWS flood thresholds (shared cache on volume)
     thresholds_cache = _load_thresholds_cache(persistent_dir)
@@ -173,6 +195,11 @@ def fetch_historical_gauges(
             },
         })
 
+    # Mark the response with _fetch_error if NWIS returned nothing useful.
+    # This lets the cache-serve logic at the top retry on the next request
+    # rather than permanently serving zeros.
+    fetch_error = not nwis_fetch_ok and len(features) == 0
+
     response = {
         "storm_id": storm_id,
         "gauge_count": len(features),
@@ -183,6 +210,7 @@ def fetch_historical_gauges(
         "source": "usgs_nwis_iv_historical",
         "window_days": window_days,
         "_cached_at": datetime.now(timezone.utc).isoformat(),
+        "_fetch_error": fetch_error,
     }
 
     # 3) Atomic write to volume
@@ -200,10 +228,28 @@ def fetch_historical_gauges(
 
 
 def cache_exists(storm_id: str, persistent_dir: str = "") -> bool:
-    """True if the historical gauge cache for this storm is already on disk."""
+    """True if a *successful* historical gauge cache for this storm is on disk.
+
+    Returns False if the file is absent, unreadable, flagged with
+    ``_fetch_error``, or is a legacy 0-gauge cache written before the
+    ``siteType=ST`` URL fix (identified by a missing ``_fetch_error`` field
+    combined with gauge_count == 0).  Both cases require a re-fetch.
+    """
     persistent_dir = persistent_dir or os.environ.get("PERSISTENT_DIR", "./data")
     path = os.path.join(persistent_dir, "cache", "gauges_historical", f"{storm_id}.json")
-    return os.path.exists(path)
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        has_error_field = "_fetch_error" in data
+        if data.get("_fetch_error", False):
+            return False
+        if not has_error_field and data.get("gauge_count", -1) == 0:
+            return False  # legacy empty cache — needs re-fetch with fixed URL
+        return True
+    except Exception:
+        return False
 
 
 # ─── USGS NWIS fetcher ───────────────────────────────────────────────────
@@ -212,13 +258,23 @@ def cache_exists(storm_id: str, persistent_dir: str = "") -> bool:
 def _fetch_nwis_iv_peaks(
     lon_min: float, lat_min: float, lon_max: float, lat_max: float,
     start: datetime, end: datetime,
-) -> List[_SitePeak]:
+) -> Tuple[List[_SitePeak], bool]:
     """
-    Pull gauge-height (param 00065) time series for every NWIS site in the
-    bbox over [start, end] and return the per-site peak.
+    Pull gauge-height (param 00065) time series for every NWIS stream-gauge
+    site in the bbox over [start, end] and return (per-site peaks, fetch_ok).
 
-    NWIS IV bbox must be west,south,east,north (decimal degrees).
-    Window must be <= 120 days; ours is at most ~8 days so fine.
+    Returns:
+        peaks    — list of _SitePeak (may be empty on success with no sites)
+        fetch_ok — True if NWIS returned a parseable response (even if empty);
+                   False if the HTTP request failed or returned an error body.
+
+    Notes:
+        • ``siteType=ST`` restricts results to stream gauges only (omitting
+          groundwater wells, atmospheric, etc.) which prevents the NWIS API
+          from silently truncating responses when the bbox contains thousands
+          of non-stream sites.
+        • NWIS IV bbox must be west,south,east,north (decimal degrees).
+        • Window must be ≤ 120 days; ours is at most ~8 days.
     """
     url = (
         f"{_NWIS_BASE}/?format=json"
@@ -226,14 +282,19 @@ def _fetch_nwis_iv_peaks(
         f"&startDT={start.strftime('%Y-%m-%dT%H:%MZ')}"
         f"&endDT={end.strftime('%Y-%m-%dT%H:%MZ')}"
         f"&parameterCd=00065"
+        f"&siteType=ST"       # stream gauges only — avoids 413/truncation on large bboxes
         f"&siteStatus=all"
     )
     data = _get_json(url)
-    if not data:
-        return []
+    if data is None:
+        # HTTP failure or unparseable body — caller will mark _fetch_error
+        return [], False
 
     peaks: List[_SitePeak] = []
     ts_list = (data.get("value") or {}).get("timeSeries") or []
+    logger.info("NWIS IV returned %d timeSeries entries for bbox %.4f,%.4f → %.4f,%.4f",
+                len(ts_list), lon_min, lat_min, lon_max, lat_max)
+
     for ts in ts_list:
         try:
             src_info = ts.get("sourceInfo", {})
@@ -263,7 +324,8 @@ def _fetch_nwis_iv_peaks(
             ))
         except Exception as e:
             logger.debug("Skipping malformed NWIS timeSeries entry: %s", e)
-    return peaks
+
+    return peaks, True  # fetch succeeded (even if 0 stream gauges in bbox)
 
 
 # ─── NWPS threshold cache ────────────────────────────────────────────────
@@ -392,11 +454,31 @@ def _empty_response(storm_id: str) -> dict:
 
 
 def _get_json(url: str) -> Optional[dict]:
-    """HTTP GET → parsed JSON or None on any failure."""
+    """HTTP GET → parsed JSON, or None on any failure.
+
+    Logs HTTP status code and truncated response body on non-200 so that
+    operators can distinguish NWIS rate-limiting (429), server errors (5xx),
+    and bad-request failures (400 / 414 URL too long) from true network
+    timeouts.
+    """
+    import urllib.error as _ue
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
+            logger.debug("NWIS/NWPS %s → HTTP 200, %d bytes", url.split('?')[0], len(raw))
+            return json.loads(raw.decode("utf-8"))
+    except _ue.HTTPError as exc:
+        body_preview = ""
+        try:
+            body_preview = exc.read(256).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.warning(
+            "NWIS/NWPS HTTP %d for %s — %s — body: %s",
+            exc.code, url.split('?')[0], exc.reason, body_preview,
+        )
+        return None
     except Exception as exc:
         logger.warning("NWIS/NWPS request failed (%s): %s",
                        url.split('?')[0], exc)

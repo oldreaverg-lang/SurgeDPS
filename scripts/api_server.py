@@ -798,9 +798,16 @@ def _empty_fc_pair():
 # transparent so the basemap shows through.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# NWS standard precipitation stops — matches weather.gov / MRMS
-# product pages users have seen elsewhere. Stop = lower bound in inches.
-_NWS_RAIN_STOPS_IN = [0.01, 0.10, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00, 10.00, 15.00]
+# NWS standard precipitation stops — matches weather.gov / MRMS / AHPS
+# product pages users have seen elsewhere.  Extended to 30" so that
+# extreme events (Harvey 20-36", Helene 20"+) don't clamp to a solid
+# single-color blob. Stops are in inches; colors match the AHPS/MRMS
+# green→yellow→orange→red→purple→magenta gradient.
+_NWS_RAIN_STOPS_IN = [
+    0.01, 0.10, 0.25, 0.50, 0.75,
+    1.00, 1.50, 2.00, 3.00, 4.00,
+    6.00, 8.00, 10.00, 15.00, 20.00, 25.00, 30.00,
+]
 _NWS_RAIN_COLORS_RGB = [
     (200, 255, 200),   # 0.01"  very light green
     (100, 230, 100),   # 0.10"  light green
@@ -808,36 +815,71 @@ _NWS_RAIN_COLORS_RGB = [
     (0,   130, 0),     # 0.50"  dark green
     (170, 200, 60),    # 0.75"  yellow-green
     (255, 255, 0),     # 1.00"  yellow
-    (255, 200, 0),     # 1.50"
+    (255, 200, 0),     # 1.50"  yellow-orange
     (255, 140, 0),     # 2.00"  orange
-    (255, 60,  0),     # 3.00"
+    (255, 60,  0),     # 3.00"  orange-red
     (200, 0,   0),     # 4.00"  red
-    (150, 0,   100),   # 6.00"  magenta
-    (110, 0,   180),   # 8.00"
+    (150, 0,   100),   # 6.00"  dark magenta
+    (110, 0,   180),   # 8.00"  violet
     (70,  0,   200),   # 10.00" purple
-    (255, 255, 255),   # 15.00"+ white/pink cap
+    (120, 0,   220),   # 15.00" medium purple
+    (180, 0,   220),   # 20.00" purple-magenta
+    (220, 40,  180),   # 25.00" magenta-pink
+    (255, 100, 200),   # 30.00"+ hot pink (extreme / Harvey-class rainfall)
 ]
 _TILE_ALPHA = 200  # semi-transparent so basemap + flood polygons stay visible
+
+# Pre-compute float32 arrays for vectorised interpolation (avoids repeated
+# list-to-array conversion on every tile render call).
+import numpy as _np_precompute
+_NWS_STOPS_ARR = _np_precompute.array(_NWS_RAIN_STOPS_IN, dtype=_np_precompute.float32)
+_NWS_COLORS_ARR = _np_precompute.array(_NWS_RAIN_COLORS_RGB, dtype=_np_precompute.float32)
+del _np_precompute
 
 
 def _nws_rainfall_rgba(mm, valid_mask):
     """Apply the NWS rainfall colormap to an (H, W) mm array.
+
+    Uses smooth bilinear interpolation between stops — no hard bucket steps —
+    so gradients look like the AHPS/MRMS products rather than posterised bands.
 
     valid_mask: boolean (H, W) — True where the source reports a value.
     Returns (H, W, 4) uint8 RGBA. Pixels below the first stop OR invalid
     render fully transparent; above the top stop clamp to the top color.
     """
     import numpy as _np
-    inches = mm / 25.4
+    inches = (mm / 25.4).astype(_np.float32)
+    stops  = _NWS_STOPS_ARR
+    colors = _NWS_COLORS_ARR          # shape (N, 3)
+    N      = len(stops)
+
+    # idx = index of the stop ABOVE the pixel value (0 = below first stop, N = above last)
+    idx = _np.searchsorted(stops, inches, side='left').clip(1, N - 1)
+    # lower / upper stop indices
+    lo = idx - 1
+    hi = idx
+
+    # Fraction [0, 1] between the two surrounding stops
+    span = (stops[hi] - stops[lo]).clip(min=1e-9)
+    t    = ((inches - stops[lo]) / span).clip(0.0, 1.0)  # shape H×W
+
+    # Bilinear colour blend
+    r = (colors[lo, 0] + t * (colors[hi, 0] - colors[lo, 0])).clip(0, 255)
+    g = (colors[lo, 1] + t * (colors[hi, 1] - colors[lo, 1])).clip(0, 255)
+    b = (colors[lo, 2] + t * (colors[hi, 2] - colors[lo, 2])).clip(0, 255)
+
     rgba = _np.zeros((*inches.shape, 4), dtype=_np.uint8)
-    # searchsorted returns insertion index; idx==0 means below first stop
-    idx = _np.searchsorted(_NWS_RAIN_STOPS_IN, inches, side='right')
-    for bucket in range(1, len(_NWS_RAIN_STOPS_IN) + 1):
-        sel = (idx == bucket) & valid_mask
-        if not sel.any():
-            continue
-        r, g, b = _NWS_RAIN_COLORS_RGB[bucket - 1]
-        rgba[sel] = (r, g, b, _TILE_ALPHA)
+    in_range = valid_mask & (inches >= stops[0])
+    rgba[in_range, 0] = r[in_range].astype(_np.uint8)
+    rgba[in_range, 1] = g[in_range].astype(_np.uint8)
+    rgba[in_range, 2] = b[in_range].astype(_np.uint8)
+    rgba[in_range, 3] = _TILE_ALPHA
+    # Pixels above the last stop get the final colour at full alpha
+    above = valid_mask & (inches > stops[-1])
+    rgba[above, 0] = int(colors[-1, 0])
+    rgba[above, 1] = int(colors[-1, 1])
+    rgba[above, 2] = int(colors[-1, 2])
+    rgba[above, 3] = _TILE_ALPHA
     return rgba
 
 
@@ -881,18 +923,45 @@ _COMPOUND_COLORS_RGB = [
 ]
 _COMPOUND_TILE_ALPHA = 200
 
+import numpy as _np_precompute2
+_COMPOUND_STOPS_ARR  = _np_precompute2.array(_COMPOUND_STOPS_FT,   dtype=_np_precompute2.float32)
+_COMPOUND_COLORS_ARR = _np_precompute2.array(_COMPOUND_COLORS_RGB, dtype=_np_precompute2.float32)
+del _np_precompute2
+
 
 def _compound_rgba(depth_ft, valid_mask):
-    """Apply the compound-hazard colormap to an (H, W) ft array."""
+    """Apply the compound-hazard colormap to an (H, W) ft array.
+
+    Smooth bilinear interpolation — same approach as _nws_rainfall_rgba.
+    Pixels below 0.25 ft render transparent.
+    """
     import numpy as _np
-    rgba = _np.zeros((*depth_ft.shape, 4), dtype=_np.uint8)
-    idx = _np.searchsorted(_COMPOUND_STOPS_FT, depth_ft, side='right')
-    for bucket in range(1, len(_COMPOUND_STOPS_FT) + 1):
-        sel = (idx == bucket) & valid_mask
-        if not sel.any():
-            continue
-        r, g, b = _COMPOUND_COLORS_RGB[bucket - 1]
-        rgba[sel] = (r, g, b, _COMPOUND_TILE_ALPHA)
+    d      = depth_ft.astype(_np.float32)
+    stops  = _COMPOUND_STOPS_ARR
+    colors = _COMPOUND_COLORS_ARR
+    N      = len(stops)
+
+    idx = _np.searchsorted(stops, d, side='left').clip(1, N - 1)
+    lo  = idx - 1
+    hi  = idx
+    span = (stops[hi] - stops[lo]).clip(min=1e-9)
+    t    = ((d - stops[lo]) / span).clip(0.0, 1.0)
+
+    r = (colors[lo, 0] + t * (colors[hi, 0] - colors[lo, 0])).clip(0, 255)
+    g = (colors[lo, 1] + t * (colors[hi, 1] - colors[lo, 1])).clip(0, 255)
+    b = (colors[lo, 2] + t * (colors[hi, 2] - colors[lo, 2])).clip(0, 255)
+
+    rgba = _np.zeros((*d.shape, 4), dtype=_np.uint8)
+    in_range = valid_mask & (d >= stops[0])
+    rgba[in_range, 0] = r[in_range].astype(_np.uint8)
+    rgba[in_range, 1] = g[in_range].astype(_np.uint8)
+    rgba[in_range, 2] = b[in_range].astype(_np.uint8)
+    rgba[in_range, 3] = _COMPOUND_TILE_ALPHA
+    above = valid_mask & (d > stops[-1])
+    rgba[above, 0] = int(colors[-1, 0])
+    rgba[above, 1] = int(colors[-1, 1])
+    rgba[above, 2] = int(colors[-1, 2])
+    rgba[above, 3] = _COMPOUND_TILE_ALPHA
     return rgba
 
 
@@ -2743,6 +2812,15 @@ class CellHandler(BaseHTTPRequestHandler):
         if path == '/api/health/storage':
             from persistent_paths import storage_summary
             self._send_json(200, storage_summary())
+            return
+
+        # ── Guard: unknown /api/* routes must never fall through to the SPA ──
+        # Without this, any misspelled or future API path returns HTTP 200
+        # with index.html — a Content-Type: text/html body that looks like
+        # success to callers that don't inspect the body (curl, fetch without
+        # response.ok checks, etc.).  Return a proper JSON 404 instead.
+        if path.startswith('/api/'):
+            self._send_error(404, f'Unknown API endpoint: {path}')
             return
 
         # ── Static file serving (built React frontend) ──

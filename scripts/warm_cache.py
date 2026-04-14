@@ -536,6 +536,229 @@ def main():
     print(f"  Gauge warm summary: {g_ok} fetched · {g_skip} already cached · {g_fail} failed")
     print("=" * 60)
 
+    # ── Phase 3: FEMA NFHL flood zone tile cache ─────────────────────────
+    # Pre-fetch FEMA National Flood Hazard Layer for a 4° × 4° grid of
+    # 2° × 2° sub-tiles around each historical storm's landfall.  The cache
+    # key exactly matches what api_server.py /api/flood_zones writes, so
+    # subsequent browser requests within prewarmed tiles are instant reads.
+    #
+    # Tile strategy: 16 tiles per storm (4 cols × 4 rows, 2° each) covering
+    # an 8° × 8° box around landfall.  At 2° resolution the per-tile
+    # feature count stays well below FEMA's 2,000-record limit even for
+    # dense coastal zones.  Total at ~20 historical storms: ~320 requests
+    # × ~2 s each ≈ 10 min, but only for un-cached tiles.
+    print()
+    print("=" * 60)
+    print("Phase 3: Warming FEMA NFHL flood zone tile cache")
+    print("=" * 60)
+
+    import urllib.request as _fz_req
+    import urllib.parse as _fz_parse
+    import json as _fz_json
+
+    _FEMA_URL = (
+        'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query'
+    )
+    _FEMA_UA = 'SurgeDPS/1.0 (+https://stormdps.com) warm_cache'
+    _FZ_TILE_DEG = 2.0      # fetch one 2° × 2° tile per request
+    _FZ_RADIUS_DEG = 4.0    # cover ±4° around landfall in each axis → 4×4 grid
+    _FZ_TIMEOUT = 30        # seconds per FEMA request
+
+    fz_cache_dir = os.path.join(str(PERSISTENT_DIR), 'cache', 'flood_zones')
+    os.makedirs(fz_cache_dir, exist_ok=True)
+    fz_ok = fz_skip = fz_fail = 0
+
+    for storm in HISTORICAL_STORMS:
+        lat0 = storm.landfall_lat
+        lon0 = storm.landfall_lon
+
+        # Build a 4×4 grid of 2° × 2° tiles covering [lon0-4°, lon0+4°] ×
+        # [lat0-4°, lat0+4°].  Snap each edge to 0.01° to match the cache
+        # key quantization used by api_server.py's /api/flood_zones handler.
+        tiles_fetched = tiles_skipped = tiles_failed = 0
+        n_cols = n_rows = int(2 * _FZ_RADIUS_DEG / _FZ_TILE_DEG)  # 4
+
+        for row in range(n_rows):
+            for col in range(n_cols):
+                raw_w = lon0 - _FZ_RADIUS_DEG + col * _FZ_TILE_DEG
+                raw_s = lat0 - _FZ_RADIUS_DEG + row * _FZ_TILE_DEG
+                raw_e = raw_w + _FZ_TILE_DEG
+                raw_n = raw_s + _FZ_TILE_DEG
+
+                # Quantize exactly as api_server.py does
+                qw = round(raw_w, 2)
+                qs = round(raw_s, 2)
+                qe = round(raw_e, 2)
+                qn = round(raw_n, 2)
+
+                cache_name = f"fz_{qw:+.2f}_{qs:+.2f}_{qe:+.2f}_{qn:+.2f}.json"
+                cache_path = os.path.join(fz_cache_dir, cache_name)
+
+                if os.path.exists(cache_path):
+                    tiles_skipped += 1
+                    continue
+
+                envelope = _fz_json.dumps({
+                    'xmin': qw, 'ymin': qs,
+                    'xmax': qe, 'ymax': qn,
+                    'spatialReference': {'wkid': 4326},
+                })
+                qs_str = _fz_parse.urlencode({
+                    'where': '1=1',
+                    'geometry': envelope,
+                    'geometryType': 'esriGeometryEnvelope',
+                    'inSR': '4326',
+                    'outSR': '4326',
+                    'spatialRel': 'esriSpatialRelIntersects',
+                    'outFields': 'FLD_ZONE,SFHA_TF,FLOODWAY',
+                    'returnGeometry': 'true',
+                    'resultRecordCount': '2000',
+                    'f': 'geojson',
+                })
+                fema_url = f'{_FEMA_URL}?{qs_str}'
+                try:
+                    req = _fz_req.Request(fema_url, headers={'User-Agent': _FEMA_UA})
+                    with _fz_req.urlopen(req, timeout=_FZ_TIMEOUT) as resp:
+                        raw = resp.read()
+                    # Validate JSON before caching (FEMA occasionally returns
+                    # HTML error pages with HTTP 200).
+                    parsed = _fz_json.loads(raw)
+                    if 'error' in parsed:
+                        raise ValueError(f"FEMA error: {parsed['error']}")
+                    # Atomic write — same pattern as api_server.py
+                    import threading as _fz_th
+                    _tmp = f'{cache_path}.tmp.{os.getpid()}.{_fz_th.get_ident()}'
+                    with open(_tmp, 'wb') as fh:
+                        fh.write(raw)
+                    os.replace(_tmp, cache_path)
+                    tiles_fetched += 1
+                    time.sleep(0.5)  # polite rate limit — FEMA is a shared public API
+                except Exception as _fe:
+                    tiles_failed += 1
+                    print(f"    FEMA tile ({qw:+.2f},{qs:+.2f})→({qe:+.2f},{qn:+.2f})"
+                          f" {storm.storm_id}: {_fe}")
+
+        n_features = 0
+        # Quick count of cached features for this storm to print summary
+        for row in range(n_rows):
+            for col in range(n_cols):
+                raw_w = lon0 - _FZ_RADIUS_DEG + col * _FZ_TILE_DEG
+                raw_s = lat0 - _FZ_RADIUS_DEG + row * _FZ_TILE_DEG
+                qw = round(raw_w, 2); qs = round(raw_s, 2)
+                qe = round(raw_w + _FZ_TILE_DEG, 2); qn = round(raw_s + _FZ_TILE_DEG, 2)
+                cp = os.path.join(fz_cache_dir, f"fz_{qw:+.2f}_{qs:+.2f}_{qe:+.2f}_{qn:+.2f}.json")
+                if os.path.exists(cp):
+                    try:
+                        with open(cp) as _cf:
+                            n_features += len(_fz_json.load(_cf).get('features', []))
+                    except Exception:
+                        pass
+
+        status = f"{tiles_fetched} fetched · {tiles_skipped} cached · {tiles_failed} failed"
+        print(f"  [fema] {storm.storm_id:18s} → {n_features:5d} features  ({status})")
+        fz_ok += tiles_fetched
+        fz_skip += tiles_skipped
+        fz_fail += tiles_failed
+
+    print(f"  FEMA tile summary: {fz_ok} newly fetched · {fz_skip} already cached · {fz_fail} failed")
+    print("=" * 60)
+
+    # ── Phase 4: Compound raster mosaics ─────────────────────────────────
+    # For every storm whose 3×3 cells include compound tifs (produced during
+    # Phase 1 by flood_model.compound.merge_compound_flood), merge them into
+    # a single storm_compound.tif mosaic.  The mosaic is what
+    # /api/compound_tile renders on demand — prebuilding it here means the
+    # first compound-overlay tile request is served from cache instead of
+    # triggering an in-request rebuild.
+    #
+    # The rebuild check is: mosaic missing OR any cell tif is newer than it.
+    # This is the same heuristic api_server.py uses, so repeated deploys are
+    # cheap (no-op if cells haven't changed).
+    print()
+    print("=" * 60)
+    print("Phase 4: Building compound raster mosaics")
+    print("=" * 60)
+
+    try:
+        import glob as _glob
+        import rasterio as _rio
+        from rasterio.merge import merge as _rio_merge
+        import numpy as _np_cm
+        _rasterio_available = True
+    except ImportError as _rim:
+        print(f"  [compound] rasterio not available — skipping ({_rim})")
+        _rasterio_available = False
+
+    if _rasterio_available:
+        cm_built = cm_skip = cm_fail = 0
+
+        all_storm_dirs = []
+        # HISTORICAL_STORMS covers all curated storms; also sweep the cells
+        # directory for any season storms whose cells were pre-warmed.
+        for entry in os.scandir(str(CELLS_DIR)):
+            if entry.is_dir():
+                all_storm_dirs.append(entry.path)
+
+        for storm_dir in sorted(all_storm_dirs):
+            storm_id = os.path.basename(storm_dir)
+            cell_tifs = sorted(_glob.glob(os.path.join(storm_dir, 'cell_*_compound.tif')))
+            if not cell_tifs:
+                continue  # no compound data for this storm yet
+
+            mosaic_path = os.path.join(storm_dir, 'storm_compound.tif')
+
+            # Check if mosaic is fresh vs all cell tifs
+            if os.path.exists(mosaic_path):
+                mo_mtime = os.path.getmtime(mosaic_path)
+                if max(os.path.getmtime(t) for t in cell_tifs) <= mo_mtime:
+                    cm_skip += 1
+                    continue  # mosaic is up to date
+
+            # Build / rebuild the mosaic
+            datasets: list = []
+            try:
+                for t in cell_tifs:
+                    datasets.append(_rio.open(t))
+                mosaic, transform = _rio_merge(datasets)
+                profile = datasets[0].profile.copy()
+                profile.update(
+                    driver='GTiff',
+                    height=mosaic.shape[1],
+                    width=mosaic.shape[2],
+                    transform=transform,
+                    count=1,
+                    compress='deflate',
+                    tiled=True,
+                    blockxsize=256,
+                    blockysize=256,
+                )
+                import threading as _cm_th
+                _tmp = f'{mosaic_path}.tmp.{os.getpid()}.{_cm_th.get_ident()}'
+                with _rio.open(_tmp, 'w', **profile) as dst:
+                    dst.write(mosaic[0], 1)
+                os.replace(_tmp, mosaic_path)
+
+                # Quick stats for the summary line
+                arr = mosaic[0]
+                valid = arr > 0
+                max_ft = float(arr[valid].max()) if valid.any() else 0.0
+                avg_ft = float(arr[valid].mean()) if valid.any() else 0.0
+                print(f"  [compound] {storm_id:18s} → {len(cell_tifs):2d} cells merged"
+                      f"  max={max_ft:.1f}ft  avg={avg_ft:.2f}ft")
+                cm_built += 1
+            except Exception as _cm_err:
+                print(f"  [compound] {storm_id:18s} FAILED — {_cm_err}")
+                cm_fail += 1
+            finally:
+                for _d in datasets:
+                    try:
+                        _d.close()
+                    except Exception:
+                        pass
+
+        print(f"  Compound mosaic summary: {cm_built} built · {cm_skip} up to date · {cm_fail} failed")
+    print("=" * 60)
+
 
 if __name__ == '__main__':
     main()

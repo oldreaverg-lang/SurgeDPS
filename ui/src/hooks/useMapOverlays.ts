@@ -95,21 +95,49 @@ export function useMapOverlays(hasBuildings: boolean, _mapRef?: React.RefObject<
       const url = `https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?${params}`;
       setFloodZonesLoading(true);
       setFloodZonesError(null);
-      const ac = new AbortController();
-      const timeout = setTimeout(() => ac.abort(), 20_000);
-      try {
-        const res = await fetch(url, { signal: ac.signal });
-        clearTimeout(timeout);
-        if (!res.ok) throw new Error(`NFHL ${res.status}`);
-        const data = await res.json();
-        if (data?.error) throw new Error(data.error.message || 'NFHL error');
-        setFloodZonesGeoJSON(data?.features?.length ? data : { type: 'FeatureCollection', features: [] });
-      } catch (err: any) {
-        clearTimeout(timeout);
-        setFloodZonesError(err?.name === 'AbortError' ? 'FEMA flood-zone fetch timed out' : 'Could not load FEMA flood zones');
-      } finally {
-        setFloodZonesLoading(false);
+
+      // Retry with exponential backoff — FEMA NFHL occasionally returns 502/504
+      // on the first request (cold cache on their CDN).  Three attempts with
+      // 2 s / 4 s delays recover the vast majority of transient failures.
+      const MAX_ATTEMPTS = 3;
+      let lastErr: any = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const ac = new AbortController();
+        const timeout = setTimeout(() => ac.abort(), 20_000);
+        try {
+          const res = await fetch(url, { signal: ac.signal });
+          clearTimeout(timeout);
+          if (!res.ok) {
+            // 5xx errors are retryable; 4xx are not (bad request — bail out)
+            if (res.status >= 500 && attempt < MAX_ATTEMPTS) {
+              lastErr = new Error(`NFHL ${res.status}`);
+              await new Promise(r => setTimeout(r, (2 ** attempt) * 1000));
+              continue;
+            }
+            throw new Error(`NFHL ${res.status}`);
+          }
+          const data = await res.json();
+          if (data?.error) throw new Error(data.error.message || 'NFHL error');
+          setFloodZonesGeoJSON(data?.features?.length ? data : { type: 'FeatureCollection', features: [] });
+          setFloodZonesError(null);
+          setFloodZonesLoading(false);
+          return;
+        } catch (err: any) {
+          clearTimeout(timeout);
+          lastErr = err;
+          if (err?.name === 'AbortError') break; // timeout — no point retrying
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise(r => setTimeout(r, (2 ** attempt) * 1000));
+          }
+        }
       }
+      // All attempts exhausted
+      setFloodZonesError(
+        lastErr?.name === 'AbortError'
+          ? 'FEMA flood-zone fetch timed out'
+          : 'Could not load FEMA flood zones'
+      );
+      setFloodZonesLoading(false);
     }, 600);
   }, []);
 
