@@ -154,7 +154,19 @@ function criticalPrefix(p: any): string {
 function friendlyBuildingType(code: string): string {
   if (!code) return 'Unknown';
   const prefix = code.replace(/[-_].*$/, '').toUpperCase();
-  return BUILDING_TYPES[prefix] || code;
+  if (BUILDING_TYPES[prefix]) return BUILDING_TYPES[prefix];
+  // Backend collapses GOV/EDU/REL → "COM" and AGR → "IND" for depth-damage
+  // curves. When we only have the collapsed code, return the genus name.
+  if (prefix === 'COM') return 'Commercial / Civic';
+  if (prefix === 'IND') return 'Industrial';
+  if (prefix === 'RES') return 'Residential';
+  return code;
+}
+
+// Prefer the raw NSI occtype (preserves GOV1, EDU1, MED1 detail) when
+// rendering human-readable labels in the popover. Falls back to building_type.
+function friendlyFacilityLabel(p: any): string {
+  return friendlyBuildingType(p?.occtype || p?.building_type);
 }
 const CAT_COLORS: Record<number, string> = {
   0: '#5eead4', 1: '#facc15', 2: '#fb923c', 3: '#ef4444', 4: '#dc2626', 5: '#7f1d1d',
@@ -3678,31 +3690,32 @@ ${fieldFlag ? `
             )
           )}
 
-          {/* ── NLCD 2021 Land Cover (MRLC WMS) ──
-              30 m CONUS raster served live by the USGS Multi-Resolution Land
-              Characteristics Consortium. The server renders the canonical
-              16-class Anderson Level II palette (red = developed, yellow =
-              cropland, green = forest, blue = water). We layer it beneath
-              the damage bubbles at 55 % opacity so the zoning read remains
-              visible without obscuring loss severity. */}
+          {/* ── NLCD 2021 Land Cover (Esri Living Atlas ImageServer) ──
+              30 m CONUS raster served live from Esri's hosted copy of
+              USGS/MRLC NLCD 2021. We originally pointed at mrlc.gov's
+              GeoServer WMS but it doesn't set CORS headers, so the
+              browser blocks the tiles. Esri's ImageServer `exportImage`
+              endpoint is CORS-enabled and returns the canonical
+              16-class Anderson Level II palette (red = developed,
+              yellow = cropland, green = forest, blue = water). Layered
+              beneath the damage bubbles at 55 % opacity. */}
           {showLandUse && (
             <Source
               id="nlcd-landuse"
               type="raster"
               tiles={[
-                'https://www.mrlc.gov/geoserver/mrlc_display/NLCD_2021_Land_Cover_L48/wms?' +
-                'service=WMS&version=1.1.1&request=GetMap' +
-                '&layers=mrlc_display:NLCD_2021_Land_Cover_L48' +
-                '&styles=&format=image/png&transparent=true' +
-                '&srs=EPSG:3857&width=256&height=256&bbox={bbox-epsg-3857}',
+                'https://landscape11.arcgis.com/arcgis/rest/services/' +
+                'USA_NLCD_Land_Cover/ImageServer/exportImage' +
+                '?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857' +
+                '&size=256,256&format=png32&transparent=true&f=image',
               ]}
               tileSize={256}
-              attribution="Land cover © USGS/MRLC NLCD 2021"
+              attribution="Land cover © USGS/MRLC NLCD 2021 (via Esri Living Atlas)"
             >
               <Layer
                 id="nlcd-landuse-raster"
                 type="raster"
-                paint={{ 'raster-opacity': 0.55, 'raster-fade-duration': 200 }}
+                paint={{ 'raster-opacity': 0.6, 'raster-fade-duration': 200 }}
               />
             </Source>
           )}
@@ -3957,12 +3970,34 @@ ${fieldFlag ? `
 
           {criticalFacilities && (
             <Source id="critical-facilities" type="geojson" data={criticalFacilities}>
+              {/* Colored circle behind each icon — category glance-read.
+                  Hospitals=red, gov/emergency=gold, schools=blue,
+                  nursing=teal, churches=purple. MinZoom 12 keeps them
+                  from cluttering the county/state overview. */}
+              <Layer id="critical-icon-halos" type="circle"
+                minzoom={12}
+                paint={{
+                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 14, 18, 20],
+                  'circle-color': ['match', ['get', 'critical_icon'],
+                    '➕',  '#dc2626',   // Hospitals/Clinics — red
+                    '⭐',  '#f59e0b',   // Government / Emergency — gold
+                    '🏫',  '#2563eb',   // Schools — blue
+                    '🛏️',  '#0d9488',  // Nursing homes — teal
+                    '⛪',  '#7c3aed',   // Places of worship — purple
+                    '#475569',         // fallback — slate
+                  ],
+                  'circle-stroke-color': '#ffffff',
+                  'circle-stroke-width': 2,
+                  'circle-opacity': 0.95,
+                }}
+              />
               <Layer id="critical-icons" type="symbol"
+                minzoom={12}
                 layout={{
                   'text-field': ['get', 'critical_icon'],
-                  'text-size': ['interpolate', ['linear'], ['zoom'], 12, 16, 16, 24, 18, 32],
+                  'text-size': ['interpolate', ['linear'], ['zoom'], 12, 12, 16, 18, 18, 24],
                   'text-allow-overlap': true,
-                  'text-ignore-placement': false,
+                  'text-ignore-placement': true,
                   'symbol-sort-key': ['case',
                     ['==', ['get', 'critical_icon'], '➕'], 0,
                     ['==', ['get', 'critical_icon'], '⭐'], 1,
@@ -3973,8 +4008,9 @@ ${fieldFlag ? `
                   ],
                 }}
                 paint={{
-                  'text-halo-color': '#fff',
-                  'text-halo-width': 2,
+                  'text-color': '#ffffff',
+                  'text-halo-color': 'rgba(0,0,0,0.5)',
+                  'text-halo-width': 0.5,
                 }}
               />
             </Source>
@@ -4148,7 +4184,7 @@ ${fieldFlag ? `
                   return (
                     <><h3 className="font-semibold text-gray-800 text-sm border-b pb-1 mb-1 border-gray-200">Property — Population Impact</h3>
                     <div className="text-xs space-y-1">
-                      <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(p.building_type)}</span></p>
+                      <p className="flex justify-between gap-2"><span className="text-gray-500">Type:</span> <span className="font-medium text-right">{friendlyFacilityLabel(p)}{p.occtype && p.occtype.replace(/[-_].*$/, '').toUpperCase() !== (p.building_type || '').replace(/[-_].*$/, '').toUpperCase() ? <span className="text-[10px] text-gray-400 ml-1">({p.occtype})</span> : null}</span></p>
                       <p className="flex justify-between"><span className="text-gray-500">Damage:</span> <span className="font-medium capitalize">{cat === 'none' ? 'No damage' : cat}</span></p>
                       {isRes ? (
                         <>
@@ -4205,7 +4241,7 @@ ${fieldFlag ? `
                       <span className="shrink-0 opacity-60 group-hover:opacity-100 transition-opacity" title="Google Maps">↗</span>
                     </a>
                     <div className="text-xs space-y-1">
-                      <p className="flex justify-between"><span className="text-gray-500">Type:</span> <span className="font-medium">{friendlyBuildingType(p.building_type)}</span></p>
+                      <p className="flex justify-between gap-2"><span className="text-gray-500">Type:</span> <span className="font-medium text-right">{friendlyFacilityLabel(p)}{p.occtype && p.occtype.replace(/[-_].*$/, '').toUpperCase() !== (p.building_type || '').replace(/[-_].*$/, '').toUpperCase() ? <span className="text-[10px] text-gray-400 ml-1">({p.occtype})</span> : null}</span></p>
                       <p className="flex justify-between"><span className="text-gray-500">Severity:</span> <span className="font-medium capitalize">{!p.damage_category || p.damage_category === 'none' ? 'No Damage' : p.damage_category}</span></p>
                       {/* Surge depth + interior flooding */}
                       <p className="flex justify-between"><span className="text-gray-500">Surge depth:</span> <span className="font-medium">{p.depth_ft != null ? Number(p.depth_ft).toFixed(1) : '—'} ft</span></p>
