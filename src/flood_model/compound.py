@@ -28,6 +28,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from flood_model.raster_utils import write_raster
+
 logger = logging.getLogger(__name__)
 
 
@@ -185,8 +187,8 @@ def merge_compound_flood(
     max_rain = float(np.nanmax(rain_clean)) if np.any(rain_clean > 0) else 0.0
 
     logger.info(
-        f"Compound result: max_depth={max_depth:.2f}m "
-        f"(surge={max_surge:.2f}m, rain={max_rain:.2f}m), "
+        f"Compound result: max_depth={max_depth:.2f}ft "
+        f"(surge={max_surge:.2f}ft, rain={max_rain:.2f}ft), "
         f"flooded={flooded_pct:.1f}%, "
         f"overlap={overlap_pct:.1f}% of flooded area ({overlap_cells:,} cells)"
     )
@@ -199,25 +201,20 @@ def merge_compound_flood(
         f"depth_compound_{storm_id}_{advisory_num}_{ts_str}.tif",
     )
 
-    out_profile = profile.copy()
-    out_profile.update(
-        dtype="float32",
-        nodata=-9999,
-        compress="deflate",
-        predictor=3,
+    write_raster(
+        compound_path,
+        compound,
+        profile,
+        tags={
+            "model": "compound",
+            "storm_id": storm_id,
+            "advisory": advisory_num,
+            "timestep": str(timestep),
+            "max_depth_m": f"{max_depth:.3f}",
+            "interaction_factor": f"{interaction_factor:.2f}",
+            "overlap_pct": f"{overlap_pct:.2f}",
+        },
     )
-
-    with rasterio.open(compound_path, "w", **out_profile) as dst:
-        dst.write(compound.astype(np.float32), 1)
-        dst.update_tags(
-            model="compound",
-            storm_id=storm_id,
-            advisory=advisory_num,
-            timestep=str(timestep),
-            max_depth_m=f"{max_depth:.3f}",
-            interaction_factor=f"{interaction_factor:.2f}",
-            overlap_pct=f"{overlap_pct:.2f}",
-        )
 
     # ── Write Overlap Mask ─────────────────────────────────────
     overlap_path = os.path.join(
@@ -225,15 +222,14 @@ def merge_compound_flood(
         f"overlap_{storm_id}_{advisory_num}_{ts_str}.tif",
     )
 
-    mask_profile = profile.copy()
-    mask_profile.update(
+    write_raster(
+        overlap_path,
+        overlap_mask,
+        profile,
         dtype="uint8",
         nodata=255,
-        compress="deflate",
+        predictor=None,    # uint8 masks don't benefit from float predictor
     )
-
-    with rasterio.open(overlap_path, "w", **mask_profile) as dst:
-        dst.write(overlap_mask, 1)
 
     return CompoundResult(
         compound_depth_path=compound_path,

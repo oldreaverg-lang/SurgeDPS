@@ -41,6 +41,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from flood_model.raster_utils import read_raster, write_raster
+
 logger = logging.getLogger(__name__)
 
 
@@ -215,8 +217,6 @@ def run_hand_model(
     Returns:
         HANDResult with flood depth raster and stats
     """
-    import rasterio
-
     logger.info(
         f"Running HAND model: {len(discharge_data)} reaches, T+{timestep}h"
     )
@@ -224,15 +224,16 @@ def run_hand_model(
     os.makedirs(output_dir, exist_ok=True)
 
     # Read HAND raster
-    with rasterio.open(hand_path) as src:
-        hand_data = src.read(1)
-        profile = src.profile.copy()
-        hand_nodata = src.nodata or -9999
-        bounds = src.bounds
-        crs = str(src.crs)
-        res = src.transform.a
+    _hand = read_raster(hand_path)
+    hand_data = _hand.data
+    profile = _hand.profile
+    hand_nodata = _hand.nodata
+    bounds = _hand.bounds
+    crs = _hand.crs
+    res = _hand.transform.a
 
     # Read catchment (reach ID) raster
+    import rasterio
     with rasterio.open(catchment_path) as src:
         catch_data = src.read(1).astype(np.int64)
         catch_nodata = src.nodata or -9999
@@ -306,24 +307,19 @@ def run_hand_model(
         f"depth_hand_{storm_id}_{advisory_num}_{ts_str}.tif",
     )
 
-    out_profile = profile.copy()
-    out_profile.update(
-        dtype="float32",
-        nodata=-9999,
-        compress="deflate",
-        predictor=3,
+    write_raster(
+        output_path,
+        flood_depth,
+        profile,
+        tags={
+            "model": "hand",
+            "storm_id": storm_id,
+            "advisory": advisory_num,
+            "timestep": str(timestep),
+            "max_depth_m": f"{max_depth:.3f}",
+            "reaches_flooded": str(reaches_flooded),
+        },
     )
-
-    with rasterio.open(output_path, "w", **out_profile) as dst:
-        dst.write(flood_depth.astype(np.float32), 1)
-        dst.update_tags(
-            model="hand",
-            storm_id=storm_id,
-            advisory=advisory_num,
-            timestep=str(timestep),
-            max_depth_m=f"{max_depth:.3f}",
-            reaches_flooded=str(reaches_flooded),
-        )
 
     return HANDResult(
         depth_path=output_path,

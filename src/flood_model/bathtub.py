@@ -29,6 +29,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from flood_model.raster_utils import read_raster, write_raster
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,18 +79,18 @@ def run_bathtub_model(
     os.makedirs(output_dir, exist_ok=True)
 
     # Read DEM
-    with rasterio.open(dem_path) as dem_src:
-        dem_data = dem_src.read(1)
-        dem_profile = dem_src.profile.copy()
-        dem_nodata = dem_src.nodata or -9999
-        dem_transform = dem_src.transform
-        dem_crs = dem_src.crs
-        dem_bounds = dem_src.bounds
+    _dem = read_raster(dem_path)
+    dem_data = _dem.data
+    dem_profile = _dem.profile
+    dem_nodata = _dem.nodata
+    dem_transform = _dem.transform
+    dem_crs = _dem.crs          # str, e.g. "EPSG:4326"
+    dem_bounds = _dem.bounds
 
     # Read surge raster — may need reprojection/resampling to match DEM
     with rasterio.open(surge_path) as surge_src:
         if (
-            surge_src.crs != dem_crs
+            str(surge_src.crs) != dem_crs
             or surge_src.transform != dem_transform
             or surge_src.shape != dem_data.shape
         ):
@@ -144,23 +146,18 @@ def run_bathtub_model(
         output_dir, f"depth_surge_{storm_id}_{advisory_num}.tif"
     )
 
-    out_profile = dem_profile.copy()
-    out_profile.update(
-        dtype="float32",
-        nodata=-9999,
-        compress="deflate",
-        predictor=3,  # floating point predictor
+    write_raster(
+        output_path,
+        flood_depth,
+        dem_profile,
+        tags={
+            "model": "bathtub",
+            "storm_id": storm_id,
+            "advisory": advisory_num,
+            "max_depth_m": f"{max_depth:.3f}",
+            "flooded_pct": f"{flooded_pct:.2f}",
+        },
     )
-
-    with rasterio.open(output_path, "w", **out_profile) as dst:
-        dst.write(flood_depth.astype(np.float32), 1)
-        dst.update_tags(
-            model="bathtub",
-            storm_id=storm_id,
-            advisory=advisory_num,
-            max_depth_m=f"{max_depth:.3f}",
-            flooded_pct=f"{flooded_pct:.2f}",
-        )
 
     return BathtubResult(
         depth_path=output_path,
@@ -172,6 +169,6 @@ def run_bathtub_model(
             dem_bounds.left, dem_bounds.bottom,
             dem_bounds.right, dem_bounds.top,
         ),
-        crs=str(dem_crs),
+        crs=dem_crs,
         resolution=dem_transform.a,
     )

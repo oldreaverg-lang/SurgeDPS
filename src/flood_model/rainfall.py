@@ -38,6 +38,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from flood_model.raster_utils import write_raster
+
 logger = logging.getLogger(__name__)
 
 
@@ -362,9 +364,8 @@ def estimate_rainfall_flooding(
     Returns:
         RainfallEstimate with raster paths and statistics
     """
-    # Lazy import: only require rasterio if actually generating rasters
+    # Lazy import: only require rasterio.transform for the Affine constructor
     try:
-        import rasterio
         from rasterio.transform import Affine
     except ImportError:
         raise ImportError(
@@ -449,35 +450,36 @@ def estimate_rainfall_flooding(
         max_lat,                  # y-coordinate of upper-left corner
     )
 
+    # ── Base profile shared by both output rasters ────────────
+    # write_raster fills in dtype/nodata/compress/predictor from its defaults
+    base_profile = {
+        "driver": "GTiff",
+        "width": n_cols,
+        "height": n_rows,
+        "count": 1,
+        "crs": "EPSG:4326",  # WGS84
+        "transform": transform,
+    }
+
     # ── Write Total Precipitation Raster ──────────────────────
     precip_path = os.path.join(
         output_dir,
         f"precip_{storm_id}.tif",
     )
 
-    precip_profile = {
-        "driver": "GTiff",
-        "dtype": "float32",
-        "nodata": -9999,
-        "width": n_cols,
-        "height": n_rows,
-        "count": 1,
-        "crs": "EPSG:4326",  # WGS84
-        "transform": transform,
-        "compress": "deflate",
-        "predictor": 3,
-    }
-
-    with rasterio.open(precip_path, "w", **precip_profile) as dst:
-        dst.write(total_precip_mm.astype(np.float32), 1)
-        dst.update_tags(
-            model="rainfall_parametric",
-            storm_id=storm_id,
-            max_wind_kt=f"{max_wind_kt:.1f}",
-            storm_speed_kt=f"{storm_speed_kt:.1f}",
-            duration_hr=f"{duration_hr:.1f}",
-            max_precip_mm=f"{np.nanmax(total_precip_mm):.1f}",
-        )
+    write_raster(
+        precip_path,
+        total_precip_mm,
+        base_profile,
+        tags={
+            "model": "rainfall_parametric",
+            "storm_id": storm_id,
+            "max_wind_kt": f"{max_wind_kt:.1f}",
+            "storm_speed_kt": f"{storm_speed_kt:.1f}",
+            "duration_hr": f"{duration_hr:.1f}",
+            "max_precip_mm": f"{np.nanmax(total_precip_mm):.1f}",
+        },
+    )
 
     # ── Write Flood Depth Raster ───────────────────────────────
     depth_path = os.path.join(
@@ -485,20 +487,20 @@ def estimate_rainfall_flooding(
         f"depth_rainfall_{storm_id}.tif",
     )
 
-    depth_profile = precip_profile.copy()
-    depth_profile.update(nodata=-9999)
-
-    with rasterio.open(depth_path, "w", **depth_profile) as dst:
-        dst.write(flood_depth_m.astype(np.float32), 1)
-        dst.update_tags(
-            model="rainfall_parametric",
-            storm_id=storm_id,
-            max_wind_kt=f"{max_wind_kt:.1f}",
-            storm_speed_kt=f"{storm_speed_kt:.1f}",
-            runoff_coefficient=f"{runoff_coefficient:.2f}",
-            ponding_factor="0.30",
-            max_depth_m=f"{np.nanmax(flood_depth_m):.3f}",
-        )
+    write_raster(
+        depth_path,
+        flood_depth_m,
+        base_profile,
+        tags={
+            "model": "rainfall_parametric",
+            "storm_id": storm_id,
+            "max_wind_kt": f"{max_wind_kt:.1f}",
+            "storm_speed_kt": f"{storm_speed_kt:.1f}",
+            "runoff_coefficient": f"{runoff_coefficient:.2f}",
+            "ponding_factor": "0.30",
+            "max_depth_m": f"{np.nanmax(flood_depth_m):.3f}",
+        },
+    )
 
     # ── Compute Statistics ─────────────────────────────────────
     flooded = flood_depth_m > min_depth_m
