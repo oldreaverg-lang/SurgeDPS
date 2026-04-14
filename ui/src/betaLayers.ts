@@ -60,7 +60,7 @@ export async function fetchRainfallOverlay(
   passLevel = 2,
 ): Promise<RainfallOverlay> {
   try {
-    const url = `/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
+    const url = `/surgedps/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
     const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (!resp.ok) {
       const text = await resp.text().catch(() => resp.statusText);
@@ -118,7 +118,7 @@ export type QPFOverlay = {
 
 export async function fetchQPFOverlay(_stormId: string): Promise<QPFOverlay> {
   try {
-    const resp = await fetch('/api/qpf', { signal: AbortSignal.timeout(30_000) });
+    const resp = await fetch('/surgedps/api/qpf', { signal: AbortSignal.timeout(30_000) });
     if (!resp.ok) {
       const text = await resp.text().catch(() => resp.statusText);
       return {
@@ -166,7 +166,7 @@ export async function fetchCompoundOverlay(
   _stormId: string,
 ): Promise<CompoundOverlay> {
   try {
-    const resp = await fetch('/api/compound', {
+    const resp = await fetch('/surgedps/api/compound', {
       signal: AbortSignal.timeout(20_000),
     });
     if (!resp.ok) {
@@ -307,7 +307,7 @@ export async function fetchShelterCapacity(
   radiusKm = 200,
 ): Promise<ShelterCapacityLayer> {
   try {
-    const resp = await fetch(`/api/shelters?radius_km=${radiusKm}`, {
+    const resp = await fetch(`/surgedps/api/shelters?radius_km=${radiusKm}`, {
       signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
@@ -377,7 +377,7 @@ export async function fetchVendorCoverage(
   _stormId: string,
 ): Promise<VendorCoverageLayer> {
   try {
-    const resp = await fetch('/api/vendor_coverage', {
+    const resp = await fetch('/surgedps/api/vendor_coverage', {
       signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
@@ -460,7 +460,7 @@ export async function fetchTimeToAccess(
     const qs = coords
       ? `ranks=${encodeURIComponent(ranks)}&coords=${encodeURIComponent(coords)}`
       : `ranks=${encodeURIComponent(ranks)}`;
-    const resp = await fetch(`/api/time_to_access?${qs}`, {
+    const resp = await fetch(`/surgedps/api/time_to_access?${qs}`, {
       signal: AbortSignal.timeout(30_000),
     });
     if (!resp.ok) {

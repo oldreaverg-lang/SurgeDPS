@@ -533,7 +533,16 @@ function estimateWindMph(distKm: number, maxWindKt: number, category: number): n
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Peril attribution model — splits damage potential into three
 // components: wind, surge, and rainfall.
-//   • Wind potential: 0 below 74 mph, cubic ramp to 1.0 at 180 mph
+//
+//   • Wind potential: onset at 50 mph (strong TS / HAZUS initiation threshold),
+//     ramps with x^1.5 curve to 1.0 at 180 mph.  Onset was previously 74 mph
+//     (Cat 1) which incorrectly zeroed wind attribution at 72 mph even when
+//     satellite imagery shows all trees blown over.
+//     HAZUS-MH wind damage initiation for typical Gulf Coast wood-frame:
+//     ~55-60 mph.  Backend depth_damage.py uses 60 mph (27 m/s at resilience
+//     0.60).  50 mph matches the FEMA "damaging wind" onset threshold for
+//     older / more vulnerable structures and ensures near-Cat-1 storms get
+//     meaningful wind attribution.
 //   • Surge potential: linear in interior surge depth, 0–8 ft
 //   • Rain  potential: linear in per-building rainfall depth, 0–8 ft
 // Returns { windPct, surgePct, rainPct, waterPct } with waterPct
@@ -545,7 +554,9 @@ function perilSplit(
   interiorSurgeFt: number,
   rainfallFt: number = 0,
 ): { windPct: number; waterPct: number; surgePct: number; rainPct: number } {
-  const windNorm = Math.max(0, (windMph - 74) / (180 - 74));
+  // 50 mph onset: aligns with HAZUS-MH initiation & backend depth_damage.py.
+  // Previously 74 mph caused 0% wind attribution just 2 mph below Cat 1.
+  const windNorm = Math.max(0, (windMph - 50) / (180 - 50));
   const windPotential  = Math.min(1, windNorm ** 1.5);
   const surgePotential = Math.min(1, Math.max(0, interiorSurgeFt / 8));
   const rainPotential  = Math.min(1, Math.max(0, rainfallFt      / 8));
@@ -4740,11 +4751,18 @@ ${fieldFlag ? `
                       : { count: 0, avgLoss: 0, minLoss: 0, maxLoss: 0 };
 
                     // ── Wind vs Water Attribution ──
+                    // Prefer the backend-computed wind speed (full asymmetric Holland model
+                    // in wind_field.py) stored on the building as p.wind_speed_mph.
+                    // Fall back to the simplified Rankine estimate when not present.
                     let wwSplit: { windPct: number; waterPct: number } | null = null;
                     let estWindMph: number | null = null;
                     if (activeStorm) {
-                      const distKm = haversineKm(popupInfo.lat, popupInfo.lng, activeStorm.landfall_lat, activeStorm.landfall_lon);
-                      estWindMph = Math.round(estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category));
+                      if (p.wind_speed_mph != null && Number(p.wind_speed_mph) > 0) {
+                        estWindMph = Math.round(Number(p.wind_speed_mph));
+                      } else {
+                        const distKm = haversineKm(popupInfo.lat, popupInfo.lng, activeStorm.landfall_lat, activeStorm.landfall_lon);
+                        estWindMph = Math.round(estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category));
+                      }
                       const floodForWind = interiorFt != null ? interiorFt : (depthFt != null ? Math.max(0, depthFt - 1) : 0); // fallback: assume 1ft foundation
                       wwSplit = windWaterSplit(estWindMph, floodForWind);
                     }

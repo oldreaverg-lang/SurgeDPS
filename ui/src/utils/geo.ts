@@ -77,13 +77,20 @@ export function estimateWindMph(
 /**
  * Split damage potential into wind / surge / rainfall components.
  * Returns `{ windPct, waterPct, surgePct, rainPct }` summing to 100.
+ *
+ * Wind onset threshold: 50 mph (HAZUS damaging-wind initiation for vulnerable
+ * structures).  The previous 74 mph threshold (Cat 1 minimum) incorrectly
+ * returned 0% wind attribution at e.g. 72 mph even when satellite imagery
+ * shows complete tree knockdown — a clear wind-damage signature.
+ * The backend depth_damage.py uses ~60 mph for typical Gulf Coast construction
+ * (resilience=0.60 → v_threshold = 27 m/s); 50 mph covers older stock.
  */
 export function perilSplit(
   windMph: number,
   interiorSurgeFt: number,
   rainfallFt: number = 0,
 ): { windPct: number; waterPct: number; surgePct: number; rainPct: number } {
-  const windNorm     = Math.max(0, (windMph - 74) / (180 - 74));
+  const windNorm     = Math.max(0, (windMph - 50) / (180 - 50));
   const windPotential  = Math.min(1, windNorm ** 1.5);
   const surgePotential = Math.min(1, Math.max(0, interiorSurgeFt / 8));
   const rainPotential  = Math.min(1, Math.max(0, rainfallFt      / 8));

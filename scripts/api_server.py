@@ -1023,6 +1023,11 @@ class CellHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip('/')
+        # Strip the /surgedps mount prefix when the server is deployed behind a
+        # reverse proxy (Railway, Nginx) that forwards /surgedps/api/* as-is.
+        # In Vite dev the proxy now rewrites this itself, but production may not.
+        if path.startswith('/surgedps'):
+            path = path[len('/surgedps'):]
         params = parse_qs(parsed.query)
 
         # ── Private validation namespace (token-gated, not linked from UI)
