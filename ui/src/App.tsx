@@ -2077,14 +2077,26 @@ function App() {
   }, []);
 
   // ── FEMA NFHL flood zone fetch ──
-  // Queries FEMA's National Flood Hazard Layer FeatureServer (layer 28 = Flood Hazard Zones)
-  // for the current map view. Returns GeoJSON with FLD_ZONE attribute used for color-coding.
+  // Queries FEMA's National Flood Hazard Layer MapServer (layer 28 = Flood
+  // Hazard Zones) for the current map view. Returns GeoJSON with FLD_ZONE
+  // attribute used for color-coding.
+  //
+  // Notes on the endpoint: FEMA deprecated the old `/gis/nfhl/rest/...
+  // /FeatureServer/28` path (now 404). The current public endpoint is
+  // `/arcgis/rest/services/public/NFHL/MapServer/28`, and it only accepts
+  // `f=geojson` when `geometry` is encoded as a JSON envelope object, not
+  // as a comma-separated bbox string (the comma form errors with HTTP 400).
   const fetchFloodZones = useCallback((bounds: { west: number; south: number; east: number; north: number }) => {
     if (floodZonesFetchTimer.current) clearTimeout(floodZonesFetchTimer.current);
     floodZonesFetchTimer.current = setTimeout(async () => {
       const { west, south, east, north } = bounds;
+      const envelope = JSON.stringify({
+        xmin: west, ymin: south, xmax: east, ymax: north,
+        spatialReference: { wkid: 4326 },
+      });
       const params = new URLSearchParams({
-        geometry: `${west},${south},${east},${north}`,
+        where: '1=1',
+        geometry: envelope,
         geometryType: 'esriGeometryEnvelope',
         inSR: '4326',
         outSR: '4326',
@@ -2094,7 +2106,7 @@ function App() {
         resultRecordCount: '2000',
         f: 'geojson',
       });
-      const url = `https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/FeatureServer/28/query?${params}`;
+      const url = `https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?${params}`;
       setFloodZonesLoading(true);
       setFloodZonesError(null);
       const ac = new AbortController();
