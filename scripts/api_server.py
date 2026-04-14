@@ -715,10 +715,13 @@ def load_cell(col: int, row: int) -> dict:
     #    Keep: damage.geojson, flood.geojson (required for cache hits);
     #          compound.tif (required for the /api/compound_tile map overlay —
     #          we stitch all per-cell compound tifs into a storm-wide mosaic
-    #          on first tile request, so the individual cell files stay).
-    #    Remove: surge depth.tif, rainfall.tif, buildings.json, fluvial.tif
-    for tmp in (raster_path, buildings_path, rainfall_raster_path,
-                _fluvial_raster_path):
+    #          on first tile request, so the individual cell files stay);
+    #          depth.tif (surge raster) + buildings.json — both are required
+    #          by peril_timeseries to generate the ticks bundle lazily on the
+    #          first /api/cell_ticks request.  They're small (~1–2 MB/cell)
+    #          and keeping them is cheaper than re-running the full pipeline.
+    #    Remove: rainfall.tif, fluvial.tif (neither is needed post-merge)
+    for tmp in (rainfall_raster_path, _fluvial_raster_path):
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -1179,13 +1182,74 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, str(e))
             return
 
-        # ── GET /api/cell_ticks?col=N&row=N ── time-series peril bundle
-        # Ticks generation is deferred — not produced by the activate hot
-        # path (would exceed frontend's 5-min timeout). Returns 404 until
-        # the lazy-generation path or background job is wired in. Frontend
-        # handles 404 gracefully (slider stays hidden).
+        # ── GET /api/cell_ticks?col=N&row=N&storm_id=X ──
+        # Time-series peril bundle: per-building HAZUS at every tick hour
+        # (default 0,3,6…72 h) for surge-only, rainfall-only, and cumulative
+        # perils. Generated lazily on first request so the activate hot-path
+        # stays fast. Requires depth.tif + buildings.json to be on disk
+        # (kept from cell load; see cleanup section in load_cell). Returns 404
+        # for pre-pipeline legacy cells that never wrote those files.
         if path == '/api/cell_ticks':
-            self._send_error(404, 'No ticks bundle for this cell yet')
+            if _active_storm is None:
+                self._send_error(400, 'No storm active'); return
+            try:
+                col = int((params.get('col') or [''])[0])
+                row = int((params.get('row') or [''])[0])
+                if not (-500 < col < 500 and -500 < row < 500):
+                    self._send_error(400, 'col/row out of range'); return
+            except (ValueError, TypeError):
+                self._send_error(400, 'col and row must be integers'); return
+            # storm_id param is optional; if supplied it must match active storm
+            sid_param = (params.get('storm_id') or [''])[0]
+            if sid_param and sid_param != _active_storm.storm_id:
+                self._send_error(404, f"Storm '{sid_param}' not active"); return
+            try:
+                sdir = _storm_cache_dir(_active_storm)
+                ticks_path = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
+                depth_path  = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
+                bldgs_path  = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
+                damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
+
+                # Serve cached bundle immediately if available.
+                if os.path.exists(ticks_path):
+                    with open(ticks_path) as _tf:
+                        bundle = json.load(_tf)
+                    self._send_json(200, bundle, cache_seconds=3600)
+                    return
+
+                # Both rasters must exist to generate; return 404 for legacy cells.
+                if not os.path.exists(depth_path) or not os.path.exists(bldgs_path):
+                    self._send_error(404, (
+                        'No ticks data for this cell. Either the cell was loaded '
+                        'before the peril-timeseries pipeline shipped, or depth/buildings '
+                        'files were not retained. Re-load the cell to regenerate.'
+                    ))
+                    return
+
+                # Lazy generation — runs synchronously (frontend fetches async).
+                from damage_model.peril_timeseries import (
+                    estimate_damage_timeseries_from_raster as _run_ts,
+                )
+                _run_ts(
+                    depth_raster_path=depth_path,
+                    buildings_geojson_path=bldgs_path,
+                    ticks_output_path=ticks_path,
+                    final_geojson_path=damage_path,  # keeps _damage.geojson current
+                    storm_id=_active_storm.storm_id,
+                    landfall_lat=_active_storm.landfall_lat,
+                    landfall_lon=_active_storm.landfall_lon,
+                    max_wind_kt=_active_storm.max_wind_kt,
+                    storm_speed_kt=_active_storm.speed_kt,
+                    storm_heading_deg=_active_storm.heading_deg,
+                )
+                if not os.path.exists(ticks_path):
+                    self._send_error(500, 'Ticks generation produced no output'); return
+                with open(ticks_path) as _tf:
+                    bundle = json.load(_tf)
+                self._send_json(200, bundle, cache_seconds=3600)
+            except Exception as e:
+                print(f'[cell_ticks] error col={col} row={row}: {e}')
+                self._send_error(500, f'cell_ticks error: {e}')
             return
 
         # ── GET /api/progress ── poll current processing step
@@ -2160,8 +2224,9 @@ class CellHandler(BaseHTTPRequestHandler):
             # the data was cached, so the next request will be fast.
             pass
 
-    def _send_json(self, code, data):
-        self._send_raw(code, json.dumps(data).encode())
+    def _send_json(self, code, data, cache_seconds: int | None = None):
+        cc = f'public, max-age={cache_seconds}' if cache_seconds else None
+        self._send_raw(code, json.dumps(data).encode(), cache_control=cc)
 
     def _send_error(self, code, message):
         self._send_json(code, {'error': message})

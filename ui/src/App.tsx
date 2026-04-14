@@ -1975,10 +1975,45 @@ function App() {
   const [tickHours, setTickHours] = useState<number[]>([]);
   const buildingTicksRef = useRef<Record<string, TickRow[]>>({});
   const [buildingTicksVersion, setBuildingTicksVersion] = useState(0);
-  // `noUnusedLocals` guard — these are consumed by the slider + peril toggle
-  // UI added in a follow-up commit. Referenced here so strict TS is happy.
-  void peril; void setPeril; void tickIdx; void setTickIdx;
-  void tickHours; void buildingTicksVersion;
+
+  // ── Tick-driven building overlay ─────────────────────────────────────────
+  // Maps state codes returned by peril_timeseries to the damage_category
+  // strings the building paint expression already knows about.
+  const STATE_TO_CAT: Record<string, string> = {
+    no: 'none', mi: 'minor', mo: 'moderate', mj: 'major', sv: 'severe',
+  };
+  // Peril column offsets within a TickRow:
+  //   [s_ft, r_ft, c_ft, s_state, r_state, c_state, s_loss, r_loss, c_loss]
+  const PERIL_OFFSET: Record<PerilKey, [number, number, number]> = {
+    surge:      [0, 3, 6],
+    rainfall:   [1, 4, 7],
+    cumulative: [2, 5, 8],
+  };
+  // When tickIdx === -1 use allBuildings as-is (no override).
+  // When a tick is selected, derive a new feature array from the tick data.
+  const displayBuildings = useMemo(() => {
+    if (!allBuildings || tickIdx < 0 || tickHours.length === 0) return allBuildings;
+    const [ftOff, stOff, lossOff] = PERIL_OFFSET[peril];
+    const features = (allBuildings as any).features.map((f: any) => {
+      const ticks = buildingTicksRef.current[String(f.properties?.id ?? f.properties?.building_id)];
+      if (!ticks || ticks.length === 0) return f;
+      const safeIdx = Math.min(tickIdx, ticks.length - 1);
+      const row = ticks[safeIdx];
+      const depthFt = row[ftOff] as number;
+      const cat = STATE_TO_CAT[row[stOff] as string] ?? 'none';
+      const loss = row[lossOff] as number;
+      return {
+        ...f,
+        properties: {
+          ...f.properties,
+          depth_ft: depthFt,
+          damage_category: cat,
+          estimated_loss_usd: loss,
+        },
+      };
+    });
+    return { ...(allBuildings as any), features };
+  }, [allBuildings, tickIdx, peril, buildingTicksVersion, tickHours.length]);
   const [showCounties, setShowCounties] = useState(false);
   const [countiesGeoJSON, setCountiesGeoJSON] = useState<any>(null);
   const [countiesLoading, setCountiesLoading] = useState(false);
@@ -3133,6 +3168,10 @@ ${fieldFlag ? `
     setLoadedCells(new Set()); setLoadingCells(new Set());
     setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
     setPinnedInfo(null);
+    // Reset tick slider so stale tick data from a previous storm doesn't
+    // appear on the new one while bundles are still being fetched.
+    setTickIdx(-1); setTickHours([]); setPeril('cumulative');
+    buildingTicksRef.current = {};
     setConfidence({ level: 'unvalidated', count: 0 });
     setEli({ value: 0, tier: 'unavailable' });
     setValidatedDps({ value: 0, adj: 0, reason: '' });
@@ -4184,7 +4223,7 @@ ${fieldFlag ? `
           {allFlood && <Source id="flood-data" type="geojson" data={allFlood} tolerance={0.5}><Layer {...(floodLayerStyle as any)} /></Source>}
 
           {allBuildings && mapView === 'damage' && (
-            <Source id="damage-data" type="geojson" data={allBuildings}
+            <Source id="damage-data" type="geojson" data={displayBuildings ?? allBuildings}
               cluster={true} clusterMaxZoom={14} clusterRadius={50}
               clusterProperties={{ total_loss: ['+', ['get', 'estimated_loss_usd']] }}
             >
@@ -4960,6 +4999,7 @@ ${fieldFlag ? `
           setBatchResults([]); setBatchOpen(false); setAddressQuery(''); setAddressError(''); setMethodologyOpen(false);
           setShowCounties(false); setShowFloodZones(false); setShowLandUse(false); setShowGauges(false); setShowShelters(false); setHazardView('surge'); setBuildingFlags({});
           setSimMode(false); setSimResult(null); setForecastCone(null); setForecastTrack([]);
+          setTickIdx(-1); setTickHours([]); setPeril('cumulative'); buildingTicksRef.current = {};
         }} />
 
         {/* ── Simulator panel (active storms with forecast track) ── */}
@@ -5486,6 +5526,48 @@ ${fieldFlag ? `
                   </div>
                 </div>
               )}
+            </div>
+          )}
+          {/* ── Peril timeline slider ────────────────────────────────────────
+               Shown once the first ticks bundle arrives from /api/cell_ticks.
+               Lets the EM scrub through the 0–72 h tick schedule to see how
+               damage accumulates across surge-only, rainfall-only, and
+               cumulative perils. tickIdx = -1 always means "latest" (the
+               static peak-state damage.geojson, with no tick override). */}
+          {tickHours.length > 0 && allBuildings && (
+            <div className="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-gray-200 px-3 py-2 text-[11px] text-gray-700 max-w-[240px]">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="font-semibold text-gray-900">📅 Damage Timeline</span>
+                <button
+                  onClick={() => setTickIdx(-1)}
+                  className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${tickIdx === -1 ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 border border-gray-300'}`}
+                >Latest</button>
+              </div>
+              {/* Peril selector */}
+              <div className="flex rounded overflow-hidden border border-gray-300 mb-2 text-[10px]">
+                {(['surge', 'rainfall', 'cumulative'] as PerilKey[]).map(p => (
+                  <button key={p}
+                    onClick={() => { setPeril(p); if (tickIdx < 0) setTickIdx(0); }}
+                    className={`flex-1 py-0.5 font-medium transition-colors ${peril === p && tickIdx >= 0 ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >{p === 'surge' ? '🌊' : p === 'rainfall' ? '🌧️' : '💧'} {p[0].toUpperCase() + p.slice(1)}</button>
+                ))}
+              </div>
+              {/* Timeline scrubber */}
+              <input
+                type="range"
+                min={0}
+                max={tickHours.length - 1}
+                value={tickIdx < 0 ? tickHours.length - 1 : tickIdx}
+                onChange={e => setTickIdx(Number(e.target.value))}
+                className="w-full accent-indigo-600"
+              />
+              <div className="flex justify-between text-[10px] text-gray-500 mt-0.5">
+                <span>T+{tickHours[0]}h</span>
+                <span className="font-medium text-gray-800">
+                  {tickIdx >= 0 ? `T+${tickHours[Math.min(tickIdx, tickHours.length - 1)]}h` : 'Peak state'}
+                </span>
+                <span>T+{tickHours[tickHours.length - 1]}h</span>
+              </div>
             </div>
           )}
           <div className="flex bg-white/90 backdrop-blur rounded-lg shadow-lg border border-gray-200 overflow-hidden">
