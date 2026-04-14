@@ -2408,7 +2408,11 @@ class CellHandler(BaseHTTPRequestHandler):
                 # correctly land in "medium" rather than "high" — at 10 kt a TC
                 # is still within NHC's "slow-moving" definition and WPC QPF
                 # is known to underestimate rainfall for such storms.
-                _spd = getattr(_active_storm, 'speed_kt', 10.0) or 10.0
+                # NOTE: don't use `or 10.0` — a real 0 kt (stationary) storm
+                # would be coerced to 10 kt "fast-moving" reliability, exactly
+                # the opposite of reality. Only swap in 10 for missing (None).
+                _spd_raw = getattr(_active_storm, 'speed_kt', None)
+                _spd = 10.0 if _spd_raw is None else float(_spd_raw)
                 if _spd < 5:
                     caveat = ("WPC QPF unreliable for nearly-stationary storms — "
                               "use MRMS observed QPE instead")
@@ -2439,20 +2443,33 @@ class CellHandler(BaseHTTPRequestHandler):
                             f"/api/qpf_tile/{{z}}/{{x}}/{{y}}.png"
                             f"?storm_id={_active_storm.storm_id}"
                         )
+                    # Honour the provenance flag set by the fetcher — don't
+                    # hard-label synthetic fallbacks as 'wpc_qpf_72hr' to the UI.
+                    _result_src = getattr(qpf_result, 'source', 'wpc')
+                    _source_label = 'wpc_qpf_72hr' if _result_src == 'wpc' else f'synthetic_{_result_src}'
+                    if _result_src != 'wpc':
+                        caveat = ("WPC QPF unavailable — showing synthetic "
+                                  "Gaussian rainfall estimate only")
+                        reliability = 'synthetic'
                     _meta.update({
                         'duration_hr': 72,
                         'max_precip_mm': round(getattr(qpf_result, 'total_precip_mm', 0), 1),
                         'max_precip_in': round(getattr(qpf_result, 'total_precip_mm', 0) / 25.4, 2),
                         'tif_path': _qpf_tif,
                         'tile_url_template': _qpf_tile_tmpl,
-                        'source': 'wpc_qpf_72hr',
+                        'source': _source_label,
+                        'reliability': reliability,
+                        'caveat': caveat,
                     })
 
-                # Cache the response
+                # Cache the response — but only if we got real WPC data.
+                # Synthetic fallbacks shouldn't persist for 6 h; we want the
+                # next request to try WPC again in case the cycle landed.
                 try:
-                    with open(cache_meta, 'w') as _f:
-                        _out = {k: v for k, v in _meta.items() if k != 'fetched_at'}
-                        json.dump({**_out, 'fetched_at': _meta['fetched_at']}, _f)
+                    if _meta.get('source') == 'wpc_qpf_72hr':
+                        with open(cache_meta, 'w') as _f:
+                            _out = {k: v for k, v in _meta.items() if k != 'fetched_at'}
+                            json.dump({**_out, 'fetched_at': _meta['fetched_at']}, _f)
                 except Exception:
                     pass
 

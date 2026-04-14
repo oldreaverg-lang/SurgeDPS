@@ -67,6 +67,7 @@ class QPFData:
     duration_hours: int      # Accumulation period
     bounds: Tuple[float, float, float, float]
     crs: str
+    source: str = "wpc"      # "wpc" (real forecast) or "synthetic" (fallback)
     s3_key: Optional[str] = None
 
 
@@ -677,6 +678,7 @@ class QPFFetcher:
             ref_transform = None
             ref_profile: Optional[dict] = None
             ref_crs = None
+            tiles_summed = 0
 
             for gp in grib_paths:
                 with rasterio.open(gp) as src:
@@ -697,6 +699,7 @@ class QPFFetcher:
                         ref_transform = out_transform
                         ref_profile = src.profile.copy()
                         ref_crs = src.crs
+                        tiles_summed = 1
                     else:
                         if arr.shape != accumulator.shape:
                             logger.warning(
@@ -705,6 +708,19 @@ class QPFFetcher:
                             )
                             continue
                         accumulator = accumulator + arr
+                        tiles_summed += 1
+
+            # Correctness guard: if any tile was dropped mid-sum, the
+            # accumulator no longer represents the requested duration.
+            # Bail so the caller falls back to synthetic rather than
+            # returning a 48h sum labeled as 72h.
+            if tiles_summed != len(grib_paths):
+                logger.warning(
+                    "WPC QPF: only %d of %d tiles summed — bailing to avoid "
+                    "mislabeled partial accumulation",
+                    tiles_summed, len(grib_paths),
+                )
+                return None
 
             if accumulator is None or accumulator.size == 0 or min(accumulator.shape) == 0:
                 logger.info("WPC QPF: empty clip — storm bbox outside grid")
@@ -847,6 +863,7 @@ class QPFFetcher:
             duration_hours=duration_hours,
             bounds=bounds,
             crs="EPSG:4326",
+            source="synthetic",
         )
 
 
