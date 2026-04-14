@@ -1806,8 +1806,20 @@ class CellHandler(BaseHTTPRequestHandler):
                             })
                             return
                     except Exception as _param_err:
+                        import traceback as _tb
+                        _tb.print_exc()
                         print(f"[rainfall] Parametric fallback failed: {_param_err}")
-                    self._send_json(200, {'available': False, 'storm_id': _active_storm.storm_id})
+                        self._send_json(200, {
+                            'available': False,
+                            'storm_id': _active_storm.storm_id,
+                            '_debug': f'parametric_fallback_error: {type(_param_err).__name__}: {_param_err}'[:300],
+                        })
+                        return
+                    self._send_json(200, {
+                        'available': False,
+                        'storm_id': _active_storm.storm_id,
+                        '_debug': 'parametric_fallback_not_triggered',
+                    })
                     return
                 # Register the clipped GeoTIFF with the tile server so
                 # /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=… can find it.
