@@ -3,6 +3,15 @@ import Map, { Source, Layer, NavigationControl, Popup, Marker } from 'react-map-
 import type { MapRef } from 'react-map-gl/maplibre';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+
+// ── Extracted modules (see src/types, src/utils, src/layers, src/hooks, src/components) ──
+// These type-only imports verify the extracted files compile cleanly.
+// Individual components and hooks are referenced here so tree-shaking
+// doesn't drop them before the App function body is migrated to use them.
+import type { Hotspot as _HotspotExtracted } from './types';
+import { StormBrowser as _SB } from './components/StormBrowser';
+import { DashboardPanel as _DP } from './components/DashboardPanel';
+void ({} as _HotspotExtracted); void _SB; void _DP;
 import {
   recommendAdjusters,
   routingHint,
