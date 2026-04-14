@@ -178,8 +178,6 @@ function SourceLayers({ id, data, layers }: { id: string; data: any; layers: Lay
 }
 
 // Shared color constants used across multiple layer defs
-const _CAT_COLOR = ['match', ['get', 'damage_category'],
-  'severe', '#7f1d1d', 'major', '#ef4444', 'moderate', '#fb923c', 'minor', '#facc15', '#4ade80'] as any;
 const _GAUGE_COLOR = ['match', ['get', 'category'],
   'major', '#7f1d1d', 'moderate', '#ef4444', 'minor', '#fb923c', 'action', '#facc15', '#94a3b8'] as any;
 const _SHELTER_FILL_COLOR = ['case',
@@ -3505,8 +3503,13 @@ ${fieldFlag ? `
     if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
     progressIntervalRef.current = setInterval(async () => {
       try {
-        const p = await fetchJson<{ storm_id?: string; step?: string }>('/surgedps/api/progress');
-        if (p.storm_id === stormId && p.step) setLoadProgress(p);
+        const p = await fetchJson<{ storm_id?: string; step?: string; step_num?: number; total_steps?: number; elapsed?: number }>('/surgedps/api/progress');
+        if (p.storm_id === stormId && p.step) setLoadProgress({
+          step: p.step,
+          step_num: p.step_num ?? 0,
+          total_steps: p.total_steps ?? 4,
+          elapsed: p.elapsed ?? 0,
+        });
       } catch { /* ignore polling errors */ }
     }, 2000);
 
