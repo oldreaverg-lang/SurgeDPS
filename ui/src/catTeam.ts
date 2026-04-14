@@ -187,30 +187,60 @@ export function workloadSummary(counts: SeverityCounts): WorkloadSummary {
 // ───────────────────────────────────────────────────────────
 // §4a B2 — Peril mix aggregation helpers
 //
-// Aggregate a list of per-hotspot { windPct, waterPct, count } rows
-// into a single weighted split for the whole footprint.
+// Aggregate a list of per-hotspot rows into a single weighted
+// split for the whole footprint. Water is split into surge and
+// rainfall components when the upstream data has a per-building
+// rainfall_depth_ft field — otherwise surge absorbs all "water".
 // ───────────────────────────────────────────────────────────
-export type PerilMix = { windPct: number; waterPct: number };
+export type PerilMix = {
+  windPct: number;
+  waterPct: number;           // = surgePct + rainPct (back-compat)
+  surgePct: number;           // coastal surge component
+  rainPct: number;            // pluvial/fluvial rainfall component
+};
 
-export function aggregatePerilMix(
-  rows: Array<{ windPct: number; waterPct: number; weight: number }>,
-): PerilMix {
-  let w = 0, wWind = 0, wWater = 0;
+export type PerilRow = {
+  windPct: number;
+  waterPct: number;
+  surgePct?: number;          // optional — omit when rainfall split unavailable
+  rainPct?: number;
+  weight: number;
+};
+
+export function aggregatePerilMix(rows: PerilRow[]): PerilMix {
+  let w = 0, wWind = 0, wSurge = 0, wRain = 0;
+  let anyRainSignal = false;
   for (const r of rows) {
     if (r.weight <= 0) continue;
     w += r.weight;
-    wWind  += r.windPct  * r.weight;
-    wWater += r.waterPct * r.weight;
+    wWind  += r.windPct * r.weight;
+    if (r.surgePct != null && r.rainPct != null) {
+      anyRainSignal = true;
+      wSurge += r.surgePct * r.weight;
+      wRain  += r.rainPct  * r.weight;
+    } else {
+      // Treat all water as surge when rain signal is absent for this row.
+      wSurge += r.waterPct * r.weight;
+    }
   }
-  if (w === 0) return { windPct: 50, waterPct: 50 };
-  const windPct = Math.round(wWind / w);
-  return { windPct, waterPct: 100 - windPct };
+  if (w === 0) return { windPct: 50, waterPct: 50, surgePct: 50, rainPct: 0 };
+  const windPct  = Math.round(wWind  / w);
+  const surgePct = Math.round(wSurge / w);
+  // Preserve sum-to-100 even when anyRainSignal is false.
+  const rainPct  = anyRainSignal ? Math.max(0, 100 - windPct - surgePct) : 0;
+  const waterPct = 100 - windPct;
+  // Renormalize surge so wind + surge + rain = 100 exactly.
+  const normSurge = Math.max(0, waterPct - rainPct);
+  return { windPct, waterPct, surgePct: normSurge, rainPct };
 }
 
 export function perilHeadline(mix: PerilMix): string {
-  if (mix.waterPct >= 70) return `Water-dominant event (${mix.waterPct}% water / ${mix.windPct}% wind)`;
-  if (mix.windPct  >= 70) return `Wind-dominant event (${mix.windPct}% wind / ${mix.waterPct}% water)`;
-  return `Mixed peril event (${mix.windPct}% wind / ${mix.waterPct}% water)`;
+  const sr = mix.rainPct > 0
+    ? ` (surge ${mix.surgePct}% · rain ${mix.rainPct}%)`
+    : '';
+  if (mix.waterPct >= 70) return `Water-dominant event (${mix.waterPct}% water / ${mix.windPct}% wind)${sr}`;
+  if (mix.windPct  >= 70) return `Wind-dominant event (${mix.windPct}% wind / ${mix.waterPct}% water)${sr}`;
+  return `Mixed peril event (${mix.windPct}% wind / ${mix.waterPct}% water)${sr}`;
 }
 
 // ───────────────────────────────────────────────────────────
@@ -432,35 +462,54 @@ export type ShelterPosture = {
   classes: string;      // Tailwind utility classes for the pill
 };
 
-// E1 — Shelter-in-place vs evacuate indicator.
+// E1 — Shelter-in-place vs evacuate indicator (peril-dominant).
 //
-// Thresholds per CAT_TEAM_PLAN §6 E1:
-//   >= 6 ft surge → Evacuate
-//   3-6 ft surge  → Shelter in place (upper floors)
-//   < 3 ft surge  → Shelter in place
+// Life-safety rationale: vertical evacuation (shelter upper floors)
+// is a defensible tactic for *wind*-driven events on structures
+// rated for it. In *surge*, upper-floor shelter is actively unsafe
+// — modern CAT 3+ surge can overtop a second story and trap
+// occupants. So the threshold for EVACUATE depends on which peril
+// is driving the hazard at this location:
 //
-// The original plan also gated "evacuate" on critical facility
-// count > 0, but we don't currently track that per hotspot. For
-// v1 we drop the critical-facility multiplier and rely on depth
-// alone — erring on the side of recommending evacuation at the
-// highest-depth areas, which is the safer default.
-export function shelterPosture(maxDepthFt: number): ShelterPosture {
-  if (maxDepthFt >= 6) {
+//   Water-dominant (waterPct > windPct):
+//     >= 4 ft modeled flood → EVACUATE
+//     2-4 ft                → SHELTER UPPER FLOORS (still marginal)
+//     < 2 ft                → SHELTER IN PLACE
+//
+//   Wind-dominant:
+//     >= 6 ft               → EVACUATE (compound pressure + roof loss)
+//     3-6 ft                → SHELTER UPPER FLOORS
+//     < 3 ft                → SHELTER IN PLACE
+//
+//   No peril mix supplied (legacy callers):
+//     treat as wind-dominant (original thresholds — conservative
+//     for pure wind events, but callers should pass the mix when
+//     available).
+export function shelterPosture(
+  maxDepthFt: number,
+  perilMix?: { windPct: number; waterPct: number },
+): ShelterPosture {
+  const waterDominant = perilMix != null && perilMix.waterPct > perilMix.windPct;
+  const evacThreshold   = waterDominant ? 4 : 6;
+  const upperThreshold  = waterDominant ? 2 : 3;
+  const hazardLabel = waterDominant ? 'flood' : 'surge';
+
+  if (maxDepthFt >= evacThreshold) {
     return {
       level: 'evacuate',
       label: 'EVACUATE',
       short: 'Evacuate',
-      description: `Max modeled surge ~${Math.round(maxDepthFt)} ft — life-safety evacuation recommended`,
+      description: `Max modeled ${hazardLabel} ~${Math.round(maxDepthFt)} ft${waterDominant ? ' (water-dominant peril)' : ''} — life-safety evacuation recommended`,
       icon: '🚨',
       classes: 'bg-red-100 text-red-800 border border-red-300',
     };
   }
-  if (maxDepthFt >= 3) {
+  if (maxDepthFt >= upperThreshold) {
     return {
       level: 'shelter-upper',
       label: 'SHELTER UPPER FLOORS',
       short: 'Upper floors',
-      description: `Max modeled surge ~${Math.round(maxDepthFt)} ft — shelter on upper floors, avoid ground level`,
+      description: `Max modeled ${hazardLabel} ~${Math.round(maxDepthFt)} ft — shelter on upper floors, avoid ground level`,
       icon: '⚠️',
       classes: 'bg-amber-100 text-amber-800 border border-amber-300',
     };
@@ -469,18 +518,43 @@ export function shelterPosture(maxDepthFt: number): ShelterPosture {
     level: 'shelter-in-place',
     label: 'SHELTER IN PLACE',
     short: 'Shelter',
-    description: `Max modeled surge ~${Math.round(Math.max(0, maxDepthFt))} ft — shelter in place, monitor updates`,
+    description: `Max modeled ${hazardLabel} ~${Math.round(Math.max(0, maxDepthFt))} ft — shelter in place, monitor updates`,
     icon: '🏠',
     classes: 'bg-emerald-100 text-emerald-800 border border-emerald-300',
   };
 }
 
+// Severity ordering for posture comparisons.
+const _POSTURE_RANK: Record<ShelterLevel, number> = {
+  'shelter-in-place': 0,
+  'shelter-upper': 1,
+  'evacuate': 2,
+};
+
 // Aggregate shelter posture across an ordered list of hotspots —
-// returns the "worst" (most severe) posture, i.e. if *any* area
-// warrants evacuation the storm-wide posture is "evacuate".
-export function worstShelterPosture(maxDepthsFt: number[]): ShelterPosture {
-  const max = maxDepthsFt.length > 0 ? Math.max(...maxDepthsFt, 0) : 0;
-  return shelterPosture(max);
+// returns the "worst" (most severe) posture considering each
+// area's own peril mix. If *any* area warrants evacuation the
+// storm-wide posture is "evacuate".
+export function worstShelterPosture(
+  hotspots: Array<{ maxDepthFt: number; windPct?: number; waterPct?: number }> | number[],
+): ShelterPosture {
+  // Legacy call form: number[] of depths only.
+  if (hotspots.length > 0 && typeof hotspots[0] === 'number') {
+    const max = Math.max(...(hotspots as number[]), 0);
+    return shelterPosture(max);
+  }
+  const rows = hotspots as Array<{ maxDepthFt: number; windPct?: number; waterPct?: number }>;
+  let worst: ShelterPosture | null = null;
+  for (const h of rows) {
+    const mix = (h.windPct != null && h.waterPct != null)
+      ? { windPct: h.windPct, waterPct: h.waterPct }
+      : undefined;
+    const p = shelterPosture(h.maxDepthFt, mix);
+    if (!worst || _POSTURE_RANK[p.level] > _POSTURE_RANK[worst.level]) {
+      worst = p;
+    }
+  }
+  return worst ?? shelterPosture(0);
 }
 
 // ───────────────────────────────────────────────────────────
@@ -511,11 +585,21 @@ export type StagingPlan = {
 //   1 team per ~150 severely impacted residents requiring rescue.
 //   Teams are typically 6-person squads over a 12-hour op period.
 // Shelter beds: 1 bed per displaced resident + 10% buffer.
-// Generators: 1 per ~2 top priority areas (very rough — meant as
-//   a starting point, not a procurement number).
+// Generators: sized against actual ESF-12 practice. A major
+//   hurricane affecting 100k+ people typically sees 30-50
+//   FEMA/DoD mobile generators deployed for critical facilities
+//   (EOC, hospital, water treatment, pumping stations) plus
+//   shelter sites. We approximate:
+//     • per-area critical-facility backup (EOC + hospital + water)
+//     • per-shelter-cluster backup (one 500 kW class unit per
+//       ~5,000 shelter beds, assuming consolidation into large
+//       cluster shelters)
+//     • evacuate-level floor (>=10 to cover regional EOCs)
 const RESCUE_RESIDENTS_PER_TEAM = 150;
 const SHELTER_BUFFER = 1.10;
-const GENERATORS_PER_AREA = 0.5;
+const GENS_PER_PRIORITY_AREA = 1.5;     // EOC + hospital + water per priority area
+const GENS_PER_SHELTER_BEDS  = 5000;    // one large mobile gen per 5,000-bed shelter cluster
+const MIN_GENS_EVACUATE      = 10;      // floor when any area is on evac posture
 
 export function stagingPlan(
   hotspots: Array<{ rank: number; lat: number; lon: number; maxDepthFt: number; count: number; severity: SeverityCounts }>,
@@ -565,13 +649,21 @@ export function stagingPlan(
     ? Math.max(50, Math.round(shelterBedsRaw / 50) * 50)
     : 0;
 
-  // Generators — proportional to number of priority areas, min 1 if
-  // any area warrants evacuation.
+  // Generators — sized for critical facilities (EOC, hospital, water
+  // treatment per priority area) plus shelter-cluster backup. Uses
+  // each hotspot's own peril mix so worst-posture is correctly
+  // peril-dominant.
   const priorityAreaCount = hotspots.length;
-  const worstPosture = worstShelterPosture(hotspots.map(h => h.maxDepthFt));
-  const baseGens = Math.ceil(priorityAreaCount * GENERATORS_PER_AREA);
+  const worstPosture = worstShelterPosture(
+    hotspots.map(h => ({ maxDepthFt: h.maxDepthFt })),
+  );
+  const criticalFacilityGens = Math.ceil(priorityAreaCount * GENS_PER_PRIORITY_AREA);
+  const shelterGens = shelterBedsNeeded > 0
+    ? Math.ceil(shelterBedsNeeded / GENS_PER_SHELTER_BEDS)
+    : 0;
+  const baseGens = criticalFacilityGens + shelterGens;
   const generatorsRecommended = worstPosture.level === 'evacuate'
-    ? Math.max(2, baseGens)
+    ? Math.max(MIN_GENS_EVACUATE, baseGens)
     : Math.max(0, baseGens);
 
   // Staging area — pick the #1 hotspot and describe it by coord.
@@ -589,7 +681,10 @@ export function stagingPlan(
     notes.push(`${shelterBedsNeeded.toLocaleString()} shelter beds sized for ~${displacedPop.toLocaleString()} estimated displaced + ${Math.round((SHELTER_BUFFER - 1) * 100)}% buffer.`);
   }
   if (generatorsRecommended > 0) {
-    notes.push(`${generatorsRecommended} portable generator${generatorsRecommended === 1 ? '' : 's'} — stage at nearest unflooded EOC/hospital outside the surge footprint.`);
+    const breakdown = shelterGens > 0
+      ? ` (~${criticalFacilityGens} for EOC/hospital/water + ~${shelterGens} for shelter clusters)`
+      : '';
+    notes.push(`${generatorsRecommended} portable generator${generatorsRecommended === 1 ? '' : 's'}${breakdown} — stage at nearest unflooded EOC/hospital outside the surge footprint.`);
   }
   if (notes.length === 0) {
     notes.push('No staging needs computed — no significant uninhabitable damage in modeled areas.');

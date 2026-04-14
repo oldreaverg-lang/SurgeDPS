@@ -52,6 +52,43 @@ import type { CountyRollup, CityEntry } from './jurisdictions';
 })();
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Fetch helpers
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Fetch a JSON payload from `url`.
+ * Throws on non-2xx responses so callers can distinguish network
+ * errors from application-level errors with a single try/catch.
+ */
+async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const r = await fetch(url, options);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json() as Promise<T>;
+}
+
+/**
+ * Fetch a JSON array from `url`.
+ * Returns `[]` (and optionally calls `onError`) on any failure or
+ * when the response is not an array — so callers never need to
+ * guard `Array.isArray`.
+ */
+async function fetchJsonArray<T>(
+  url: string,
+  options?: RequestInit,
+  onError?: () => void,
+): Promise<T[]> {
+  try {
+    const data = await fetchJson<unknown>(url, options);
+    if (Array.isArray(data)) return data as T[];
+    onError?.();
+    return [];
+  } catch {
+    onError?.();
+    return [];
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Grid Constants
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const CELL_WIDTH = 0.4;
@@ -112,6 +149,237 @@ const floodLayerStyle = {
     'fill-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.35, 13, 0.3, 15, 0.15, 17, 0.08],
   },
 };
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Map layer definitions
+// Each static GeoJSON source is described as an array of
+// LayerDef objects so the JSX render section stays scannable.
+// Dynamic layers (county/city aggregate, damage clusters) that
+// switch paint at runtime based on mapView remain inline.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+interface LayerDef {
+  id: string;
+  type: 'fill' | 'line' | 'circle' | 'symbol' | 'raster';
+  paint?: Record<string, any>;
+  layout?: Record<string, any>;
+  filter?: any[];
+  minzoom?: number;
+  maxzoom?: number;
+}
+
+/** Renders a GeoJSON Source with a statically-defined layer stack. */
+function SourceLayers({ id, data, layers }: { id: string; data: any; layers: LayerDef[] }) {
+  return (
+    <Source id={id} type="geojson" data={data}>
+      {layers.map(({ id: lid, ...rest }) => <Layer key={lid} id={lid} {...(rest as any)} />)}
+    </Source>
+  );
+}
+
+// Shared color constants used across multiple layer defs
+const _CAT_COLOR = ['match', ['get', 'damage_category'],
+  'severe', '#7f1d1d', 'major', '#ef4444', 'moderate', '#fb923c', 'minor', '#facc15', '#4ade80'] as any;
+const _GAUGE_COLOR = ['match', ['get', 'category'],
+  'major', '#7f1d1d', 'moderate', '#ef4444', 'minor', '#fb923c', 'action', '#facc15', '#94a3b8'] as any;
+const _SHELTER_FILL_COLOR = ['case',
+  ['<', ['get', 'fullness'], 0], '#94a3b8',
+  ['<', ['get', 'fullness'], 0.6], '#16a34a',
+  ['<', ['get', 'fullness'], 0.9], '#f59e0b',
+  '#dc2626'] as any;
+
+const COUNTY_LAYERS: LayerDef[] = [
+  {
+    id: 'county-fill', type: 'fill',
+    paint: {
+      'fill-color': ['match', ['get', 'colorIdx'],
+        0, '#93c5fd', 1, '#a5b4fc', 2, '#c4b5fd', 3, '#d8b4fe',
+        4, '#f0abfc', 5, '#7dd3fc', 6, '#67e8f9', 7, '#5eead4',
+        '#cbd5e1'],
+      'fill-opacity': 0.32,
+    },
+  },
+  {
+    id: 'county-line', type: 'line',
+    paint: { 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.7 },
+  },
+  {
+    // Append " County" / " Parish" (Louisiana FIPS 22) so the label reads
+    // as a full jurisdiction name. Larger halo keeps it legible over the surge grid.
+    id: 'county-labels', type: 'symbol', minzoom: 6,
+    layout: {
+      'text-field': ['concat', ['get', 'NAME'],
+        ['case', ['==', ['get', 'STATE'], '22'], ' Parish', ' County']],
+      'text-font': ['Open Sans Semibold', 'Arial Unicode MS Regular'],
+      'text-size': ['interpolate', ['linear'], ['zoom'], 6, 11, 10, 15, 14, 18],
+      'text-anchor': 'center',
+      'text-max-width': 10,
+      'text-letter-spacing': 0.02,
+      'text-transform': 'uppercase',
+    },
+    paint: { 'text-color': '#ffffff', 'text-halo-color': '#0f172a', 'text-halo-width': 2, 'text-halo-blur': 0.5 },
+  },
+];
+
+const FEMA_LAYERS: LayerDef[] = [
+  {
+    // Color-coded by FEMA zone: VE/V = coastal high-hazard (red), AE/AO/AH/A = high-risk (orange),
+    // X = moderate/minimal (yellow), D/unknown = slate.
+    id: 'fema-zones-fill', type: 'fill',
+    paint: {
+      'fill-color': ['match', ['get', 'FLD_ZONE'],
+        ['VE', 'V'], '#dc2626',
+        ['AE', 'AO', 'AH', 'A'], '#f97316',
+        ['X'], '#facc15',
+        '#94a3b8'],
+      'fill-opacity': 0.30,
+    },
+  },
+  {
+    id: 'fema-zones-line', type: 'line',
+    paint: {
+      'line-color': ['match', ['get', 'FLD_ZONE'],
+        ['VE', 'V'], '#ef4444',
+        ['AE', 'AO', 'AH', 'A'], '#fb923c',
+        ['X'], '#fde047',
+        '#cbd5e1'],
+      'line-width': 1, 'line-opacity': 0.7,
+    },
+  },
+  {
+    id: 'fema-zones-labels', type: 'symbol', minzoom: 10,
+    layout: {
+      'text-field': ['get', 'FLD_ZONE'],
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      'text-size': 10, 'text-anchor': 'center',
+    },
+    paint: { 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1 },
+  },
+];
+
+const GAUGE_LAYERS: LayerDef[] = [
+  {
+    // Wide translucent halo — makes category color pop on both dark and satellite basemaps.
+    id: 'stream-gauges-halo', type: 'circle',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 8, 10, 14, 14, 20],
+      'circle-color': _GAUGE_COLOR, 'circle-opacity': 0.25, 'circle-stroke-width': 0,
+    },
+  },
+  {
+    id: 'stream-gauges-dot', type: 'circle',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 3, 10, 5, 14, 7],
+      'circle-color': _GAUGE_COLOR, 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5,
+    },
+  },
+  {
+    id: 'stream-gauges-label', type: 'symbol', minzoom: 9,
+    layout: {
+      'text-field': ['coalesce', ['get', 'name'], ['get', 'nws_lid'], ''],
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      'text-size': 10, 'text-anchor': 'top', 'text-offset': [0, 0.8], 'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#0f172a', 'text-halo-color': '#fff', 'text-halo-width': 1.5 },
+  },
+];
+
+const SHELTER_LAYERS: LayerDef[] = [
+  {
+    // Halo radius scales with capacity; color encodes fullness (green → amber → red).
+    // Unknown occupancy (fullness < 0) renders as slate.
+    id: 'shelter-markers-halo', type: 'circle',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['get', 'capacity'], 50, 8, 500, 18, 2000, 28],
+      'circle-color': _SHELTER_FILL_COLOR, 'circle-opacity': 0.25,
+    },
+  },
+  {
+    id: 'shelter-markers-dot', type: 'circle',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['get', 'capacity'], 50, 4, 500, 8, 2000, 12],
+      'circle-color': ['case',
+        ['<', ['get', 'fullness'], 0], '#f1f5f9',
+        ['<', ['get', 'fullness'], 0.6], '#16a34a',
+        ['<', ['get', 'fullness'], 0.9], '#f59e0b',
+        '#dc2626'],
+      'circle-stroke-color': '#0f172a', 'circle-stroke-width': 1.5,
+    },
+  },
+  {
+    id: 'shelter-markers-label', type: 'symbol', minzoom: 9,
+    layout: {
+      'text-field': ['get', 'name'],
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      'text-size': 10, 'text-anchor': 'top', 'text-offset': [0, 0.9], 'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#0f172a', 'text-halo-color': '#fff', 'text-halo-width': 1.5 },
+  },
+];
+
+const CRITICAL_FACILITY_LAYERS: LayerDef[] = [
+  {
+    // Hospitals=red, gov/emergency=gold, schools=blue, nursing=teal, churches=purple.
+    // MinZoom 15 keeps them hidden until the individual-building view to avoid clutter.
+    id: 'critical-icon-halos', type: 'circle', minzoom: 15,
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 10, 17, 14, 19, 20],
+      'circle-color': ['match', ['get', 'critical_icon'],
+        '➕', '#dc2626', '⭐', '#f59e0b', '🏫', '#2563eb',
+        '🛏️', '#0d9488', '⛪', '#7c3aed', '#475569'],
+      'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2, 'circle-opacity': 0.95,
+    },
+  },
+  {
+    id: 'critical-icons', type: 'symbol', minzoom: 15,
+    layout: {
+      'text-field': ['get', 'critical_icon'],
+      'text-size': ['interpolate', ['linear'], ['zoom'], 15, 12, 17, 18, 19, 24],
+      'text-allow-overlap': true, 'text-ignore-placement': true,
+      'symbol-sort-key': ['case',
+        ['==', ['get', 'critical_icon'], '➕'], 0,
+        ['==', ['get', 'critical_icon'], '⭐'], 1,
+        ['==', ['get', 'critical_icon'], '🏫'], 2,
+        ['==', ['get', 'critical_icon'], '🛏️'], 3,
+        ['==', ['get', 'critical_icon'], '⛪'], 4,
+        5],
+    },
+    paint: { 'text-color': '#ffffff', 'text-halo-color': 'rgba(0,0,0,0.5)', 'text-halo-width': 0.5 },
+  },
+];
+
+// Grid status layers: each status (available / loading / ready / loaded) gets its own
+// fill + border (+ label where appropriate) so MapLibre can filter them independently.
+const GRID_LAYERS: LayerDef[] = [
+  { id: 'grid-loaded-border',   type: 'line',   filter: ['==', ['get', 'status'], 'loaded'],
+    paint: { 'line-color': '#4ade80', 'line-width': 2, 'line-opacity': 0.6, 'line-dasharray': [4, 2] } },
+  { id: 'grid-available-fill',  type: 'fill',   filter: ['==', ['get', 'status'], 'available'],
+    paint: { 'fill-color': '#6366f1', 'fill-opacity': 0.05 } },
+  { id: 'grid-available-border',type: 'line',   filter: ['==', ['get', 'status'], 'available'],
+    paint: { 'line-color': '#a5b4fc', 'line-width': 1.5, 'line-opacity': 0.6, 'line-dasharray': [6, 3] } },
+  { id: 'grid-available-label', type: 'symbol', filter: ['==', ['get', 'status'], 'available'],
+    layout: { 'text-field': '+ Click to load', 'text-size': 13, 'text-font': ['Open Sans Semibold'] },
+    paint: { 'text-color': '#c7d2fe', 'text-opacity': 0.85, 'text-halo-color': '#000', 'text-halo-width': 1.2 } },
+  { id: 'grid-loading-fill',    type: 'fill',   filter: ['==', ['get', 'status'], 'loading'],
+    paint: { 'fill-color': '#facc15', 'fill-opacity': 0.1 } },
+  { id: 'grid-loading-border',  type: 'line',   filter: ['==', ['get', 'status'], 'loading'],
+    paint: { 'line-color': '#facc15', 'line-width': 2.5, 'line-opacity': 0.9 } },
+  { id: 'grid-loading-label',   type: 'symbol', filter: ['==', ['get', 'status'], 'loading'],
+    layout: { 'text-field': 'Loading...', 'text-size': 13, 'text-font': ['Open Sans Regular'] },
+    paint: { 'text-color': '#facc15', 'text-opacity': 0.9, 'text-halo-color': '#000', 'text-halo-width': 1 } },
+  { id: 'grid-ready-fill',      type: 'fill',   filter: ['==', ['get', 'status'], 'ready'],
+    paint: { 'fill-color': '#4ade80', 'fill-opacity': 0.06 } },
+  { id: 'grid-ready-border',    type: 'line',   filter: ['==', ['get', 'status'], 'ready'],
+    paint: { 'line-color': '#4ade80', 'line-width': 2, 'line-opacity': 0.7 } },
+  { id: 'grid-ready-label',     type: 'symbol', filter: ['==', ['get', 'status'], 'ready'],
+    layout: { 'text-field': 'Cached \u2713', 'text-size': 12, 'text-font': ['Open Sans Regular'] },
+    paint: { 'text-color': '#4ade80', 'text-opacity': 0.8, 'text-halo-color': '#000', 'text-halo-width': 1 } },
+];
+
+const FORECAST_CONE_LAYERS: LayerDef[] = [
+  { id: 'cone-fill',   type: 'fill', paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.12 } },
+  { id: 'cone-border', type: 'line', paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 0.5, 'line-dasharray': [4, 3] } },
+];
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Building Type Lookup (Hazus codes → human-readable)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -256,21 +524,41 @@ function estimateWindMph(distKm: number, maxWindKt: number, category: number): n
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Wind vs Water attribution model
-// Wind damage potential: 0 below 74 mph, ramps up via cubic curve
-// Water damage potential: proportional to interior flooding depth
-// Returns { windPct, waterPct } summing to 100
+// Peril attribution model — splits damage potential into three
+// components: wind, surge, and rainfall.
+//   • Wind potential: 0 below 74 mph, cubic ramp to 1.0 at 180 mph
+//   • Surge potential: linear in interior surge depth, 0–8 ft
+//   • Rain  potential: linear in per-building rainfall depth, 0–8 ft
+// Returns { windPct, surgePct, rainPct, waterPct } with waterPct
+// = surgePct + rainPct for back-compat with the 2-way routing/UI
+// paths that still consume windPct/waterPct.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function windWaterSplit(windMph: number, interiorFloodFt: number): { windPct: number; waterPct: number } {
-  // Wind damage potential: 0 at ≤74 mph, cubic ramp to 1.0 at 180 mph
+function perilSplit(
+  windMph: number,
+  interiorSurgeFt: number,
+  rainfallFt: number = 0,
+): { windPct: number; waterPct: number; surgePct: number; rainPct: number } {
   const windNorm = Math.max(0, (windMph - 74) / (180 - 74));
-  const windPotential = Math.min(1, windNorm ** 1.5);
-  // Water damage potential: 0 at ≤0 ft, linear ramp to 1.0 at 8 ft interior flood
-  const waterPotential = Math.min(1, Math.max(0, interiorFloodFt / 8));
-  const total = windPotential + waterPotential;
-  if (total < 0.001) return { windPct: 50, waterPct: 50 }; // no damage signal — even split
-  const windPct = Math.round((windPotential / total) * 100);
-  return { windPct, waterPct: 100 - windPct };
+  const windPotential  = Math.min(1, windNorm ** 1.5);
+  const surgePotential = Math.min(1, Math.max(0, interiorSurgeFt / 8));
+  const rainPotential  = Math.min(1, Math.max(0, rainfallFt      / 8));
+  const total = windPotential + surgePotential + rainPotential;
+  if (total < 0.001) {
+    // No damage signal — even split between wind and water, zero rain.
+    return { windPct: 50, waterPct: 50, surgePct: 50, rainPct: 0 };
+  }
+  const windPct  = Math.round((windPotential  / total) * 100);
+  const surgePct = Math.round((surgePotential / total) * 100);
+  // Force sum-to-100 by deriving rain from the remainder.
+  const rainPct  = Math.max(0, 100 - windPct - surgePct);
+  return { windPct, waterPct: 100 - windPct, surgePct, rainPct };
+}
+
+// Back-compat shim for the many call sites that only care about the
+// 2-way split. Prefer perilSplit() for new code.
+function windWaterSplit(windMph: number, interiorFloodFt: number): { windPct: number; waterPct: number } {
+  const p = perilSplit(windMph, interiorFloodFt, 0);
+  return { windPct: p.windPct, waterPct: p.waterPct };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -365,18 +653,18 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
 
   useEffect(() => {
     let failed = 0;
-    const check = () => { failed++; if (failed >= 3) setLoadError(true); };
-    const safeArray = (setter: (v: any[]) => void) => (data: unknown) => {
-      if (Array.isArray(data)) setter(data); else check();
-    };
-    fetch('/surgedps/api/seasons').then(r => r.json()).then(safeArray(setSeasons)).catch(check);
-    fetch('/surgedps/api/storms/historic').then(r => r.json()).then(safeArray(setHistoricStorms)).catch(check);
-    fetch('/surgedps/api/storms/active').then(r => r.json()).then(safeArray(setActiveNHC)).catch(check);
+    const onErr = () => { failed++; if (failed >= 3) setLoadError(true); };
+    fetchJsonArray<Season>('/surgedps/api/seasons', undefined, onErr).then(setSeasons);
+    fetchJsonArray<StormInfo>('/surgedps/api/storms/historic', undefined, onErr).then(setHistoricStorms);
+    fetchJsonArray<StormInfo>('/surgedps/api/storms/active', undefined, onErr).then(setActiveNHC);
   }, []);
 
   const toggleYear = useCallback((year: number) => {
     if (expandedYear === year) { setExpandedYear(null); setYearStorms([]); }
-    else { setExpandedYear(year); fetch(`/surgedps/api/season/${year}`).then(r => r.json()).then(d => setYearStorms(Array.isArray(d) ? d : [])).catch(() => setYearStorms([])); }
+    else {
+      setExpandedYear(year);
+      fetchJsonArray<StormInfo>(`/surgedps/api/season/${year}`).then(setYearStorms);
+    }
   }, [expandedYear]);
 
   const handleSearch = useCallback((q: string) => {
@@ -385,9 +673,8 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
     if (!q.trim()) { setSearchResults(null); return; }
     setSearchLoading(true);
     searchTimeout.current = setTimeout(() => {
-      fetch(`/surgedps/api/storms/search?q=${encodeURIComponent(q)}`)
-        .then(r => r.json())
-        .then(data => { setSearchResults(Array.isArray(data) ? data : []); setSearchLoading(false); })
+      fetchJsonArray<StormInfo>(`/surgedps/api/storms/search?q=${encodeURIComponent(q)}`)
+        .then(data => { setSearchResults(data); setSearchLoading(false); })
         .catch(() => { setSearchResults([]); setSearchLoading(false); });
     }, 300);
   }, []);
@@ -585,7 +872,13 @@ function CatDeploymentSummary({
 
   const wl = workloadSummary(severityCounts);
   const stormMix = aggregatePerilMix(
-    hotspots.map(h => ({ windPct: h.windPct, waterPct: h.waterPct, weight: h.count })),
+    hotspots.map(h => ({
+      windPct: h.windPct,
+      waterPct: h.waterPct,
+      surgePct: h.surgePct,
+      rainPct: h.rainPct,
+      weight: h.count,
+    })),
   );
   const headline = wl.headline;
   const top = hotspots[0];
@@ -599,8 +892,12 @@ function CatDeploymentSummary({
     : 'bg-slate-400';
 
   // EM-specific aggregates: worst shelter posture across the footprint
-  // and staging plan for the Top Priority callout.
-  const worstPost = worstShelterPosture(hotspots.map(h => h.maxDepthFt));
+  // and staging plan for the Top Priority callout. Per-hotspot peril
+  // mix is passed so surge-dominant areas get the stricter 4-ft
+  // evacuation threshold.
+  const worstPost = worstShelterPosture(
+    hotspots.map(h => ({ maxDepthFt: h.maxDepthFt, windPct: h.windPct, waterPct: h.waterPct })),
+  );
   const staging = isEM
     ? stagingPlan(hotspots, estimatedPop, severityCounts, totals.buildings, rollupDisplaced)
     : null;
@@ -632,16 +929,32 @@ function CatDeploymentSummary({
         <div className="text-slate-500">{perilHeadline(stormMix)}</div>
       </div>
 
-      {/* Peril mix bar — storm-wide weighted aggregate */}
-      <div className="flex items-center gap-2 mb-2" title={`${stormMix.waterPct}% water · ${stormMix.windPct}% wind (weighted by building count in hardest-hit areas)`}>
-        <div className="flex-1 h-3 rounded-full overflow-hidden bg-slate-200 flex">
-          <div className="bg-indigo-500" style={{ width: `${stormMix.waterPct}%` }} />
-          <div className="bg-sky-400"    style={{ width: `${stormMix.windPct}%` }} />
+      {/* Peril mix bar — storm-wide weighted aggregate.
+          When the rainfall pipeline populated per-building rainfall_depth_ft
+          we render a 3-segment bar (surge / rain / wind); otherwise the
+          classic 2-segment water/wind bar. */}
+      {stormMix.rainPct > 0 ? (
+        <div className="flex items-center gap-2 mb-2" title={`${stormMix.surgePct}% surge · ${stormMix.rainPct}% rain · ${stormMix.windPct}% wind (weighted by building count in hardest-hit areas)`}>
+          <div className="flex-1 h-3 rounded-full overflow-hidden bg-slate-200 flex">
+            <div className="bg-indigo-500" style={{ width: `${stormMix.surgePct}%` }} />
+            <div className="bg-cyan-400"   style={{ width: `${stormMix.rainPct}%` }} />
+            <div className="bg-sky-400"    style={{ width: `${stormMix.windPct}%` }} />
+          </div>
+          <div className="text-[10px] text-slate-600 tabular-nums shrink-0 font-semibold">
+            🌊 {stormMix.surgePct}% · 🌧️ {stormMix.rainPct}% · 🌬️ {stormMix.windPct}%
+          </div>
         </div>
-        <div className="text-[10px] text-slate-600 tabular-nums shrink-0 font-semibold">
-          🌊 {stormMix.waterPct}% · 🌬️ {stormMix.windPct}%
+      ) : (
+        <div className="flex items-center gap-2 mb-2" title={`${stormMix.waterPct}% water · ${stormMix.windPct}% wind (weighted by building count in hardest-hit areas)`}>
+          <div className="flex-1 h-3 rounded-full overflow-hidden bg-slate-200 flex">
+            <div className="bg-indigo-500" style={{ width: `${stormMix.waterPct}%` }} />
+            <div className="bg-sky-400"    style={{ width: `${stormMix.windPct}%` }} />
+          </div>
+          <div className="text-[10px] text-slate-600 tabular-nums shrink-0 font-semibold">
+            🌊 {stormMix.waterPct}% · 🌬️ {stormMix.windPct}%
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Workload translation */}
       {wl.inspections_needed > 0 && (
@@ -663,7 +976,7 @@ function CatDeploymentSummary({
           </div>
           {isEM ? (
             (() => {
-              const post = shelterPosture(top.maxDepthFt);
+              const post = shelterPosture(top.maxDepthFt, { windPct: top.windPct, waterPct: top.waterPct });
               return (
                 <div className="text-[10px] text-slate-700 mt-0.5">
                   {post.icon}{' '}
@@ -1258,6 +1571,12 @@ interface Hotspot {
   maxDepthFt: number;
   windPct: number;
   waterPct: number;
+  // Surge/rain split of the waterPct component — populated when the
+  // upstream buildings.json carries a per-building rainfall_depth_ft
+  // field. Back-compatible: callers that only care about waterPct
+  // can ignore these.
+  surgePct: number;
+  rainPct: number;
   severity: { severe: number; major: number; moderate: number; minor: number; none: number };
   recommend: AdjusterRecommendation;
   routing: RoutingTag;
@@ -1836,7 +2155,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <div className="space-y-2">
             {hotspots.map((h) => {
               const isEM = mode === 'ops' && subPersona === 'em';
-              const post = isEM ? shelterPosture(h.maxDepthFt) : null;
+              const post = isEM ? shelterPosture(h.maxDepthFt, { windPct: h.windPct, waterPct: h.waterPct }) : null;
               return (
                 <button
                   key={h.rank}
@@ -1999,6 +2318,7 @@ function App() {
       if (!ticks || ticks.length === 0) return f;
       const safeIdx = Math.min(tickIdx, ticks.length - 1);
       const row = ticks[safeIdx];
+      if (!Array.isArray(row) || row.length < 9) return f;
       const depthFt = row[ftOff] as number;
       const cat = STATE_TO_CAT[row[stOff] as string] ?? 'none';
       const loss = row[lossOff] as number;
@@ -2531,9 +2851,8 @@ function App() {
     setAddressSearching(true);
     setAddressError('');
     if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; }
-    fetch(`/surgedps/api/geocode/search?q=${encodeURIComponent(q)}`)
-      .then(r => r.json())
-      .then((data: any) => { const results: any[] = data?.results || [];
+    fetchJson<{ results?: any[] }>(`/surgedps/api/geocode/search?q=${encodeURIComponent(q)}`)
+      .then((data) => { const results: any[] = data?.results || [];
         if (results.length === 0) { setAddressError('Address not found'); return; }
         const gLon = parseFloat(results[0].lon), gLat = parseFloat(results[0].lat);
         // Find nearest building within 200m and auto-select it
@@ -2573,8 +2892,7 @@ function App() {
       if (batchAbortRef.current) break;
       const addr = lines[idx];
       try {
-        const r = await fetch(`/surgedps/api/geocode/search?q=${encodeURIComponent(addr)}`);
-        const geoData = await r.json();
+        const geoData = await fetchJson<{ results?: any[] }>(`/surgedps/api/geocode/search?q=${encodeURIComponent(addr)}`);
         const geoResults = geoData?.results || [];
         if (!geoResults.length) { results.push({ address: addr, status: 'not found' }); continue; }
         const lon = parseFloat(geoResults[0].lon), lat = parseFloat(geoResults[0].lat);
@@ -3187,11 +3505,8 @@ ${fieldFlag ? `
     if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
     progressIntervalRef.current = setInterval(async () => {
       try {
-        const r = await fetch('/surgedps/api/progress');
-        if (r.ok) {
-          const p = await r.json();
-          if (p.storm_id === stormId && p.step) setLoadProgress(p);
-        }
+        const p = await fetchJson<{ storm_id?: string; step?: string }>('/surgedps/api/progress');
+        if (p.storm_id === stormId && p.step) setLoadProgress(p);
       } catch { /* ignore polling errors */ }
     }, 2000);
 
@@ -3200,10 +3515,8 @@ ${fieldFlag ? `
       const ac = new AbortController();
       activateAbortRef.current = ac;
       const timeout = setTimeout(() => { timedOut = true; ac.abort(); }, 300_000); // 5 min timeout (loading 3×3 grid)
-      const resp = await fetch(`/surgedps/api/storm/${stormId}/activate`, { signal: ac.signal });
+      const data = await fetchJson<any>(`/surgedps/api/storm/${stormId}/activate`, { signal: ac.signal });
       clearTimeout(timeout);
-      if (!resp.ok) throw new Error(`${resp.status}`);
-      const data = await resp.json();
       const { storm, center_cell } = data;
       setActiveStorm(storm);
       if (storm.confidence) setConfidence({ level: storm.confidence, count: storm.building_count || 0 });
@@ -3212,9 +3525,8 @@ ${fieldFlag ? `
 
       // Fetch pre-computed cell manifest (non-blocking — shades grid cells as "ready")
       const manifestStormId = stormId;
-      fetch(`/surgedps/api/manifest?storm_id=${stormId}`)
-        .then(r => r.ok ? r.json() : {})
-        .then((m: any) => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest(m?.cells || {}); })
+      fetchJson<{ cells?: Record<string, any> }>(`/surgedps/api/manifest?storm_id=${stormId}`)
+        .then(m => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest(m?.cells || {}); })
         .catch(() => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest({}); });
 
       // Load all grid cells returned by the server (3×3 when pre-cached)
@@ -3272,9 +3584,7 @@ ${fieldFlag ? `
     }
     (async () => {
       try {
-        const r = await fetch('/surgedps/api/forecast/track');
-        if (!r.ok) return;
-        const tracks = await r.json();
+        const tracks = await fetchJson<any[]>('/surgedps/api/forecast/track');
         if (!tracks?.length) return;
         // Match by storm name
         const name = activeStorm.name.replace(/^Hurricane\s+/i, '').replace(/^Tropical Storm\s+/i, '').toUpperCase();
@@ -3296,9 +3606,9 @@ ${fieldFlag ? `
     setSimRunning(true);
     setSimResult(null);
     try {
-      const r = await fetch(`/surgedps/api/simulate?lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`);
-      if (!r.ok) throw new Error('Simulation failed');
-      const data = await r.json();
+      const data = await fetchJson<any>(
+        `/surgedps/api/simulate?lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`
+      );
       setSimResult(data);
     } catch (err) {
       console.error('Simulation error:', err);
@@ -3492,7 +3802,10 @@ ${fieldFlag ? `
       // a cluster of 200 water-damaged homes outweighs a single wind-hit house.
       windSum: number;
       waterSum: number;
+      surgeSum: number;
+      rainSum: number;
       windWeight: number;
+      rainWeight: number;   // counts only buildings with a non-null rainfall_depth_ft
       maxDepthFt: number;
       severity: { severe: number; major: number; moderate: number; minor: number; none: number };
     };
@@ -3509,7 +3822,8 @@ ${fieldFlag ? `
       if (!bins[key]) {
         bins[key] = {
           loss: 0, count: 0, lat: bLat + BIN / 2, lon: bLon + BIN / 2,
-          windSum: 0, waterSum: 0, windWeight: 0, maxDepthFt: 0,
+          windSum: 0, waterSum: 0, surgeSum: 0, rainSum: 0,
+          windWeight: 0, rainWeight: 0, maxDepthFt: 0,
           severity: { severe: 0, major: 0, moderate: 0, minor: 0, none: 0 },
         };
       }
@@ -3526,15 +3840,24 @@ ${fieldFlag ? `
       // Depth / peril contribution — only when we have landfall + depth data
       const depthFt = p.depth_ft != null ? Number(p.depth_ft) : null;
       const foundHt = p.found_ht != null ? Number(p.found_ht) : null;
+      // rainfall_depth_ft comes from the depth_damage.py pipeline when
+      // the parametric rainfall raster is available. Null means the
+      // storm had no rainfall component in the model (surge-only).
+      const rainFt  = p.rainfall_depth_ft != null ? Number(p.rainfall_depth_ft) : null;
       if (depthFt != null && depthFt > b.maxDepthFt) b.maxDepthFt = depthFt;
       if (hasLandfall && activeStorm && depthFt != null) {
         const interiorFt = (foundHt != null) ? Math.max(0, depthFt - foundHt) : Math.max(0, depthFt - 1);
         const distKm = haversineKm(lat, lon, activeStorm.landfall_lat!, activeStorm.landfall_lon!);
         const windMph = estimateWindMph(distKm, activeStorm.max_wind_kt, activeStorm.category);
-        const ww = windWaterSplit(windMph, interiorFt);
-        b.windSum  += ww.windPct;
-        b.waterSum += ww.waterPct;
+        const ps = perilSplit(windMph, interiorFt, rainFt ?? 0);
+        b.windSum  += ps.windPct;
+        b.waterSum += ps.waterPct;
         b.windWeight += 1;
+        if (rainFt != null) {
+          b.surgeSum  += ps.surgePct;
+          b.rainSum   += ps.rainPct;
+          b.rainWeight += 1;
+        }
       }
     }
 
@@ -3545,6 +3868,21 @@ ${fieldFlag ? `
       .map((b, i) => {
         const windPct  = b.windWeight > 0 ? Math.round(b.windSum  / b.windWeight) : 50;
         const waterPct = 100 - windPct;
+        // Surge/rain split derived only from buildings that carried a
+        // rainfall_depth_ft. When none did, all water is surge.
+        let surgePct: number;
+        let rainPct: number;
+        if (b.rainWeight > 0) {
+          const rawSurge = Math.round(b.surgeSum / b.rainWeight);
+          const rawRain  = Math.round(b.rainSum  / b.rainWeight);
+          // Renormalize so surge + rain === waterPct (avoids rounding drift).
+          const sumWater = Math.max(1, rawSurge + rawRain);
+          surgePct = Math.round(rawSurge / sumWater * waterPct);
+          rainPct  = Math.max(0, waterPct - surgePct);
+        } else {
+          surgePct = waterPct;
+          rainPct  = 0;
+        }
         const recommend = recommendAdjusters(b.severity);
         const routing   = routingHint(windPct, waterPct);
         return {
@@ -3557,6 +3895,8 @@ ${fieldFlag ? `
           maxDepthFt: b.maxDepthFt,
           windPct,
           waterPct,
+          surgePct,
+          rainPct,
           severity: b.severity,
           recommend,
           routing,
@@ -3669,12 +4009,13 @@ ${fieldFlag ? `
     try {
       const ac = new AbortController();
       const timeout = setTimeout(() => ac.abort(), 90_000); // 90s timeout for cell generation
-      const resp = await fetch(`/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`, { signal: ac.signal });
+      const cellData = await fetchJson<any>(
+        `/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`,
+        { signal: ac.signal }
+      );
       clearTimeout(timeout);
       // Guard: if user switched storms while waiting, discard stale response
       if (activeStormRef.current?.storm_id !== stormId) return;
-      if (!resp.ok) throw new Error(`${resp.status}`);
-      const cellData = await resp.json();
       const { buildings, flood } = cellData;
       if (cellData.confidence) setConfidence({ level: cellData.confidence, count: cellData.building_count || 0 });
       if (cellData.eli) setEli({ value: cellData.eli, tier: cellData.eli_tier || 'unavailable' });
@@ -3706,9 +4047,9 @@ ${fieldFlag ? `
       // ── Ticks bundle (peril time-series): fetch in background ──
       // Returns 404 on legacy cells generated pre-peril pipeline; we
       // silently ignore so the slider stays disabled for those.
-      fetch(`/surgedps/api/cell_ticks?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`)
-        .then(r => (r.ok ? r.json() : null))
-        .then((bundle: TicksBundle | null) => {
+      fetchJson<TicksBundle>(
+        `/surgedps/api/cell_ticks?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`
+      ).then(bundle => {
           if (!bundle || activeStormRef.current?.storm_id !== stormId) return;
           // First bundle for this session sets the tick schedule.
           // Using functional setState so the empty-deps useCallback closure
@@ -3744,11 +4085,10 @@ ${fieldFlag ? `
     const timer = setTimeout(() => {
       // Pre-populate so we don't fire duplicate requests
       geocodeCache.current[cacheKey] = '';
-      fetch(
+      fetchJson<{ label?: string }>(
         `/surgedps/api/geocode/reverse?lat=${lat}&lon=${lng}`,
         { signal: controller.signal }
       )
-        .then(r => r.json())
         .then(data => {
           const label = data?.label || null;
           geocodeCache.current[cacheKey] = label || '';
@@ -3876,66 +4216,8 @@ ${fieldFlag ? `
         >
           <NavigationControl position="top-right" />
 
-          {showCounties && (
-            countiesGeoJSON && (
-              <Source id="county-boundaries" type="geojson" data={countiesGeoJSON}>
-                {/* Categorical choropleth fill — one of 8 cool pastels per
-                    county so adjacent jurisdictions read as distinct at a
-                    glance. Cool palette deliberately avoids the damage-bubble
-                    hues (green/yellow/orange/red) so bubbles stay legible. */}
-                <Layer
-                  id="county-fill"
-                  type="fill"
-                  paint={{
-                    'fill-color': ['match', ['get', 'colorIdx'],
-                      0, '#93c5fd',  // blue-300
-                      1, '#a5b4fc',  // indigo-300
-                      2, '#c4b5fd',  // violet-300
-                      3, '#d8b4fe',  // purple-300
-                      4, '#f0abfc',  // fuchsia-300
-                      5, '#7dd3fc',  // sky-300
-                      6, '#67e8f9',  // cyan-300
-                      7, '#5eead4',  // teal-300
-                      '#cbd5e1',     // slate fallback
-                    ],
-                    'fill-opacity': 0.32,
-                  }}
-                />
-                <Layer
-                  id="county-line"
-                  type="line"
-                  paint={{ 'line-color': '#ffffff', 'line-width': 1, 'line-opacity': 0.7 }}
-                />
-                {/* County labels — append " County" / " Parish" (Louisiana)
-                    so the label reads as a full jurisdiction name instead of
-                    just a word. Larger size + heavier halo so it stays legible
-                    on top of the surge grid, which otherwise washes out the
-                    pastel fill. STATE "22" = Louisiana FIPS. */}
-                <Layer
-                  id="county-labels"
-                  type="symbol"
-                  minzoom={6}
-                  layout={{
-                    'text-field': ['concat',
-                      ['get', 'NAME'],
-                      ['case', ['==', ['get', 'STATE'], '22'], ' Parish', ' County'],
-                    ],
-                    'text-font': ['Open Sans Semibold', 'Arial Unicode MS Regular'],
-                    'text-size': ['interpolate', ['linear'], ['zoom'], 6, 11, 10, 15, 14, 18],
-                    'text-anchor': 'center',
-                    'text-max-width': 10,
-                    'text-letter-spacing': 0.02,
-                    'text-transform': 'uppercase',
-                  }}
-                  paint={{
-                    'text-color': '#ffffff',
-                    'text-halo-color': '#0f172a',
-                    'text-halo-width': 2,
-                    'text-halo-blur': 0.5,
-                  }}
-                />
-              </Source>
-            )
+          {showCounties && countiesGeoJSON && (
+            <SourceLayers id="county-boundaries" data={countiesGeoJSON} layers={COUNTY_LAYERS} />
           )}
 
           {/* ── NLCD 2021 Land Cover (Esri Living Atlas ImageServer) ──
@@ -3969,112 +4251,14 @@ ${fieldFlag ? `
           )}
 
           {showFloodZones && floodZonesGeoJSON && (
-            <Source id="fema-flood-zones" type="geojson" data={floodZonesGeoJSON}>
-              {/* Fill — color-coded by FEMA zone type */}
-              <Layer
-                id="fema-zones-fill"
-                type="fill"
-                paint={{
-                  'fill-color': [
-                    'match', ['get', 'FLD_ZONE'],
-                    ['VE', 'V'],  '#dc2626',   // Coastal high-hazard — deep red
-                    ['AE', 'AO', 'AH', 'A'], '#f97316',  // High-risk — orange
-                    ['X'],        '#facc15',   // Moderate / minimal — yellow
-                    '#94a3b8',                // Unknown / D — slate
-                  ],
-                  'fill-opacity': 0.30,
-                }}
-              />
-              {/* Outline */}
-              <Layer
-                id="fema-zones-line"
-                type="line"
-                paint={{
-                  'line-color': [
-                    'match', ['get', 'FLD_ZONE'],
-                    ['VE', 'V'],  '#ef4444',
-                    ['AE', 'AO', 'AH', 'A'], '#fb923c',
-                    ['X'],        '#fde047',
-                    '#cbd5e1',
-                  ],
-                  'line-width': 1,
-                  'line-opacity': 0.7,
-                }}
-              />
-              {/* Zone labels at higher zoom */}
-              <Layer
-                id="fema-zones-labels"
-                type="symbol"
-                minzoom={10}
-                layout={{
-                  'text-field': ['get', 'FLD_ZONE'],
-                  'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-                  'text-size': 10,
-                  'text-anchor': 'center',
-                }}
-                paint={{ 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1 }}
-              />
-            </Source>
+            <SourceLayers id="fema-flood-zones" data={floodZonesGeoJSON} layers={FEMA_LAYERS} />
           )}
 
           {/* AHPS / NWPS stream gauges — color-coded by active flood category.
               Cheap high-value layer: no tile server needed, just GeoJSON points.
               Categories ordered worst→best so the halo ring stays readable. */}
           {showGauges && gaugesGeoJSON && (
-            <Source id="stream-gauges" type="geojson" data={gaugesGeoJSON}>
-              <Layer
-                id="stream-gauges-halo"
-                type="circle"
-                paint={{
-                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 8, 10, 14, 14, 20],
-                  'circle-color': [
-                    'match', ['get', 'category'],
-                    'major',    '#7f1d1d',
-                    'moderate', '#ef4444',
-                    'minor',    '#fb923c',
-                    'action',   '#facc15',
-                    '#94a3b8',
-                  ],
-                  'circle-opacity': 0.25,
-                  'circle-stroke-width': 0,
-                }}
-              />
-              <Layer
-                id="stream-gauges-dot"
-                type="circle"
-                paint={{
-                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 3, 10, 5, 14, 7],
-                  'circle-color': [
-                    'match', ['get', 'category'],
-                    'major',    '#7f1d1d',
-                    'moderate', '#ef4444',
-                    'minor',    '#fb923c',
-                    'action',   '#facc15',
-                    '#94a3b8',
-                  ],
-                  'circle-stroke-color': '#fff',
-                  'circle-stroke-width': 1.5,
-                }}
-              />
-              <Layer
-                id="stream-gauges-label"
-                type="symbol"
-                minzoom={9}
-                layout={{
-                  'text-field': ['coalesce', ['get', 'name'], ['get', 'nws_lid'], ''],
-                  'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-                  'text-size': 10,
-                  'text-anchor': 'top',
-                  'text-offset': [0, 0.8],
-                  'text-allow-overlap': false,
-                }}
-                paint={{
-                  'text-color': '#0f172a',
-                  'text-halo-color': '#fff',
-                  'text-halo-width': 1.5,
-                }}
-              />
-            </Source>
+            <SourceLayers id="stream-gauges" data={gaugesGeoJSON} layers={GAUGE_LAYERS} />
           )}
 
           {/* Shelter capacity markers (E5) — sized by capacity, colored
@@ -4087,68 +4271,14 @@ ${fieldFlag ? `
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
                 properties: {
-                  name: s.name,
-                  capacity: s.capacity,
-                  occupancy: s.occupancy,
+                  name: s.name, capacity: s.capacity, occupancy: s.occupancy,
                   fullness: s.occupancy != null && s.capacity > 0
                     ? Math.min(1, s.occupancy / s.capacity) : -1,
                   operator: s.operator,
                 },
               })),
             };
-            return (
-              <Source id="shelter-markers" type="geojson" data={fc}>
-                <Layer
-                  id="shelter-markers-halo"
-                  type="circle"
-                  paint={{
-                    'circle-radius': ['interpolate', ['linear'], ['get', 'capacity'], 50, 8, 500, 18, 2000, 28],
-                    'circle-color': [
-                      'case',
-                      ['<', ['get', 'fullness'], 0], '#94a3b8',
-                      ['<', ['get', 'fullness'], 0.6], '#16a34a',
-                      ['<', ['get', 'fullness'], 0.9], '#f59e0b',
-                      '#dc2626',
-                    ],
-                    'circle-opacity': 0.25,
-                  }}
-                />
-                <Layer
-                  id="shelter-markers-dot"
-                  type="circle"
-                  paint={{
-                    'circle-radius': ['interpolate', ['linear'], ['get', 'capacity'], 50, 4, 500, 8, 2000, 12],
-                    'circle-color': [
-                      'case',
-                      ['<', ['get', 'fullness'], 0], '#f1f5f9',
-                      ['<', ['get', 'fullness'], 0.6], '#16a34a',
-                      ['<', ['get', 'fullness'], 0.9], '#f59e0b',
-                      '#dc2626',
-                    ],
-                    'circle-stroke-color': '#0f172a',
-                    'circle-stroke-width': 1.5,
-                  }}
-                />
-                <Layer
-                  id="shelter-markers-label"
-                  type="symbol"
-                  minzoom={9}
-                  layout={{
-                    'text-field': ['get', 'name'],
-                    'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-                    'text-size': 10,
-                    'text-anchor': 'top',
-                    'text-offset': [0, 0.9],
-                    'text-allow-overlap': false,
-                  }}
-                  paint={{
-                    'text-color': '#0f172a',
-                    'text-halo-color': '#fff',
-                    'text-halo-width': 1.5,
-                  }}
-                />
-              </Source>
-            );
+            return <SourceLayers id="shelter-markers" data={fc} layers={SHELTER_LAYERS} />;
           })()}
 
           {/* Rainfall raster overlay — served on-demand as PNG tiles by the
@@ -4420,90 +4550,16 @@ ${fieldFlag ? `
           )}
 
           {criticalFacilities && (
-            <Source id="critical-facilities" type="geojson" data={criticalFacilities}>
-              {/* Colored circle behind each icon — category glance-read.
-                  Hospitals=red, gov/emergency=gold, schools=blue,
-                  nursing=teal, churches=purple. MinZoom 15 keeps them
-                  hidden until the user is fully drilled into the
-                  individual-building view, so the neighbourhood/city
-                  sweep isn't cluttered. */}
-              <Layer id="critical-icon-halos" type="circle"
-                minzoom={15}
-                paint={{
-                  'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 10, 17, 14, 19, 20],
-                  'circle-color': ['match', ['get', 'critical_icon'],
-                    '➕',  '#dc2626',   // Hospitals/Clinics — red
-                    '⭐',  '#f59e0b',   // Government / Emergency — gold
-                    '🏫',  '#2563eb',   // Schools — blue
-                    '🛏️',  '#0d9488',  // Nursing homes — teal
-                    '⛪',  '#7c3aed',   // Places of worship — purple
-                    '#475569',         // fallback — slate
-                  ],
-                  'circle-stroke-color': '#ffffff',
-                  'circle-stroke-width': 2,
-                  'circle-opacity': 0.95,
-                }}
-              />
-              <Layer id="critical-icons" type="symbol"
-                minzoom={15}
-                layout={{
-                  'text-field': ['get', 'critical_icon'],
-                  'text-size': ['interpolate', ['linear'], ['zoom'], 15, 12, 17, 18, 19, 24],
-                  'text-allow-overlap': true,
-                  'text-ignore-placement': true,
-                  'symbol-sort-key': ['case',
-                    ['==', ['get', 'critical_icon'], '➕'], 0,
-                    ['==', ['get', 'critical_icon'], '⭐'], 1,
-                    ['==', ['get', 'critical_icon'], '🏫'], 2,
-                    ['==', ['get', 'critical_icon'], '🛏️'], 3,
-                    ['==', ['get', 'critical_icon'], '⛪'], 4,
-                    5,
-                  ],
-                }}
-                paint={{
-                  'text-color': '#ffffff',
-                  'text-halo-color': 'rgba(0,0,0,0.5)',
-                  'text-halo-width': 0.5,
-                }}
-              />
-            </Source>
+            <SourceLayers id="critical-facilities" data={criticalFacilities} layers={CRITICAL_FACILITY_LAYERS} />
           )}
 
           {showGrid && activeStorm && (
-            <Source id="grid-data" type="geojson" data={gridGeoJson}>
-              <Layer id="grid-loaded-border" type="line" filter={['==', ['get', 'status'], 'loaded']}
-                paint={{ 'line-color': '#4ade80', 'line-width': 2, 'line-opacity': 0.6, 'line-dasharray': [4, 2] }} />
-              <Layer id="grid-available-fill" type="fill" filter={['==', ['get', 'status'], 'available']}
-                paint={{ 'fill-color': '#6366f1', 'fill-opacity': 0.05 }} />
-              <Layer id="grid-available-border" type="line" filter={['==', ['get', 'status'], 'available']}
-                paint={{ 'line-color': '#a5b4fc', 'line-width': 1.5, 'line-opacity': 0.6, 'line-dasharray': [6, 3] }} />
-              <Layer id="grid-loading-fill" type="fill" filter={['==', ['get', 'status'], 'loading']}
-                paint={{ 'fill-color': '#facc15', 'fill-opacity': 0.1 }} />
-              <Layer id="grid-loading-border" type="line" filter={['==', ['get', 'status'], 'loading']}
-                paint={{ 'line-color': '#facc15', 'line-width': 2.5, 'line-opacity': 0.9 }} />
-              <Layer id="grid-available-label" type="symbol" filter={['==', ['get', 'status'], 'available']}
-                layout={{ 'text-field': '+ Click to load', 'text-size': 13, 'text-font': ['Open Sans Semibold'] }}
-                paint={{ 'text-color': '#c7d2fe', 'text-opacity': 0.85, 'text-halo-color': '#000', 'text-halo-width': 1.2 }} />
-              {/* Pre-computed "ready" cells — solid green border (instant load from cache) */}
-              <Layer id="grid-ready-fill" type="fill" filter={['==', ['get', 'status'], 'ready']}
-                paint={{ 'fill-color': '#4ade80', 'fill-opacity': 0.06 }} />
-              <Layer id="grid-ready-border" type="line" filter={['==', ['get', 'status'], 'ready']}
-                paint={{ 'line-color': '#4ade80', 'line-width': 2, 'line-opacity': 0.7 }} />
-              <Layer id="grid-ready-label" type="symbol" filter={['==', ['get', 'status'], 'ready']}
-                layout={{ 'text-field': 'Cached \u2713', 'text-size': 12, 'text-font': ['Open Sans Regular'] }}
-                paint={{ 'text-color': '#4ade80', 'text-opacity': 0.8, 'text-halo-color': '#000', 'text-halo-width': 1 }} />
-              <Layer id="grid-loading-label" type="symbol" filter={['==', ['get', 'status'], 'loading']}
-                layout={{ 'text-field': 'Loading...', 'text-size': 13, 'text-font': ['Open Sans Regular'] }}
-                paint={{ 'text-color': '#facc15', 'text-opacity': 0.9, 'text-halo-color': '#000', 'text-halo-width': 1 }} />
-            </Source>
+            <SourceLayers id="grid-data" data={gridGeoJson} layers={GRID_LAYERS} />
           )}
 
           {/* ── Forecast cone overlay (active storms only) ── */}
           {simMode && forecastCone && (
-            <Source id="forecast-cone" type="geojson" data={forecastCone}>
-              <Layer id="cone-fill" type="fill" paint={{ 'fill-color': '#ffffff', 'fill-opacity': 0.12 }} />
-              <Layer id="cone-border" type="line" paint={{ 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 0.5, 'line-dasharray': [4, 3] }} />
-            </Source>
+            <SourceLayers id="forecast-cone" data={forecastCone} layers={FORECAST_CONE_LAYERS} />
           )}
 
           {/* ── Forecast track line (active storms only) ── */}
