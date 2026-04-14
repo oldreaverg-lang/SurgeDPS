@@ -810,7 +810,7 @@ def main():
             duration_hr = 72
             try:
                 valid_time = datetime.strptime(landfall_date, '%Y-%m-%d').replace(
-                    hour=18, tzinfo=_utc
+                    hour=18, tzinfo=_utc.utc
                 ) + _td(hours=48)
             except ValueError:
                 print(f"  [mrms] {sid:20s} — bad landfall_date {landfall_date!r}, skipping")

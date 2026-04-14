@@ -1964,7 +1964,6 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(400, 'No storm active')
                 return
             try:
-                import time as _time
                 sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
                 from rainfall.mrms_fetcher import MRMSFetcher, storm_bbox_from_catalog_entry
                 duration_hr = int(params.get('duration', ['72'])[0])
