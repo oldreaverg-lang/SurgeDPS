@@ -814,9 +814,17 @@ def load_cell(col: int, row: int) -> dict:
     _progress.update(step='Building flood map', step_num=3)
     flood_source = compound_raster_path if os.path.exists(compound_raster_path) else raster_path
     if not os.path.exists(flood_path):
-        raster_to_geojson(flood_source, flood_path)
-    with open(flood_path) as f:
-        flood_data = json.load(f)
+        try:
+            raster_to_geojson(flood_source, flood_path)
+        except Exception as _fgj_err:
+            print(f"  [flood] raster_to_geojson failed (non-fatal): {_fgj_err}")
+    flood_data = _empty_fc()
+    if os.path.exists(flood_path):
+        try:
+            with open(flood_path) as f:
+                flood_data = json.load(f)
+        except Exception as _fj_err:
+            print(f"  [flood] JSON load failed (non-fatal): {_fj_err}")
 
     # 4. Fetch real OSM/NSI buildings
     _progress.update(step='Fetching building footprints', step_num=4)
@@ -841,20 +849,29 @@ def load_cell(col: int, row: int) -> dict:
     #    frontend's 5-min timeout. Cold Harvey's 3×3 grid with per-tick HAZUS
     #    blew past that; see commit history for background.
     _progress.update(step='Running damage model', step_num=5)
-    estimate_damage_from_raster(
-        depth_raster_path=raster_path,
-        buildings_geojson_path=buildings_path,
-        output_path=damage_path,
-        storm_id=storm.storm_id,
-        landfall_lat=storm.landfall_lat,
-        landfall_lon=storm.landfall_lon,
-        max_wind_kt=storm.max_wind_kt,
-        storm_speed_kt=storm.speed_kt,
-        storm_heading_deg=storm.heading_deg,
-    )
+    try:
+        estimate_damage_from_raster(
+            depth_raster_path=raster_path,
+            buildings_geojson_path=buildings_path,
+            output_path=damage_path,
+            storm_id=storm.storm_id,
+            landfall_lat=storm.landfall_lat,
+            landfall_lon=storm.landfall_lon,
+            max_wind_kt=storm.max_wind_kt,
+            storm_speed_kt=storm.speed_kt,
+            storm_heading_deg=storm.heading_deg,
+        )
+    except Exception as _dmg_err:
+        print(f"  [damage] estimate_damage_from_raster failed: {_dmg_err}")
+        import traceback as _tb2; _tb2.print_exc()
 
-    with open(damage_path) as f:
-        damage_data = json.load(f)
+    damage_data = _empty_fc()
+    if os.path.exists(damage_path):
+        try:
+            with open(damage_path) as f:
+                damage_data = json.load(f)
+        except Exception as _dj_err:
+            print(f"  [damage] JSON load failed (non-fatal): {_dj_err}")
 
     # Inject cell-level metadata into the FeatureCollection root so CAT reports
     # can display rainfall return period, impervious fraction, etc.
@@ -1389,7 +1406,13 @@ class CellHandler(BaseHTTPRequestHandler):
             for idx, (c, r) in enumerate(_ACTIVATE_CELLS):
                 _progress.update(step=f'Loading cell ({c},{r})', step_num=idx * 4)
                 print(f"  Loading cell ({c},{r})...")
-                grid_cells[f'{c},{r}'] = load_cell(c, r)
+                try:
+                    grid_cells[f'{c},{r}'] = load_cell(c, r)
+                except Exception as _cell_err:
+                    import traceback as _tb
+                    print(f"  [ERROR] load_cell({c},{r}) raised: {_cell_err}")
+                    _tb.print_exc()
+                    grid_cells[f'{c},{r}'] = _empty_fc_pair()
 
             center_data = grid_cells.get('0,0')
             _progress.update(step='Complete', step_num=total_act)
