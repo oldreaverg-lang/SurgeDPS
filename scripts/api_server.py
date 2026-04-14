@@ -2362,7 +2362,12 @@ class CellHandler(BaseHTTPRequestHandler):
                 from data_ingest.config import IngestConfig
                 import time as _time_qpf
 
-                qpf_cache = os.path.join(PERSISTENT_DIR, 'qpf')
+                # Per-storm cache dir — storms MUST NOT share qpf_rainfall.tif
+                # (both fetch paths write that filename; a concurrent second
+                # storm would clobber the first's raster on disk, and the
+                # in-memory _qpf_tif_by_storm entries would both point at the
+                # overwritten file, serving wrong tiles).
+                qpf_cache = os.path.join(PERSISTENT_DIR, 'qpf', _active_storm.storm_id)
                 os.makedirs(qpf_cache, exist_ok=True)
                 cache_meta = os.path.join(qpf_cache, 'latest_meta.json')
 
@@ -2446,7 +2451,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     # Honour the provenance flag set by the fetcher — don't
                     # hard-label synthetic fallbacks as 'wpc_qpf_72hr' to the UI.
                     _result_src = getattr(qpf_result, 'source', 'wpc')
-                    _source_label = 'wpc_qpf_72hr' if _result_src == 'wpc' else f'synthetic_{_result_src}'
+                    _source_label = 'wpc_qpf_72hr' if _result_src == 'wpc' else 'synthetic_gaussian'
                     if _result_src != 'wpc':
                         caveat = ("WPC QPF unavailable — showing synthetic "
                                   "Gaussian rainfall estimate only")
