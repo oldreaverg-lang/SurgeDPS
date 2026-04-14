@@ -492,6 +492,50 @@ def main():
         print(f"  Loss sanity checks passed for all reference storms ✓")
     print("=" * 60)
 
+    # ── Phase 2: warm historical AHPS gauge caches ───────────────────────
+    # One cache file per storm under PERSISTENT_DIR/cache/gauges_historical/.
+    # Each fetch hits USGS NWIS IV + NWPS (~30–60s per storm), so we
+    # serialise them with a small sleep between to stay polite.
+    try:
+        from rainfall.ahps_historical import (
+            fetch_historical_gauges, cache_exists,
+        )
+    except Exception as _e:
+        print(f"\n[gauges] warm phase skipped — import failed: {_e}")
+        return
+
+    print()
+    print("=" * 60)
+    print("Phase 2: Warming AHPS historical gauge archive")
+    print("=" * 60)
+    g_ok = g_skip = g_fail = 0
+    for storm in HISTORICAL_STORMS:
+        if not getattr(storm, 'landfall_date', None):
+            continue
+        if cache_exists(storm.storm_id, str(PERSISTENT_DIR)):
+            g_skip += 1
+            continue
+        try:
+            t_s = time.time()
+            r = fetch_historical_gauges(
+                storm_id=storm.storm_id,
+                landfall_lat=storm.landfall_lat,
+                landfall_lon=storm.landfall_lon,
+                landfall_date=storm.landfall_date,
+                radius_deg=4.0,
+                persistent_dir=str(PERSISTENT_DIR),
+            )
+            n = r.get('gauge_count', 0)
+            print(f"  [gauges] {storm.storm_id:18s} → {n:4d} gauges "
+                  f"({time.time()-t_s:.1f}s)")
+            g_ok += 1
+            time.sleep(1.0)   # polite spacing between NWIS queries
+        except Exception as e:
+            g_fail += 1
+            print(f"  [gauges] {storm.storm_id:18s} FAILED — {e}")
+    print(f"  Gauge warm summary: {g_ok} fetched · {g_skip} already cached · {g_fail} failed")
+    print("=" * 60)
+
 
 if __name__ == '__main__':
     main()

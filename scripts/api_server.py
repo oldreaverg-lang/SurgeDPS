@@ -1257,6 +1257,39 @@ class CellHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"  [warn] Validation ledger failed: {e}")
 
+            # ── Background: warm the historical AHPS gauge cache ────────
+            # For historical storms, archived peak-stage data never changes —
+            # so we pre-fetch once per storm activation and persist to the
+            # Railway volume. Subsequent /api/gauges hits are cache reads.
+            try:
+                if (getattr(storm, 'status', '') == 'historical'
+                        and getattr(storm, 'landfall_date', None)):
+                    from rainfall.ahps_historical import (
+                        fetch_historical_gauges, cache_exists,
+                    )
+                    if not cache_exists(storm.storm_id, PERSISTENT_DIR):
+                        def _warm_gauges(s=storm):
+                            try:
+                                fetch_historical_gauges(
+                                    storm_id=s.storm_id,
+                                    landfall_lat=s.landfall_lat,
+                                    landfall_lon=s.landfall_lon,
+                                    landfall_date=s.landfall_date,
+                                    radius_deg=4.0,
+                                    persistent_dir=PERSISTENT_DIR,
+                                )
+                                print(f"  [gauges] historical cache warmed for {s.storm_id}")
+                            except Exception as _e:
+                                print(f"  [gauges] warm failed for {s.storm_id}: {_e}")
+                        import threading as _th_gauge
+                        _th_gauge.Thread(
+                            target=_warm_gauges, daemon=True,
+                            name=f"gauge-warm-{storm.storm_id}",
+                        ).start()
+                        print(f"  [gauges] spawned background warm for {storm.storm_id}")
+            except Exception as _e:
+                print(f"  [warn] gauge pre-warm setup failed: {_e}")
+
             response_data = {
                 "storm": storm_data,
                 "center_cell": center_data,
@@ -2507,9 +2540,18 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, str(e))
             return
 
-        # ── GET /api/gauges?lat=N&lon=N&radius=4 ──
-        # Returns active flood gauges near the storm as GeoJSON.
-        # Used by the frontend Flood Warnings map toggle.
+        # ── GET /api/gauges?radius=4&category=action ──
+        # Returns stream gauges near the storm as GeoJSON.
+        #
+        # Two modes:
+        #   • Historical storm (landfall_date set): reads the peak-stage
+        #     archive produced by ahps_historical.fetch_historical_gauges.
+        #     If not yet cached on the Railway volume, falls back to an
+        #     inline build (blocking). Activation also kicks off a
+        #     background pre-fetch so the first UI hit is usually a cache
+        #     read in <50 ms.
+        #   • Live / active storm: hits NWPS real-time feed and caches
+        #     the response for 1 day.
         if path == '/api/gauges':
             if _active_storm is None:
                 self._send_error(400, 'No storm active')
@@ -2517,15 +2559,70 @@ class CellHandler(BaseHTTPRequestHandler):
             try:
                 radius  = float(params.get('radius', ['4.0'])[0])
                 min_cat = params.get('category', ['action'])[0]
+                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
-                # Persistent disk cache — historical storms never change, so we
-                # keep AHPS responses on the volume forever.  Real-time storms
-                # refresh by passing ?refresh=1.
+                # Historical path ─────────────────────────────────────────
+                landfall_date = getattr(_active_storm, 'landfall_date', None)
+                is_historical = (
+                    getattr(_active_storm, 'status', '') == 'historical'
+                    and landfall_date
+                )
+                if is_historical:
+                    from rainfall.ahps_historical import (
+                        fetch_historical_gauges, cache_exists,
+                    )
+                    # If not cached, build inline (may take ~30s on first
+                    # hit for a given storm; cached permanently thereafter).
+                    if refresh or not cache_exists(
+                        _active_storm.storm_id, PERSISTENT_DIR,
+                    ):
+                        resp = fetch_historical_gauges(
+                            storm_id=_active_storm.storm_id,
+                            landfall_lat=_active_storm.landfall_lat,
+                            landfall_lon=_active_storm.landfall_lon,
+                            landfall_date=landfall_date,
+                            radius_deg=radius,
+                            persistent_dir=PERSISTENT_DIR,
+                        )
+                    else:
+                        resp = fetch_historical_gauges(
+                            storm_id=_active_storm.storm_id,
+                            landfall_lat=_active_storm.landfall_lat,
+                            landfall_lon=_active_storm.landfall_lon,
+                            landfall_date=landfall_date,
+                            radius_deg=radius,
+                            persistent_dir=PERSISTENT_DIR,
+                        )
+
+                    # Apply client-side category filter on the cached set
+                    if min_cat not in ('none', 'all', '0'):
+                        min_rank = {'action': 1, 'minor': 2,
+                                    'moderate': 3, 'major': 4}.get(min_cat, 1)
+                        feats = resp.get('gauges', {}).get('features', [])
+                        feats = [
+                            f for f in feats
+                            if {'none': 0, 'action': 1, 'minor': 2,
+                                'moderate': 3, 'major': 4}.get(
+                                f.get('properties', {}).get('flood_category', 'none'), 0
+                            ) >= min_rank
+                        ]
+                        resp = dict(resp)
+                        resp['gauges'] = {
+                            'type': 'FeatureCollection',
+                            'features': feats,
+                        }
+                        resp['gauge_count'] = len(feats)
+
+                    body = json.dumps(resp).encode()
+                    self._send_raw(200, body,
+                                   cache_control='public, max-age=86400')
+                    return
+
+                # Live path ───────────────────────────────────────────────
                 gauges_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'gauges')
                 os.makedirs(gauges_cache_dir, exist_ok=True)
                 cache_key = f"{_active_storm.storm_id}_{radius:.2f}_{min_cat}.json"
                 cache_path = os.path.join(gauges_cache_dir, cache_key)
-                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
                 if os.path.exists(cache_path) and not refresh:
                     with open(cache_path, 'rb') as fh:
@@ -2549,6 +2646,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     'at_or_above_moderate': sum(1 for g in gauges if g.flood_category in ('moderate', 'major')),
                     'at_or_above_minor': sum(1 for g in gauges if g.flood_category in ('minor', 'moderate', 'major')),
                     'gauges': geojson,
+                    'source': 'nwps_live',
                     '_cached_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
                 }).encode()
                 try:
