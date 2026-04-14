@@ -91,8 +91,9 @@ def estimate_rain_rate_mm_hr(
     Returns:
         Rainfall rate in mm/hr at this location
     """
-    if distance_km < 0:
-        distance_km = 0
+    # Accept scalar or numpy array. np.maximum handles both without tripping
+    # the "truth value of an array is ambiguous" error that `if x < 0` does.
+    distance_km = np.maximum(distance_km, 0)
 
     # Peak rain rate at the radius of maximum wind (RMW), roughly 50 km
     # Scales empirically with max wind speed: r_peak ~ U^0.6
