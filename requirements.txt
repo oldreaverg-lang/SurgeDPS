@@ -19,3 +19,11 @@ shapely>=2.0
 networkx>=3,<4
 duckdb>=1.1
 boto3>=1.34               # Cloudflare R2 storage (S3-compatible); no-op if env vars absent
+# MRMS / IEM historical GRIB2 parsing — required for real observed QPE on
+# pre-2020 storms (Harvey, Irma, Florence, etc.). Without these the fetcher
+# silently falls through to the Lonfat parametric model, producing inaccurate
+# radial blobs instead of real gauge-corrected accumulation.
+# eccodes bundles its C library as a manylinux wheel — no apt packages needed.
+eccodes>=2.38             # ECMWF GRIB2 C library + Python bindings (self-contained wheel)
+cfgrib>=0.9.14            # xarray engine for GRIB2; depends on eccodes
+xarray>=2024.1            # used by cfgrib engine in _grib_to_clipped_array
