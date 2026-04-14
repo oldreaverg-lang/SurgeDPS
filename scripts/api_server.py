@@ -1735,6 +1735,78 @@ class CellHandler(BaseHTTPRequestHandler):
                     valid_time=valid_time,
                 )
                 if result is None:
+                    # ── Parametric fallback ───────────────────────────
+                    # MRMS S3 archive only goes back to ~2020-10-14, so
+                    # pre-2020 storms (Katrina, Ike, Sandy, Harvey, Irma,
+                    # Nate, Michael, Florence) have no observed QPE
+                    # available. Generate a Lonfat parametric total-
+                    # precipitation raster from storm parameters so the
+                    # rainfall layer still renders. Source is clearly
+                    # labelled "parametric" in the response so the UI
+                    # can distinguish observed vs modelled.
+                    try:
+                        from flood_model.rainfall import estimate_rainfall_flooding
+                        parametric_tif = os.path.join(
+                            mrms_cache, f'parametric_{_active_storm.storm_id}.tif'
+                        )
+                        if not os.path.exists(parametric_tif):
+                            rain_result = estimate_rainfall_flooding(
+                                center_lat=_active_storm.landfall_lat,
+                                center_lon=_active_storm.landfall_lon,
+                                max_wind_kt=_active_storm.max_wind_kt,
+                                storm_speed_kt=getattr(_active_storm, 'speed_kt', 10.0),
+                                rmax_nm=getattr(_active_storm, 'rmax_nm', 25.0),
+                                heading_deg=getattr(_active_storm, 'heading_deg', 0.0),
+                                output_dir=mrms_cache,
+                                storm_id=f'_{_active_storm.storm_id}_stormwide',
+                                # Storm-scale footprint (~4° buffer matches MRMS bbox)
+                                extent_km=450.0,
+                                # Coarser grid than cell-level: 0.02° ≈ 2 km — keeps
+                                # raster ~500x500 for fast tile rendering
+                                grid_resolution_deg=0.02,
+                                runoff_coefficient=0.5,
+                            )
+                            # estimate_rainfall_flooding writes precip_*.tif and
+                            # depth_rainfall_*.tif. We want precip (mm) for the
+                            # rainfall tile renderer. Move to stable name.
+                            src_tif = rain_result.total_precip_path
+                            if os.path.exists(src_tif):
+                                os.replace(src_tif, parametric_tif)
+                            # Clean up the depth raster (not used for this layer)
+                            if os.path.exists(rain_result.depth_raster_path):
+                                try: os.remove(rain_result.depth_raster_path)
+                                except OSError: pass
+                        if os.path.exists(parametric_tif):
+                            with _rainfall_tif_lock:
+                                _lru_set(_rainfall_tif_by_storm, _active_storm.storm_id, parametric_tif)
+                            # Read stats from the parametric tif
+                            import rasterio as _rio
+                            import numpy as _np
+                            with _rio.open(parametric_tif) as _src:
+                                _data = _src.read(1)
+                            _valid = _data[_data > 0]
+                            _max_mm = float(_np.nanmax(_valid)) if _valid.size else 0.0
+                            _avg_mm = float(_np.nanmean(_valid)) if _valid.size else 0.0
+                            self._send_json(200, {
+                                'available': True,
+                                'storm_id': _active_storm.storm_id,
+                                'product': 'Lonfat_parametric_72H',
+                                'valid_time': None,
+                                'duration_hr': duration_hr,
+                                'max_precip_mm': round(_max_mm, 1),
+                                'avg_precip_mm': round(_avg_mm, 1),
+                                'max_precip_in': round(_max_mm / 25.4, 2),
+                                'bbox': list(bbox),
+                                'tif_path': parametric_tif,
+                                'tile_url_template': (
+                                    f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png"
+                                    f"?storm_id={_active_storm.storm_id}"
+                                ),
+                                'source': 'parametric',
+                            })
+                            return
+                    except Exception as _param_err:
+                        print(f"[rainfall] Parametric fallback failed: {_param_err}")
                     self._send_json(200, {'available': False, 'storm_id': _active_storm.storm_id})
                     return
                 # Register the clipped GeoTIFF with the tile server so
