@@ -405,132 +405,111 @@ class MRMSFetcher:
         bbox: Tuple[float, float, float, float],
         out_tif: str,
     ) -> bool:
-        """Convert GRIB2 → clipped GeoTIFF using cfgrib + rasterio."""
+        """Convert GRIB2 → clipped GeoTIFF.
+
+        Parser priority:
+          1. rasterio/GDAL windowed read  — no extra deps; loads only bbox
+             pixels (~2 MB) instead of full CONUS grid (~300 MB). Rasterio's
+             bundled GDAL always has the GRIB2 driver compiled in.
+          2. wgrib2 CLI                   — available when apt-installed;
+             spatially subsets before decode, similar speed to rasterio.
+          3. cfgrib/xarray                — last resort; loads full CONUS
+             grid into RAM, very slow on Railway containers.
+        """
         lon_min, lat_min, lon_max, lat_max = bbox
 
-        # cfgrib path (preferred)
+        # ── 1. rasterio windowed read (primary, fastest, no extra deps) ──────
         try:
-            import xarray as xr
             import numpy as np
             import rasterio
-            from rasterio.transform import from_bounds
+            from rasterio.windows import from_bounds as _wfb
+            from rasterio.transform import from_bounds as _tfb
 
-            ds = xr.open_dataset(grib_path, engine="cfgrib", indexpath="")
-            # Field is named 'tp' (total precipitation, mm)
-            if "tp" in ds:
-                da = ds["tp"]
-            elif "unknown" in ds:
-                da = ds["unknown"]
-            else:
-                da = list(ds.data_vars.values())[0]
+            with rasterio.open(grib_path) as ds:
+                win  = _wfb(lon_min, lat_min, lon_max, lat_max, ds.transform)
+                data = ds.read(1, window=win).astype(np.float32)
+                n_rows, n_cols = data.shape
 
-            # MRMS uses 0–360 longitude convention on some products
-            if float(da.longitude.max()) > 180:
-                da = da.assign_coords(
-                    longitude=(da.longitude + 180) % 360 - 180
-                ).sortby("longitude")
-
-            # Clip to bbox
-            da_clip = da.sel(
-                latitude=slice(lat_max, lat_min),
-                longitude=slice(lon_min, lon_max),
-            )
-            data = da_clip.values.astype("float32")
-            data[data < 0] = 0  # MRMS nodata is -999; zero out
-            lats = da_clip.latitude.values
-            lons = da_clip.longitude.values
-
-            n_rows, n_cols = data.shape
-            transform = from_bounds(
-                float(lons.min()), float(lats.min()),
-                float(lons.max()), float(lats.max()),
-                n_cols, n_rows,
-            )
-
-            # Atomic write — concurrent /api/rainfall callers hit the
-            # cache-hit fast path via `os.path.exists(out_tif)`, so a
-            # partial file would be served as a valid tif.
+            data[data < 0] = 0  # MRMS nodata (-3, -9999) → zero
+            transform = _tfb(lon_min, lat_min, lon_max, lat_max, n_cols, n_rows)
             tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
             with rasterio.open(
-                tif_tmp, "w",
-                driver="GTiff", dtype="float32", count=1,
-                width=n_cols, height=n_rows,
-                crs="EPSG:4326", transform=transform,
-                nodata=-9999,
-                compress="deflate", predictor=3,
+                tif_tmp, "w", driver="GTiff", dtype="float32", count=1,
+                width=n_cols, height=n_rows, crs="EPSG:4326", transform=transform,
+                nodata=-9999, compress="deflate", predictor=3,
             ) as dst:
                 dst.write(data, 1)
-                dst.update_tags(
-                    source="MRMS_QPE",
-                    product=os.path.basename(grib_path),
-                    units="mm",
-                )
+                dst.update_tags(source="MRMS_QPE",
+                                product=os.path.basename(grib_path), units="mm")
+            os.replace(tif_tmp, out_tif)
+            return True
+        except Exception as exc:
+            logger.warning("rasterio GRIB2 parse failed: %s — trying wgrib2", exc)
+
+        # ── 2. wgrib2 CLI (installed via apt in Dockerfile) ──────────────────
+        try:
+            import subprocess, numpy as np, rasterio
+            from rasterio.transform import from_bounds as _tfb
+
+            # wgrib2 -small_grib subsets spatially before decode
+            small_grib = grib_path + ".small"
+            cmd_subset = [
+                "wgrib2", grib_path,
+                "-small_grib",
+                f"{lon_min % 360:.2f}:{lon_max % 360:.2f}",
+                f"{lat_min:.2f}:{lat_max:.2f}",
+                small_grib,
+            ]
+            subprocess.run(cmd_subset, check=True, capture_output=True, timeout=30)
+
+            # Re-open the small file with rasterio
+            with rasterio.open(small_grib) as ds:
+                data = ds.read(1).astype(np.float32)
+                n_rows, n_cols = data.shape
+            data[data < 0] = 0
+            transform = _tfb(lon_min, lat_min, lon_max, lat_max, n_cols, n_rows)
+            tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
+            with rasterio.open(
+                tif_tmp, "w", driver="GTiff", dtype="float32", count=1,
+                width=n_cols, height=n_rows, crs="EPSG:4326", transform=transform,
+                nodata=-9999, compress="deflate", predictor=3,
+            ) as dst:
+                dst.write(data, 1)
+            os.replace(tif_tmp, out_tif)
+            try: os.remove(small_grib)
+            except OSError: pass
+            return True
+        except Exception as exc:
+            logger.warning("wgrib2 fallback failed: %s — trying cfgrib", exc)
+
+        # ── 3. cfgrib/xarray (last resort — loads full CONUS into RAM) ───────
+        try:
+            import xarray as xr, numpy as np, rasterio
+            from rasterio.transform import from_bounds as _tfb
+
+            ds = xr.open_dataset(grib_path, engine="cfgrib", indexpath="")
+            da = ds.get("tp") or ds.get("unknown") or list(ds.data_vars.values())[0]
+            if float(da.longitude.max()) > 180:
+                da = da.assign_coords(longitude=(da.longitude + 180) % 360 - 180).sortby("longitude")
+            da_clip = da.sel(latitude=slice(lat_max, lat_min), longitude=slice(lon_min, lon_max))
+            data = da_clip.values.astype("float32")
+            data[data < 0] = 0
+            lats, lons = da_clip.latitude.values, da_clip.longitude.values
+            n_rows, n_cols = data.shape
+            transform = _tfb(float(lons.min()), float(lats.min()),
+                             float(lons.max()), float(lats.max()), n_cols, n_rows)
+            tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
+            with rasterio.open(
+                tif_tmp, "w", driver="GTiff", dtype="float32", count=1,
+                width=n_cols, height=n_rows, crs="EPSG:4326", transform=transform,
+                nodata=-9999, compress="deflate", predictor=3,
+            ) as dst:
+                dst.write(data, 1)
             os.replace(tif_tmp, out_tif)
             ds.close()
             return True
-
-        except ImportError:
-            logger.warning("cfgrib/xarray not installed; trying wgrib2 CLI")
         except Exception as exc:
-            logger.warning("cfgrib parse failed: %s — trying wgrib2", exc)
-
-        # wgrib2 fallback (CLI tool)
-        try:
-            import subprocess
-            import numpy as np
-            import rasterio
-            from rasterio.transform import from_bounds
-
-            csv_path = grib_path + ".csv"
-            cmd = [
-                "wgrib2", grib_path,
-                "-latlon",
-                f"{lon_min}:{int((lon_max-lon_min)/0.01)}:0.01",
-                f"{lat_min}:{int((lat_max-lat_min)/0.01)}:0.01",
-                "-csv", csv_path,
-            ]
-            subprocess.run(cmd, check=True, capture_output=True)
-
-            lons_u, lats_u, vals = [], [], []
-            with open(csv_path) as f:
-                next(f)  # header
-                for line in f:
-                    _, _, lat, lon, val = line.strip().split(",")
-                    lats_u.append(float(lat))
-                    lons_u.append(float(lon))
-                    vals.append(max(0.0, float(val)))
-
-            import numpy as np
-            lats_arr = np.unique(sorted(set(lats_u), reverse=True))
-            lons_arr = np.unique(sorted(set(lons_u)))
-            data = np.full((len(lats_arr), len(lons_arr)), -9999, dtype=np.float32)
-            lat_idx = {v: i for i, v in enumerate(lats_arr)}
-            lon_idx = {v: i for i, v in enumerate(lons_arr)}
-            for lat, lon, val in zip(lats_u, lons_u, vals):
-                r, c = lat_idx.get(lat), lon_idx.get(lon)
-                if r is not None and c is not None:
-                    data[r, c] = val
-
-            transform = from_bounds(
-                float(lons_arr.min()), float(lats_arr.min()),
-                float(lons_arr.max()), float(lats_arr.max()),
-                len(lons_arr), len(lats_arr),
-            )
-            tif_tmp = f"{out_tif}.tmp.{os.getpid()}.{threading.get_ident()}"
-            with rasterio.open(
-                tif_tmp, "w",
-                driver="GTiff", dtype="float32", count=1,
-                width=len(lons_arr), height=len(lats_arr),
-                crs="EPSG:4326", transform=transform,
-                nodata=-9999,
-                compress="deflate", predictor=3,
-            ) as dst:
-                dst.write(data, 1)
-            os.replace(tif_tmp, out_tif)
-            os.remove(csv_path)
-            return True
-        except Exception as exc:
-            logger.error("wgrib2 fallback failed: %s", exc)
+            logger.error("All GRIB parsers failed for %s: %s", grib_path, exc)
             return False
 
     # ── Internal: IEM archive (pre-2020 historical) ──────────────────────────
@@ -741,6 +720,27 @@ class MRMSFetcher:
         straight to GeoTIFF via _grib_to_clipped_tif instead.
         """
         lon_min, lat_min, lon_max, lat_max = bbox
+        # ── Tier 1: rasterio windowed read (GDAL GRIB2 driver) ───────────
+        # Loads only the storm bbox (~200K pixels) instead of the full
+        # CONUS grid (~24.5M pixels) — ~42x less data.  No cfgrib/xarray.
+        try:
+            import numpy as np
+            import rasterio
+            from rasterio.windows import from_bounds as _wfb
+            with rasterio.open(grib_path) as ds:
+                win    = _wfb(lon_min, lat_min, lon_max, lat_max, ds.transform)
+                data   = ds.read(1, window=win).astype(np.float32)
+                win_tf = ds.window_transform(win)
+                n_rows, n_cols = data.shape
+            data[data < 0] = 0
+            lons = np.array([win_tf.c + (j + 0.5) * win_tf.a for j in range(n_cols)])
+            lats = np.array([win_tf.f + (i + 0.5) * win_tf.e for i in range(n_rows)])
+            return data, lats, lons
+        except Exception as exc:
+            logger.debug("rasterio GRIB array parse failed on %s: %s",
+                         os.path.basename(grib_path), exc)
+
+        # ── Tier 2: cfgrib/xarray (last resort, full-CONUS load) ─────────
         try:
             import xarray as xr
             import numpy as np
@@ -765,7 +765,8 @@ class MRMSFetcher:
             ds.close()
             return data, lats, lons
         except Exception as exc:
-            logger.debug("IEM grib parse failed on %s: %s", os.path.basename(grib_path), exc)
+            logger.debug("cfgrib GRIB array parse failed on %s: %s",
+                         os.path.basename(grib_path), exc)
             return None, None, None
 
     def _result_from_tif(

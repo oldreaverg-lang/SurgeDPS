@@ -765,6 +765,99 @@ def main():
         print(f"  Compound mosaic summary: {cm_built} built · {cm_skip} up to date · {cm_fail} failed")
     print("=" * 60)
 
+    # ── Phase 5: MRMS QPE prewarming ──────────────────────────────────────
+    # For every historical storm that has a landfall_date (IEM archive
+    # coverage goes back to ~2015), pre-build the accumulated rainfall
+    # GeoTIFF and store it under PERSISTENT_DIR/mrms/.  Subsequent
+    # /api/rainfall requests are then cache hits: no 90-120s IEM download.
+    #
+    # Strategy:
+    #   • Skip storms without landfall_date (parametric-only; Katrina etc.)
+    #   • Skip storms whose IEM TIF already exists (idempotent redeploys)
+    #   • Run each storm sequentially to keep peak RAM low
+    #   • MRMSFetcher itself retries individual hourly files and writes the
+    #     clipped TIF atomically, so a crash mid-storm is safe to re-run.
+    print()
+    print("=" * 60)
+    print("Phase 5: Prewarming MRMS QPE rainfall GeoTIFFs")
+    print("=" * 60)
+
+    try:
+        from rainfall.mrms_fetcher import MRMSFetcher, storm_bbox_from_catalog_entry
+        from datetime import datetime, timezone as _utc, timedelta as _td
+        import hashlib as _hl
+        import glob as _mrms_glob
+        _mrms_available = True
+    except Exception as _mrms_imp_err:
+        print(f"  [mrms] MRMSFetcher import failed — skipping ({_mrms_imp_err})")
+        _mrms_available = False
+
+    if _mrms_available:
+        mrms_ok = mrms_skip = mrms_fail = 0
+        mrms_dir = os.path.join(str(PERSISTENT_DIR), 'mrms')
+        os.makedirs(mrms_dir, exist_ok=True)
+
+        for storm in HISTORICAL_STORMS:
+            sid = storm.storm_id
+            landfall_date = getattr(storm, 'landfall_date', None)
+            if not landfall_date:
+                # No date → parametric fallback only; nothing to prewarm
+                mrms_skip += 1
+                continue
+
+            # Resolve the same valid_time that api_server.py uses so the cache
+            # key (md5 of "iem|<valid_time>|<duration_hr>|<bbox_str>") matches.
+            duration_hr = 72
+            try:
+                valid_time = datetime.strptime(landfall_date, '%Y-%m-%d').replace(
+                    hour=18, tzinfo=_utc
+                ) + _td(hours=48)
+            except ValueError:
+                print(f"  [mrms] {sid:20s} — bad landfall_date {landfall_date!r}, skipping")
+                mrms_skip += 1
+                continue
+
+            bbox = storm_bbox_from_catalog_entry(
+                storm.landfall_lat, storm.landfall_lon, buffer_deg=4.0
+            )
+            bbox_str = "_".join(f"{v:.3f}" for v in bbox)
+            cache_token = f"iem|{valid_time.isoformat()}|{duration_hr}|{bbox_str}"
+            ck = _hl.md5(cache_token.encode()).hexdigest()[:12]
+            iem_tif = os.path.join(mrms_dir, f'iem_{ck}.tif')
+
+            if os.path.exists(iem_tif):
+                print(f"  [mrms] {sid:20s} — already cached ({iem_tif}), skipping")
+                mrms_skip += 1
+                continue
+
+            print(f"  [mrms] {sid:20s} — fetching IEM accumulation (landfall {landfall_date}, "
+                  f"valid_time {valid_time.date()})...")
+            t_s = time.time()
+            try:
+                fetcher = MRMSFetcher(cache_dir=mrms_dir, keep_raw_grib=False)
+                result = fetcher.fetch_iem_historical(
+                    storm_bbox=bbox,
+                    valid_time=valid_time,
+                    duration_hr=duration_hr,
+                )
+                if result and result.clipped_tif_path and os.path.exists(result.clipped_tif_path):
+                    print(f"  [mrms] {sid:20s} — OK  max={result.max_precip_mm:.1f}mm "
+                          f"avg={result.avg_precip_mm:.1f}mm  ({time.time()-t_s:.0f}s)  "
+                          f"source={result.source}")
+                    mrms_ok += 1
+                else:
+                    print(f"  [mrms] {sid:20s} — returned no TIF ({time.time()-t_s:.0f}s)")
+                    mrms_fail += 1
+            except Exception as _mrms_err:
+                print(f"  [mrms] {sid:20s} — FAILED: {_mrms_err} ({time.time()-t_s:.0f}s)")
+                mrms_fail += 1
+
+            # Brief pause between storms — IEM mtarchive is a shared public service
+            time.sleep(2.0)
+
+        print(f"  MRMS prewarm summary: {mrms_ok} fetched · {mrms_skip} skipped · {mrms_fail} failed")
+    print("=" * 60)
+
 
 if __name__ == '__main__':
     main()
