@@ -59,6 +59,18 @@ from persistent_paths import CELLS_DIR, GEOCODE_DIR, PERSISTENT_DATA_DIR
 PERSISTENT_DIR = str(PERSISTENT_DATA_DIR)
 CACHE_DIR = str(CELLS_DIR)
 
+
+# ── Storm ID validation ─────────────────────────────────────────────
+# All endpoints that use storm_id in a filesystem path go through
+# _valid_storm_id() to block path traversal (e.g. "../../etc/passwd")
+# and junk input. Real storm ids look like "al052024" / "ep042025_sim".
+import re as _re
+_STORM_ID_RE = _re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+def _valid_storm_id(sid: str) -> bool:
+    return bool(sid) and bool(_STORM_ID_RE.match(sid))
+
+
 # ── DPS Score Lookup (from StormDPS compiled_bundle) ──
 _DPS_SCORES: dict = {}
 _dps_path = os.path.join(BASE_DIR, 'data', 'dps_scores.json')
@@ -797,10 +809,10 @@ def _build_storm_compound_mosaic(storm_id: str) -> tuple[str | None, dict]:
 
     cache_dir = _os.path.join(CACHE_DIR, storm_id)
     if not _os.path.isdir(cache_dir):
-        return None, {'cell_count': 0}
+        return None, {'cell_count': 0, 'max_depth_ft': None, 'avg_depth_ft': None}
     cell_tifs = sorted(_glob.glob(_os.path.join(cache_dir, 'cell_*_compound.tif')))
     if not cell_tifs:
-        return None, {'cell_count': 0}
+        return None, {'cell_count': 0, 'max_depth_ft': None, 'avg_depth_ft': None}
 
     mosaic_path = _os.path.join(cache_dir, 'storm_compound.tif')
     # Rebuild if mosaic missing or stale vs any cell tif.
@@ -1421,12 +1433,13 @@ class CellHandler(BaseHTTPRequestHandler):
         if path.startswith('/api/rainfall_tile/'):
             try:
                 storm_id = (params.get('storm_id') or [''])[0]
-                if not storm_id:
-                    self._send_error(400, 'Missing storm_id')
+                if not _valid_storm_id(storm_id):
+                    self._send_error(400, 'Missing or invalid storm_id')
                     return
                 with _rainfall_tif_lock:
                     tif_path = _rainfall_tif_by_storm.get(storm_id)
-                if not tif_path or not os.path.exists(tif_path):
+                    tif_ok = bool(tif_path) and os.path.exists(tif_path)
+                if not tif_ok:
                     # Client probably hit the tile endpoint before /api/rainfall.
                     # Return a transparent 256x256 PNG so MapLibre doesn't
                     # flood the console with errors.
@@ -1454,12 +1467,13 @@ class CellHandler(BaseHTTPRequestHandler):
         if path.startswith('/api/qpf_tile/'):
             try:
                 storm_id = (params.get('storm_id') or [''])[0]
-                if not storm_id:
-                    self._send_error(400, 'Missing storm_id')
+                if not _valid_storm_id(storm_id):
+                    self._send_error(400, 'Missing or invalid storm_id')
                     return
                 with _qpf_tif_lock:
                     tif_path = _qpf_tif_by_storm.get(storm_id)
-                if not tif_path or not os.path.exists(tif_path):
+                    tif_ok = bool(tif_path) and os.path.exists(tif_path)
+                if not tif_ok:
                     self._send_raw(200, _transparent_tile_png(), content_type='image/png',
                                    cache_control='no-cache')
                     return
@@ -1670,11 +1684,18 @@ class CellHandler(BaseHTTPRequestHandler):
                 coords: list[tuple[float, float]] = []
                 if raw_coords:
                     for pair in raw_coords.split(';'):
+                        pair = pair.strip()
+                        if not pair:
+                            continue
                         try:
                             lon_s, lat_s = pair.split(',')
                             coords.append((float(lon_s), float(lat_s)))
-                        except Exception:
-                            coords.append((0.0, 0.0))
+                        except (ValueError, IndexError):
+                            # Don't silently pad with (0,0) — that would
+                            # shift the rank→coord alignment and poison
+                            # the Dijkstra targets. Bail to heuristic.
+                            coords = []
+                            break
                 if not ranks:
                     self._send_json(200, {
                         'available': False, 'estimates': [], 'generated_at': None,
@@ -1766,16 +1787,17 @@ class CellHandler(BaseHTTPRequestHandler):
                         'notes': 'No cells loaded yet — load at least one cell to see compound flooding.',
                     })
                     return
+                cell_count = stats.get('cell_count', 0)
                 self._send_json(200, {
                     'available': True,
                     'storm_id': _active_storm.storm_id,
-                    'cell_count': stats['cell_count'],
-                    'max_depth_ft': stats['max_depth_ft'],
-                    'avg_depth_ft': stats['avg_depth_ft'],
+                    'cell_count': cell_count,
+                    'max_depth_ft': stats.get('max_depth_ft'),
+                    'avg_depth_ft': stats.get('avg_depth_ft'),
                     'tile_url_template': (
                         f'/api/compound_tile/{{z}}/{{x}}/{{y}}.png?storm_id={_active_storm.storm_id}'
                     ),
-                    'notes': f"Compound mosaic of {stats['cell_count']} cell(s) — "
+                    'notes': f"Compound mosaic of {cell_count} cell(s) — "
                              f"surge + rainfall + fluvial combined.",
                 })
             except Exception as e:
@@ -1789,8 +1811,8 @@ class CellHandler(BaseHTTPRequestHandler):
         if path.startswith('/api/compound_tile/'):
             try:
                 storm_id = (params.get('storm_id') or [''])[0]
-                if not storm_id:
-                    self._send_error(400, 'Missing storm_id')
+                if not _valid_storm_id(storm_id):
+                    self._send_error(400, 'Missing or invalid storm_id')
                     return
                 with _compound_lock:
                     mosaic_path = _compound_mosaic_by_storm.get(storm_id)

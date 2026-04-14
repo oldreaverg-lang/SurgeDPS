@@ -210,7 +210,6 @@ def _segment_depths_ft(
 def build_graph(
     ways: list[dict],
     compound_tif_path: str | None,
-    sample_every_m: int = 150,
 ) -> RoadsBundle | None:
     """
     Build a directed graph from Overpass ways, weighted by estimated
