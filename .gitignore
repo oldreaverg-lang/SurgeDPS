@@ -37,3 +37,4 @@ Thumbs.db
 # Excel / Word artifacts
 *.xlsx
 *.docx
+.cache/
