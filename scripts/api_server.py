@@ -373,7 +373,11 @@ def _mrms_background_fetch(storm_id: str, fetcher, bbox, duration_hr: int,
             if result.clipped_tif_path and _os.path.exists(result.clipped_tif_path):
                 with _rainfall_tif_lock:
                     _lru_set(_rainfall_tif_by_storm, storm_id, result.clipped_tif_path)
-            tile_url = (f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm_id}"
+            # Cache-bust tile URLs with the source TIF's mtime so Cloudflare
+            # (and browsers) never serve stale PNGs after a data regeneration.
+            _tif_v = (int(_os.path.getmtime(result.clipped_tif_path))
+                      if result.clipped_tif_path and _os.path.exists(result.clipped_tif_path) else 0)
+            tile_url = (f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm_id}&v={_tif_v}"
                         if result.clipped_tif_path else None)
             _finish({
                 "available": True, "storm_id": storm_id,
@@ -423,7 +427,7 @@ def _mrms_background_fetch(storm_id: str, fetcher, bbox, duration_hr: int,
                 "max_precip_mm": round(_max_mm, 1), "avg_precip_mm": round(_avg_mm, 1),
                 "max_precip_in": round(_max_mm / 25.4, 2),
                 "bbox": list(bbox), "tif_path": parametric_tif,
-                "tile_url_template": f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm_id}",
+                "tile_url_template": f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm_id}&v={int(_os.path.getmtime(parametric_tif)) if _os.path.exists(parametric_tif) else 0}",
                 "source": "parametric",
             })
         else:
@@ -2035,7 +2039,7 @@ class CellHandler(BaseHTTPRequestHandler):
                             'avg_precip_mm': round(float(_np.nanmean(_v)), 1) if _v.size else 0.0,
                             'max_precip_in': round(float(_np.nanmax(_v)) / 25.4, 2) if _v.size else 0.0,
                             'bbox': list(bbox), 'tif_path': iem_tif,
-                            'tile_url_template': f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={sid}",
+                            'tile_url_template': f"/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png?storm_id={sid}&v={int(os.path.getmtime(iem_tif))}",
                             'source': 'mrms_iem',
                         }
                         with _mrms_jobs_lock:
