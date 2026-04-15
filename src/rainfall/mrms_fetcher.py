@@ -437,10 +437,13 @@ class MRMSFetcher:
                 data = ds.read(1, window=win).astype(np.float32)
                 n_rows, n_cols = data.shape
 
-            if data.size == 0 or float(data.max()) <= 0.0:
+            # Reject only OUT-OF-BOUNDS windows, not zero-rain windows. A
+            # legitimate dry hour has shape>0 with max==0; we must keep it
+            # so the accumulator sums correctly across the full 72 hours.
+            if data.size == 0 or n_rows == 0 or n_cols == 0:
                 raise ValueError(
-                    "rasterio tier returned empty/zero window "
-                    "(likely lon-space or driver issue) — falling through"
+                    "rasterio tier returned empty window "
+                    "(out of grid bounds — falling through)"
                 )
             data[data < 0] = 0  # MRMS nodata (-3, -9999) → zero
             transform = _tfb(lon_min, lat_min, lon_max, lat_max, n_cols, n_rows)
@@ -751,10 +754,12 @@ class MRMSFetcher:
                 data   = ds.read(1, window=win).astype(np.float32)
                 win_tf = ds.window_transform(win)
                 n_rows, n_cols = data.shape
-            if data.size == 0 or float(data.max()) <= 0.0:
+            # Only reject out-of-bounds windows. A dry hour legitimately
+            # has data.max()==0; we must keep it in the accumulator.
+            if data.size == 0 or n_rows == 0 or n_cols == 0:
                 raise ValueError(
-                    "rasterio tier returned empty/zero window "
-                    "(likely lon-space or driver issue) — falling through"
+                    "rasterio tier returned empty window "
+                    "(out of grid bounds — falling through)"
                 )
             data[data < 0] = 0
             # Rehydrate lon coords back to -180..180 so downstream logic
