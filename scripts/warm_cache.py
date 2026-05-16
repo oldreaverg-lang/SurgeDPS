@@ -802,15 +802,43 @@ def main():
         _mrms_available = False
 
     if _mrms_available:
+        import concurrent.futures as _cf
         mrms_ok = mrms_skip = mrms_fail = 0
         mrms_dir = os.path.join(str(PERSISTENT_DIR), 'mrms')
         os.makedirs(mrms_dir, exist_ok=True)
+
+        # Per-storm hard timeout. Phase 5's first run hung for >1h on the
+        # 8th storm in the queue — almost certainly cfgrib sitting on a
+        # corrupt GRIB or a slow IEM mirror response. 5 min gives any
+        # well-behaved IEM fetch (typically ~90s) plenty of headroom
+        # while preventing one bad storm from starving the rest.
+        PHASE5_STORM_TIMEOUT_S = 300
+
+        # IEM mtarchive's GaugeCorr_QPE_01H coverage starts mid-2015.
+        # Earlier storms (Katrina 2005, Ike 2008, Sandy 2012, etc.) will
+        # always fail to fetch — and worse, if we delete their old cached
+        # TIFs first under the self-heal pattern, we lose whatever they
+        # had (often a manually-seeded or parametric-fallback TIF). Skip
+        # them entirely so Phase 5 never touches their data.
+        from datetime import date as _date_cmp
+        _IEM_EARLIEST_LANDFALL = _date_cmp(2015, 7, 1)
 
         for storm in HISTORICAL_STORMS:
             sid = storm.storm_id
             landfall_date = getattr(storm, 'landfall_date', None)
             if not landfall_date:
                 # No date → parametric fallback only; nothing to prewarm
+                mrms_skip += 1
+                continue
+
+            # Pre-IEM-era guard
+            try:
+                _lf_date = datetime.strptime(landfall_date, '%Y-%m-%d').date()
+            except ValueError:
+                _lf_date = None
+            if _lf_date and _lf_date < _IEM_EARLIEST_LANDFALL:
+                print(f"  [mrms] {sid:20s} — pre-IEM era (landfall {landfall_date}), "
+                      f"skipping (would never fetch successfully)")
                 mrms_skip += 1
                 continue
 
@@ -839,9 +867,13 @@ def main():
             # cumulative-through-hour-N TIFs to <mrms_dir>/timelapse/<key>/
             # alongside the cumulative iem_<key>.tif. Pre-6f3bc92 caches
             # only have the cumulative; the timelapse dir is missing or
-            # empty. Treat those as stale, delete, and let the re-fetch
-            # below produce both. One-time cost (~90s/storm) on the first
-            # post-6f3bc92 deploy; idempotent afterwards.
+            # empty. The original self-heal pattern was:
+            #   1. delete old TIF  ← destroys data if re-fetch fails
+            #   2. re-fetch
+            # That left 8 storms with NO TIF when Phase 5 hung after 7
+            # successful re-fetches. New pattern: RENAME to .stale, attempt
+            # re-fetch, restore the .stale on failure. Atomic data
+            # preservation — never end up worse than where we started.
             timelapse_dir = os.path.join(mrms_dir, "timelapse", ck)
             has_milestones = (
                 os.path.isdir(timelapse_dir)
@@ -850,42 +882,85 @@ def main():
                     for fn in os.listdir(timelapse_dir)
                 )
             )
-            if os.path.exists(iem_tif) and not has_milestones:
-                try:
-                    os.remove(iem_tif)
-                    print(f"  [mrms] {sid:20s} — stale pre-milestone TIF purged, "
-                          f"will re-fetch with timelapse frames")
-                except OSError as _purge_err:
-                    print(f"  [mrms] {sid:20s} — purge failed ({_purge_err}), "
-                          f"skipping (slider will stay hidden for this storm)")
-                    mrms_skip += 1
-                    continue
 
             if os.path.exists(iem_tif) and has_milestones:
                 print(f"  [mrms] {sid:20s} — already cached with timelapse, skipping")
                 mrms_skip += 1
                 continue
 
+            # If a TIF exists without milestones, back it up (rename to .stale).
+            # The fetcher's cache-hit fast path checks for iem_tif's existence
+            # by exact path, so renaming away makes the fetcher re-fetch.
+            stale_path = None
+            if os.path.exists(iem_tif) and not has_milestones:
+                stale_path = iem_tif + '.stale'
+                # Drop any leftover .stale from a previous failed run
+                if os.path.exists(stale_path):
+                    try:
+                        os.remove(stale_path)
+                    except OSError:
+                        pass
+                try:
+                    os.rename(iem_tif, stale_path)
+                    print(f"  [mrms] {sid:20s} — pre-milestone TIF backed up to .stale, "
+                          f"attempting re-fetch...")
+                except OSError as _rename_err:
+                    print(f"  [mrms] {sid:20s} — backup rename failed ({_rename_err}), "
+                          f"skipping (won't touch existing data)")
+                    mrms_skip += 1
+                    continue
+
             print(f"  [mrms] {sid:20s} — fetching IEM accumulation (landfall {landfall_date}, "
-                  f"valid_time {valid_time.date()})...")
+                  f"valid_time {valid_time.date()}, timeout {PHASE5_STORM_TIMEOUT_S}s)...")
             t_s = time.time()
+            result = None
+            timed_out = False
             try:
                 fetcher = MRMSFetcher(cache_dir=mrms_dir, keep_raw_grib=False)
-                result = fetcher.fetch_iem_historical(
-                    storm_bbox=bbox,
-                    valid_time=valid_time,
-                    duration_hr=duration_hr,
-                )
-                if result and result.clipped_tif_path and os.path.exists(result.clipped_tif_path):
-                    print(f"  [mrms] {sid:20s} — OK  max={result.max_precip_mm:.1f}mm "
-                          f"avg={result.avg_precip_mm:.1f}mm  ({time.time()-t_s:.0f}s)  "
-                          f"source={result.source}")
-                    mrms_ok += 1
-                else:
-                    print(f"  [mrms] {sid:20s} — returned no TIF ({time.time()-t_s:.0f}s)")
-                    mrms_fail += 1
+                # ThreadPoolExecutor lets us bound the per-storm wall clock.
+                # Python can't forcibly kill the worker thread on timeout —
+                # it'll continue in the background until its own urllib /
+                # cfgrib calls finish — but it can't block the next storm.
+                with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(
+                        fetcher.fetch_iem_historical,
+                        storm_bbox=bbox,
+                        valid_time=valid_time,
+                        duration_hr=duration_hr,
+                    )
+                    try:
+                        result = fut.result(timeout=PHASE5_STORM_TIMEOUT_S)
+                    except _cf.TimeoutError:
+                        timed_out = True
+                        result = None
             except Exception as _mrms_err:
-                print(f"  [mrms] {sid:20s} — FAILED: {_mrms_err} ({time.time()-t_s:.0f}s)")
+                print(f"  [mrms] {sid:20s} — EXCEPTION: {_mrms_err} ({time.time()-t_s:.0f}s)")
+                result = None
+
+            if result and result.clipped_tif_path and os.path.exists(result.clipped_tif_path):
+                # Success — drop the .stale backup
+                if stale_path and os.path.exists(stale_path):
+                    try:
+                        os.remove(stale_path)
+                    except OSError:
+                        pass
+                print(f"  [mrms] {sid:20s} — OK  max={result.max_precip_mm:.1f}mm "
+                      f"avg={result.avg_precip_mm:.1f}mm  ({time.time()-t_s:.0f}s)  "
+                      f"source={result.source}")
+                mrms_ok += 1
+            else:
+                # Failure — restore the .stale backup if we made one so the
+                # storm at least serves its previous (cumulative-only) data.
+                restored = False
+                if stale_path and os.path.exists(stale_path):
+                    try:
+                        os.rename(stale_path, iem_tif)
+                        restored = True
+                    except OSError as _re_err:
+                        print(f"  [mrms] {sid:20s} — RESTORE FAILED: {_re_err}")
+                reason = "TIMEOUT" if timed_out else "returned no TIF"
+                tag = "stale TIF restored" if restored else "no prior data to restore"
+                print(f"  [mrms] {sid:20s} — {reason}, {tag} ({time.time()-t_s:.0f}s)")
                 mrms_fail += 1
 
             # Brief pause between storms — IEM mtarchive is a shared public service
