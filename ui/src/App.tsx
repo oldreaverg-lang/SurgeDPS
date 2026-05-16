@@ -2407,6 +2407,14 @@ function App() {
     layerRainfall ? 'rainfall' : 'surge';
   const [rainfallStats, setRainfallStats] = useState<{ maxIn: number | null; avgIn: number | null; product: string | null; validTime: string | null; notes: string; tileUrl: string | null } | null>(null);
   const [rainfallLoading, setRainfallLoading] = useState(false);
+  // ── Rainfall accumulation timelapse ──
+  // /api/rainfall_frames returns 9 cumulative-through-hour-N TIFs
+  // (T+1, T+3, T+6, T+12, T+24, T+36, T+48, T+60, T+72) when the storm's
+  // IEM MRMS data has been fetched under the milestone-aware fetcher.
+  // null hour = the 72h cumulative (default — same as before the slider).
+  type RainFrame = { hour: number; max_mm: number | null; max_in: number | null; tile_url_template: string };
+  const [rainfallFrames, setRainfallFrames] = useState<RainFrame[]>([]);
+  const [rainfallHour, setRainfallHour] = useState<number | null>(null);
   // ── QPF sub-mode when hazardView === 'rainfall' ──
   // 'observed' → MRMS accumulation (default); 'forecast' → WPC QPF 72hr.
   const [rainfallMode, setRainfallMode] = useState<'observed' | 'forecast'>('observed');
@@ -2767,6 +2775,52 @@ function App() {
       .finally(() => { if (!cancelled) setRainfallLoading(false); });
     return () => { cancelled = true; };
   }, [hazardView, activeStorm]);
+
+  // ── Rainfall accumulation timelapse frames ──
+  // Fetched after rainfallStats arrives (the 72h cumulative TIF must be on
+  // disk for the milestone TIFs to even be present). Slider only renders
+  // when the response includes 2+ frames; storms with legacy single-TIF
+  // caches return frames=[] and the slider stays hidden (transparent
+  // degradation to the existing 72h-cumulative behavior).
+  useEffect(() => {
+    if (hazardView !== 'rainfall' || rainfallMode !== 'observed' || !activeStorm) {
+      setRainfallFrames([]);
+      setRainfallHour(null);
+      return;
+    }
+    if (!rainfallStats?.tileUrl) {
+      // Rainfall raster not yet on disk — frames endpoint would return
+      // available=false. Skip the fetch entirely.
+      setRainfallFrames([]);
+      setRainfallHour(null);
+      return;
+    }
+    let cancelled = false;
+    const url = `/surgedps/api/rainfall_frames?storm_id=${encodeURIComponent(activeStorm.storm_id)}`;
+    fetch(url)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`frames ${r.status}`)))
+      .then((data: { frames?: RainFrame[] }) => {
+        if (cancelled) return;
+        const frames = Array.isArray(data?.frames) ? data.frames : [];
+        // Prefix tile URLs with /surgedps so they resolve through the
+        // same SPA mount the SurgeDPS service is served at.
+        const prefixed = frames.map(f => ({
+          ...f,
+          tile_url_template: f.tile_url_template?.startsWith('/')
+            ? `/surgedps${f.tile_url_template}`
+            : f.tile_url_template,
+        }));
+        setRainfallFrames(prefixed);
+        setRainfallHour(null); // default to cumulative on storm change
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRainfallFrames([]);
+          setRainfallHour(null);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [hazardView, rainfallMode, activeStorm, rainfallStats?.tileUrl]);
 
   // ── Shelter capacity (E5) — fetched when toggle flipped on ──
   useEffect(() => {
@@ -4340,26 +4394,40 @@ ${fieldFlag ? `
               /api/rainfall_tile endpoint (rio-tiler + NWS precipitation ramp).
               Rendered below the damage bubbles so loss points remain visible;
               opacity tuned so the basemap and FEMA zones still read through. */}
-          {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallStats?.tileUrl && (
-            <Source
-              id="rainfall-raster"
-              type="raster"
-              tiles={[rainfallStats.tileUrl]}
-              tileSize={256}
-              minzoom={3}
-              maxzoom={12}
-            >
-              <Layer
-                id="rainfall-raster-layer"
+          {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallStats?.tileUrl && (() => {
+            // When the user has scrubbed to a specific hour, swap in the
+            // frame-specific tile URL (cumulative through hour N). Falling
+            // back to the 72h cumulative when rainfallHour is null preserves
+            // the previous default behavior exactly.
+            const activeFrame = rainfallHour != null
+              ? rainfallFrames.find(f => f.hour === rainfallHour)
+              : null;
+            const tileUrl = activeFrame?.tile_url_template || rainfallStats.tileUrl;
+            // Key includes hour so MapLibre teardown/rebuilds the source
+            // when the user scrubs (otherwise it keeps serving the original).
+            const sourceKey = `rainfall-raster-${rainfallHour ?? 'cum'}`;
+            return (
+              <Source
+                key={sourceKey}
+                id="rainfall-raster"
                 type="raster"
-                paint={{
-                  'raster-opacity': 0.72,
-                  'raster-fade-duration': 250,
-                  'raster-resampling': 'linear',
-                }}
-              />
-            </Source>
-          )}
+                tiles={[tileUrl]}
+                tileSize={256}
+                minzoom={3}
+                maxzoom={12}
+              >
+                <Layer
+                  id="rainfall-raster-layer"
+                  type="raster"
+                  paint={{
+                    'raster-opacity': 0.72,
+                    'raster-fade-duration': 250,
+                    'raster-resampling': 'linear',
+                  }}
+                />
+              </Source>
+            );
+          })()}
 
           {hazardView === 'rainfall' && rainfallMode === 'forecast' && qpfStats?.tileUrl && (
             <Source
@@ -5594,6 +5662,51 @@ ${fieldFlag ? `
               )}
               {hazardView === 'rainfall' && rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
                 <div className="text-gray-500">{rainfallStats.notes}</div>
+              )}
+              {/* ── Accumulation timelapse slider ────────────────────────────────
+                  Shows cumulative-through-hour-N rainfall. Hidden unless the
+                  /api/rainfall_frames endpoint returned 2+ frames (the storm's
+                  IEM data was fetched under the milestone-aware fetcher).
+                  rainfallHour === null → 72h cumulative (default); scrubbing
+                  selects a specific milestone frame from rainfallFrames. */}
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallFrames.length >= 2 && (
+                <div className="mt-1.5 pt-1.5 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-[10px] font-semibold text-gray-600">
+                      📅 Accumulation timeline
+                    </div>
+                    <button
+                      onClick={() => setRainfallHour(null)}
+                      className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${rainfallHour === null ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 border border-gray-300'}`}
+                      title="Show the full 72-hour cumulative total"
+                    >Full</button>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={rainfallFrames.length - 1}
+                    value={rainfallHour === null
+                      ? rainfallFrames.length - 1
+                      : Math.max(0, rainfallFrames.findIndex(f => f.hour === rainfallHour))}
+                    onChange={e => {
+                      const idx = Number(e.target.value);
+                      const f = rainfallFrames[idx];
+                      if (f) setRainfallHour(f.hour);
+                    }}
+                    className="w-full accent-indigo-600"
+                  />
+                  <div className="flex justify-between text-[9px] text-gray-500 mt-0.5">
+                    <span>T+{rainfallFrames[0].hour}h</span>
+                    <span className="font-semibold text-gray-800">
+                      {rainfallHour === null
+                        ? `T+${rainfallFrames[rainfallFrames.length - 1].hour}h (full)`
+                        : `T+${rainfallHour}h${rainfallFrames.find(f => f.hour === rainfallHour)?.max_in != null
+                            ? ` · max ${rainfallFrames.find(f => f.hour === rainfallHour)!.max_in} in`
+                            : ''}`}
+                    </span>
+                    <span>T+{rainfallFrames[rainfallFrames.length - 1].hour}h</span>
+                  </div>
+                </div>
               )}
               {/* NWS rainfall legend — shown only when the raster is
                   actually mounted. Each row: color swatch + inch range.
