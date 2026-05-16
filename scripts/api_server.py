@@ -2173,7 +2173,42 @@ class CellHandler(BaseHTTPRequestHandler):
                 cache_dir = os.path.dirname(base_tif)
                 from rainfall.mrms_fetcher import list_timelapse_frames
                 frames = list_timelapse_frames(cache_dir, cache_key)
-                # Trim filesystem path; include tile URL template.
+
+                # Compute landfall context so the frontend can label the
+                # slider relative to landfall rather than relative to the
+                # opaque window_start. Catalog only has landfall_date (no
+                # hour), so we default to 12:00 UTC — accurate to ±6h which
+                # is finer than the milestone spacing.
+                #
+                # Window math (must match fetch_iem_historical):
+                #   valid_time   = landfall_date 18:00 UTC + 48h
+                #   window_start = valid_time - duration_hr (= 72h default)
+                from datetime import datetime as _dt_lf
+                from datetime import timedelta as _td_lf
+                from datetime import timezone as _tz_lf
+                landfall_date = getattr(_active_storm, 'landfall_date', None)
+                landfall_iso = None
+                window_start_iso = None
+                landfall_hour_in_window = None
+                if landfall_date:
+                    try:
+                        landfall_time = _dt_lf.strptime(
+                            landfall_date, '%Y-%m-%d'
+                        ).replace(hour=12, tzinfo=_tz_lf.utc)
+                        valid_time = _dt_lf.strptime(
+                            landfall_date, '%Y-%m-%d'
+                        ).replace(hour=18, tzinfo=_tz_lf.utc) + _td_lf(hours=48)
+                        window_start = valid_time - _td_lf(hours=72)
+                        landfall_iso = landfall_time.isoformat()
+                        window_start_iso = window_start.isoformat()
+                        landfall_hour_in_window = round(
+                            (landfall_time - window_start).total_seconds() / 3600.0,
+                            2,
+                        )
+                    except ValueError:
+                        pass
+
+                # Trim filesystem path; include tile URL template + landfall offset.
                 _tif_v = int(os.path.getmtime(base_tif))
                 for f in frames:
                     f.pop('path', None)
@@ -2181,6 +2216,32 @@ class CellHandler(BaseHTTPRequestHandler):
                         f'/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png'
                         f'?storm_id={storm_id}&hour={f["hour"]}&v={_tif_v}'
                     )
+                    if landfall_hour_in_window is not None:
+                        f['hours_from_landfall'] = round(
+                            f['hour'] - landfall_hour_in_window, 1
+                        )
+                    else:
+                        f['hours_from_landfall'] = None
+
+                # Identify the milestone closest to landfall. Prefer the
+                # FIRST frame at-or-after landfall so the play button starts
+                # from post-landfall accumulation rather than animating
+                # backward through pre-landfall lead-in. If no frames are
+                # post-landfall (catalog landfall time is borked), fall
+                # back to the absolute-closest milestone.
+                landfall_frame_hour = None
+                if landfall_hour_in_window is not None and frames:
+                    at_or_after = [
+                        f for f in frames if f['hour'] >= landfall_hour_in_window
+                    ]
+                    if at_or_after:
+                        landfall_frame_hour = at_or_after[0]['hour']
+                    else:
+                        landfall_frame_hour = min(
+                            frames,
+                            key=lambda f: abs(f['hour'] - landfall_hour_in_window),
+                        )['hour']
+
                 self._send_json(200, {
                     'storm_id': storm_id,
                     'available': len(frames) > 0,
@@ -2190,6 +2251,10 @@ class CellHandler(BaseHTTPRequestHandler):
                     ),
                     'frames': frames,
                     'frame_count': len(frames),
+                    'landfall_time': landfall_iso,
+                    'window_start_time': window_start_iso,
+                    'landfall_hour_in_window': landfall_hour_in_window,
+                    'landfall_frame_hour': landfall_frame_hour,
                 })
             except Exception as e:
                 self._send_error(500, f'frames error: {e}')
@@ -2639,6 +2704,23 @@ class CellHandler(BaseHTTPRequestHandler):
         if path == '/api/qpf':
             if _active_storm is None:
                 self._send_error(400, 'No storm active')
+                return
+            # WPC QPF is the National Weather Service's operational forecast
+            # for the next 72 hours — it doesn't apply to storms whose landfall
+            # is in the past. Pulling /api/qpf for Florence 2018 returns today's
+            # (May 2026) QPF, which is unrelated to the storm. Refuse the fetch
+            # and tell the frontend to hide the Forecast tab.
+            if getattr(_active_storm, 'status', '') == 'historical':
+                self._send_json(200, {
+                    'available': False,
+                    'storm_id': _active_storm.storm_id,
+                    'reason': 'historical_storm_no_forecast',
+                    'caveat': (
+                        "WPC QPF is the NWS operational forecast for the next 72 "
+                        "hours — it does not apply to past events. Use the "
+                        "Observed tab for the MRMS rainfall data from this storm."
+                    ),
+                })
                 return
             try:
                 sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
