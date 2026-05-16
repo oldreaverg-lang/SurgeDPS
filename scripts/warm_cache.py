@@ -834,8 +834,35 @@ def main():
             ck = _hl.md5(cache_token.encode()).hexdigest()[:12]
             iem_tif = os.path.join(mrms_dir, f'iem_{ck}.tif')
 
-            if os.path.exists(iem_tif):
-                print(f"  [mrms] {sid:20s} — already cached ({iem_tif}), skipping")
+            # ── Self-heal: detect pre-milestone IEM TIFs ──────────────
+            # The milestone-aware fetcher (SurgeDPS commit 6f3bc92) writes
+            # cumulative-through-hour-N TIFs to <mrms_dir>/timelapse/<key>/
+            # alongside the cumulative iem_<key>.tif. Pre-6f3bc92 caches
+            # only have the cumulative; the timelapse dir is missing or
+            # empty. Treat those as stale, delete, and let the re-fetch
+            # below produce both. One-time cost (~90s/storm) on the first
+            # post-6f3bc92 deploy; idempotent afterwards.
+            timelapse_dir = os.path.join(mrms_dir, "timelapse", ck)
+            has_milestones = (
+                os.path.isdir(timelapse_dir)
+                and any(
+                    fn.startswith("hour_") and fn.endswith(".tif")
+                    for fn in os.listdir(timelapse_dir)
+                )
+            )
+            if os.path.exists(iem_tif) and not has_milestones:
+                try:
+                    os.remove(iem_tif)
+                    print(f"  [mrms] {sid:20s} — stale pre-milestone TIF purged, "
+                          f"will re-fetch with timelapse frames")
+                except OSError as _purge_err:
+                    print(f"  [mrms] {sid:20s} — purge failed ({_purge_err}), "
+                          f"skipping (slider will stay hidden for this storm)")
+                    mrms_skip += 1
+                    continue
+
+            if os.path.exists(iem_tif) and has_milestones:
+                print(f"  [mrms] {sid:20s} — already cached with timelapse, skipping")
                 mrms_skip += 1
                 continue
 
