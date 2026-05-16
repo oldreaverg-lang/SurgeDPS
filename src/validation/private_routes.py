@@ -402,7 +402,40 @@ def handle_validation_request(handler, path: str, params: Dict[str, List[str]]) 
         _send_json(handler, {
             "storms": _list_validated_storms(),
             "root": VALIDATION_ROOT,
+            "endpoints": [
+                "/__val/                       — this index",
+                "/__val/inventory.json         — full cache inventory (JSON)",
+                "/__val/inventory.html         — cache inventory dashboard",
+                "/__val/{storm_id}             — validation metrics.json",
+                "/__val/{storm_id}/samples     — modeled vs observed CSV",
+                "/__val/{storm_id}/hwms        — filtered USGS HWMs CSV",
+                "/__val/{storm_id}/dashboard   — validation dashboard HTML",
+                "/__val/__status               — token diagnostic",
+            ],
         })
+        return
+
+    # GET /__val/inventory.json | /__val/inventory.html — cache inventory
+    if segments[0] in ("inventory.json", "inventory.html", "inventory"):
+        try:
+            from validation.debug_inventory import build_inventory, render_dashboard
+        except Exception as e:
+            logger.exception("debug_inventory import failed")
+            _send_json(handler, {"error": f"inventory module unavailable: {e}"})
+            return
+
+        # JSON output (default)
+        if segments[0] == "inventory.json" or segments[0] == "inventory":
+            try:
+                _send_json(handler, build_inventory())
+            except Exception as e:
+                logger.exception("build_inventory failed")
+                _send_json(handler, {"error": str(e)})
+            return
+
+        # HTML dashboard
+        token = os.environ.get("VALIDATION_TOKEN", "")
+        _send_bytes(handler, render_dashboard(token), "text/html; charset=utf-8")
         return
 
     storm_id = segments[0]
