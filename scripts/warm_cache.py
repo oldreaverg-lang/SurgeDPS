@@ -526,10 +526,19 @@ def main():
                 persistent_dir=str(PERSISTENT_DIR),
             )
             n = r.get('gauge_count', 0)
-            print(f"  [gauges] {storm.storm_id:18s} → {n:4d} gauges "
+            err = r.get('_fetch_error', False)
+            tag = 'OK' if not err else 'FETCH_ERR'
+            print(f"  [gauges] {storm.storm_id:18s} → {n:4d} gauges  [{tag}]  "
                   f"({time.time()-t_s:.1f}s)")
-            g_ok += 1
-            time.sleep(1.0)   # polite spacing between NWIS queries
+            if err:
+                g_fail += 1
+            else:
+                g_ok += 1
+            # USGS NWIS started returning HTTP 400 + dropping our IP into a
+            # connection-reset hole when 17 storms hit back-to-back at 1s
+            # spacing. 3s gives the edge enough breathing room and matches
+            # the 1-2 req/s guidance NWIS publishes for unauthenticated use.
+            time.sleep(3.0)
         except Exception as e:
             g_fail += 1
             print(f"  [gauges] {storm.storm_id:18s} FAILED — {e}")

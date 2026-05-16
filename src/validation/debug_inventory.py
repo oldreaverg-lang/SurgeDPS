@@ -171,15 +171,34 @@ def _inspect_qpf(qpf_dir: Path, storm_id: str) -> Dict[str, Any]:
 
 
 def _inspect_gauges(persistent_dir: Path, storm_id: str) -> Dict[str, Any]:
-    """AHPS gauge cache: persistent/gauges/<storm_id>/*.json."""
-    gauge_dir = persistent_dir / "gauges" / storm_id
-    if not gauge_dir.is_dir():
-        return {"cached": False}
-    gauge_files = list(gauge_dir.glob("*.json"))
+    """AHPS gauge cache.
+
+    fetch_historical_gauges writes ONE JSON per storm at
+    ``<persistent>/cache/gauges_historical/<storm_id>.json`` containing a
+    GeoJSON FeatureCollection with all the NWIS peaks for that event.
+    Report cached=True only when the file exists AND ``_fetch_error`` is
+    False (a flagged error means the NWIS call failed and the cached body
+    is just a sentinel that should be retried).
+    """
+    cache_path = persistent_dir / "cache" / "gauges_historical" / f"{storm_id}.json"
+    if not cache_path.is_file():
+        return {"cached": False, "count": 0, "size_mb": 0.0}
+    size_mb = _file_size_mb(cache_path)
+    count = 0
+    fetch_error = False
+    try:
+        import json
+        with open(cache_path) as f:
+            data = json.load(f)
+        count = int(data.get("gauge_count", 0))
+        fetch_error = bool(data.get("_fetch_error", False))
+    except Exception:
+        pass
     return {
-        "cached": len(gauge_files) > 0,
-        "count": len(gauge_files),
-        "size_mb": _dir_size_mb(gauge_dir),
+        "cached": (count > 0) and not fetch_error,
+        "count": count,
+        "size_mb": size_mb,
+        "fetch_error": fetch_error,
     }
 
 
@@ -322,7 +341,9 @@ def build_inventory() -> Dict[str, Any]:
         "cells_mb": _dir_size_mb(CELLS_DIR),
         "mrms_mb": _dir_size_mb(MRMS_DIR),
         "qpf_mb": _dir_size_mb(QPF_DIR),
-        "gauges_mb": _dir_size_mb(PERSISTENT_DATA_DIR / "gauges"),
+        # gauges live at cache/gauges_historical/<storm_id>.json — NOT
+        # at gauges/<storm_id>/*.json (that path was an earlier guess).
+        "gauges_mb": _dir_size_mb(PERSISTENT_DATA_DIR / "cache" / "gauges_historical"),
         "flood_zones_mb": _dir_size_mb(PERSISTENT_DATA_DIR / "cache" / "flood_zones"),
     }
     storage["total_known_mb"] = round(sum(

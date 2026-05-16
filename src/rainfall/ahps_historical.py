@@ -76,6 +76,14 @@ class _SitePeak:
 # ─── Public API ──────────────────────────────────────────────────────────
 
 
+# USGS NWIS API limits bBox to strictly less than 7° on a side. 8°×8°
+# (radius=4.0) returned HTTP 400 with a Tomcat error body, after which
+# the USGS edge dropped subsequent connections (Errno 104) as the IP
+# got flagged. 3.0° gives a safe 6°×6° box (~660 km diameter) which is
+# more than enough to cover the rain field of any landfalling TC.
+_NWIS_BBOX_MAX_RADIUS_DEG = 3.0
+
+
 def fetch_historical_gauges(
     storm_id: str,
     landfall_lat: float,
@@ -147,12 +155,23 @@ def fetch_historical_gauges(
     start_dt = landfall_dt - timedelta(days=1)          # 1 day pre-landfall
     end_dt   = landfall_dt + timedelta(days=window_days)
 
+    # Clamp the bbox half-width to keep the resulting box strictly under
+    # USGS NWIS's 7°-per-side limit. Anything 3.5°+ here would produce a
+    # 7°+ box and trip the API's HTTP 400 + cascade of Errno 104 resets.
+    effective_radius = min(radius_deg, _NWIS_BBOX_MAX_RADIUS_DEG)
+    if effective_radius != radius_deg:
+        logger.info(
+            "fetch_historical_gauges %s: clamping radius %.2f° → %.2f° "
+            "to fit USGS NWIS bbox limit",
+            storm_id, radius_deg, effective_radius,
+        )
+
     # 1) Fetch all NWIS IV site-peaks in the bbox during the window
     site_peaks, nwis_fetch_ok = _fetch_nwis_iv_peaks(
-        lon_min=landfall_lon - radius_deg,
-        lat_min=landfall_lat - radius_deg,
-        lon_max=landfall_lon + radius_deg,
-        lat_max=landfall_lat + radius_deg,
+        lon_min=landfall_lon - effective_radius,
+        lat_min=landfall_lat - effective_radius,
+        lon_max=landfall_lon + effective_radius,
+        lat_max=landfall_lat + effective_radius,
         start=start_dt,
         end=end_dt,
     )
