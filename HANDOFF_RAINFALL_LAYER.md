@@ -1,8 +1,72 @@
 # SurgeDPS Rainfall Layer + Timelapse Handoff
 
 **Date:** 2026-05-16
-**Status:** Mid-deploy. SurgeDPS Phase-5 self-heal running, ~2 of 15 storms processed
-**Next agent:** read this doc end-to-end before touching code. Do not re-explore from scratch.
+**Status:** Phase-5 self-heal hung after 7 of 15 storms. 8 storms LOST their MRMS data. Fix pushed at commit `d093082`, awaiting Railway redeploy + retry.
+**Next agent:** read the URGENT section first, then everything else.
+
+---
+
+## ⚠️ URGENT — read first, this is the live state
+
+### What's broken right now
+
+Phase 5 (`warm_cache.py` MRMS self-heal) **froze on the 8th storm** in the queue at ~04:14 UTC and never recovered. Before it froze, my self-heal logic had already deleted the pre-milestone IEM TIFs for the storms it was about to process. So now:
+
+**7 storms have working milestone-aware TIFs** (the slider WILL work for these):
+- michael_2018, harvey_2017, laura_2020, irma_2017, florence_2018, delta_2020, nate_2017
+
+**8 storms have NO MRMS data at all** (their old cumulative TIFs were deleted; new fetch never happened):
+- helene_2024, ian_2022, ida_2021, milton_2024, nicholas_2021 — these CAN be re-fetched from IEM
+- **katrina_2005, ike_2008, sandy_2012** — these CANNOT be re-fetched from IEM (pre-2015, IEM archive doesn't cover them). They've LOST whatever cumulative TIFs they had — likely manually-seeded or parametric-fallback ones. Will show empty rainfall on the UI.
+
+### The bug in the original self-heal
+
+```python
+# Original (BUG):
+1. Detect pre-milestone TIF
+2. os.remove(iem_tif)        ← destroys data
+3. Re-fetch                  ← if this fails, data is gone forever
+```
+
+The right pattern is:
+```python
+# Fixed (d093082):
+1. Detect pre-milestone TIF
+2. os.rename(iem_tif, iem_tif + '.stale')   ← backup
+3. Try re-fetch with 5-min timeout
+4. On success: os.remove(.stale)            ← drop backup
+5. On failure: os.rename(.stale, iem_tif)   ← restore
+```
+
+### The fix (commit d093082, pushed 2026-05-16)
+
+`scripts/warm_cache.py` Phase 5 now:
+1. **Skips pre-IEM-era storms entirely** (`landfall_date < 2015-07-01`) — Katrina/Ike/Sandy never get their data touched again
+2. **Renames instead of deletes** — atomic backup pattern above
+3. **Wraps each storm's fetch in a 5-min timeout** via `concurrent.futures.ThreadPoolExecutor` — a hung storm can't freeze the whole queue
+
+### Recovery plan when Railway redeploys d093082
+
+On the next service start, Phase 5 will:
+- Skip the 3 pre-IEM storms entirely (Katrina, Ike, Sandy)
+- Skip the 7 already-cached-with-milestones storms (no work)
+- Re-attempt the 5 IEM-eligible missing storms (Helene, Ian, Ida, Milton, Nicholas)
+- Total time: ~8 minutes if all 5 succeed; ~25 min worst case if all timeout
+
+Verify with `/__val/inventory.json?t=<token>` — `mrms_mb` should climb 418 → ~480 MB and the 5 storms should show 2026-05-16 mtimes.
+
+### Pre-2015 storms still need fixing
+
+Katrina 2005, Ike 2008, Sandy 2012 lost their old TIFs and can't be re-fetched from IEM. Options for a follow-up session:
+- **Trigger the parametric-fallback path** by hitting `/api/rainfall` for each storm via the UI. The api_server.py has a Lonfat parametric fetcher that fires when IEM returns nothing. This would seed `parametric_<sid>.tif` files.
+- **Backfill manually** if someone has the original cumulative TIFs from another source.
+- **Live with empty rainfall on these 3 storms** — they predate the user's primary 2015–2025 corpus anyway.
+
+Not urgent — none of these were in the user's primary scope.
+
+### LRU-miss in `/api/rainfall_frames` (separate, lower-priority bug)
+
+When called directly (curl/WebFetch), the endpoint returns `available: false / no_rainfall_cached_yet` even when the TIF is on disk. It only checks the in-memory `_rainfall_tif_by_storm` LRU which is populated only when `/api/rainfall` is hit. In the normal UI flow this doesn't matter (the SPA hits `/api/rainfall` before `/api/rainfall_frames`), but for debugging it's annoying. Patch sketched in §4.3 below.
 
 ---
 
@@ -69,11 +133,19 @@ Do NOT try `git checkout main` in the worktree — it'll fail because main is al
 | SurgeDPS | `2b54cad` | NWIS bbox clamp 8°→6° + polite sleep 1s→3s + inventory gauges path fix | ✅ Live |
 | SurgeDPS | `e0134b0` | `/api/qpf` refuses historical storms + `/api/rainfall_frames` returns landfall context | ✅ Live |
 | SurgeDPS | `eda0041` | App.tsx slider v2: play/pause/landfall buttons + landfall-relative labels | ✅ Live |
-| SurgeDPS | `aa334e1` | warm_cache.py Phase-5 self-heal: detect pre-milestone TIFs, purge, re-fetch | ✅ Live (running NOW) |
+| SurgeDPS | `aa334e1` | warm_cache.py Phase-5 self-heal v1: detect pre-milestone TIFs, **DELETE**, re-fetch | ⚠️ Superseded — destroyed data on 8 storms |
+| SurgeDPS | `d093082` | warm_cache.py Phase-5 self-heal v2: rename-not-delete + 5-min timeout + skip pre-2015 storms | ✅ Live, awaiting next redeploy |
 | StormDPS | `c71bcdd` | First slider deploy (asset swap `index-Bzmm4bjd.js` + CSS) | Superseded |
 | StormDPS | `a509c90` | Slider v2 asset swap `index-BWR4wTGq.js` + `index-C0_aMSMh.css` | ✅ Live |
 
-**As of last check (04:10 UTC):** Phase 5 of warm_cache.py has self-healed ~2 of 15 storms (Harvey done, Florence pending). `mrms_mb` has grown from 360.9 → 386.89 MB. Estimated ~15–20 min until Phase 5 completes.
+**As of 05:15 UTC:** Phase 5 v1 (`aa334e1`) processed 7 storms between 04:07–04:14 then froze. `mrms_mb` plateaued at 418.88 MB. 8 storms lost their data (see URGENT section above). Phase 5 v2 (`d093082`) pushed and awaiting Railway pickup.
+
+**Expected state after d093082 redeploys (~25 min total from deploy):**
+- 7 storms with milestone-aware TIFs (unchanged from current)
+- 5 IEM-eligible storms recovered via the new safer self-heal
+- 3 pre-IEM storms permanently skipped (Katrina/Ike/Sandy) — separate follow-up needed if you want rainfall on them
+- `mrms_mb` ~480 MB
+- Inventory dashboard should show 12 of 15 storms with current MRMS data
 
 ---
 
@@ -211,14 +283,16 @@ The user is technically competent and patient. They like architectural reasoning
 
 When you pick this up:
 
-1. **Verify Phase 5 finished.** Hit `/__val/inventory.json?t=...` and confirm `mrms_mb` is around 540 MB and every storm's `mrms.valid_time` shows a 2026-05-16 timestamp.
-2. **Verify the slider works in the UI.** stormdps.com/surgedps → Florence → 🌧️ Rain. Look for ▶ Play / ⏮ Landfall / Full buttons. Test that play animates through post-landfall frames.
-3. **Investigate Phase 2 (NWIS gauges) still failing.** Pull Railway logs from the current deploy, look at the `[gauges]` lines and the `NWIS/NWPS HTTP` warnings. If body preview shows a specific parameter rejection, fix the URL construction. If it's a generic 429-style block, give the IP another 12 hours to cool off and re-test.
-4. **Investigate Phase 3 (FEMA NFHL) still failing.** Same drill — Railway logs from `[fz]` lines.
-5. **Fix the `/api/rainfall_frames` LRU-miss bug** (§4.3) so direct API hits work. Small defensive change.
-6. **THEN** — only after debug pipeline is fully working — return to the persistence-pathway shadow score discussion from earlier in the conversation. The Florence audit motivated it; SurgeDPS is the home; the actual scoring module hasn't been started.
+1. **First — verify Phase 5 v2 (`d093082`) actually recovered the 5 IEM-eligible missing storms.** Hit `/__val/inventory.json?t=...` and check Helene, Ian, Ida, Milton, Nicholas — `mrms.valid_time` should show today's date with size_mb ~1.2. `mrms_mb` should be ~480 MB.
+2. **If recovery didn't happen** (Phase 5 v2 also froze or timed out on all 5): inspect Railway logs for `[mrms] {sid} — TIMEOUT` lines. If a specific storm is consistently timing out, the IEM mtarchive likely has a missing/corrupt hourly file for that storm's date range. Possible fixes: skip that specific storm, add cfgrib-level timeout, or seed via parametric fallback.
+3. **Decide what to do about Katrina/Ike/Sandy** (the 3 pre-IEM storms whose data was destroyed by v1). Options in URGENT section above. Likely answer: trigger parametric-fallback path by hitting `/api/rainfall` for each via the UI.
+4. **Verify the slider works in the UI.** stormdps.com/surgedps → Florence → 🌧️ Rain. Look for ▶ Play / ⏮ Landfall / Full buttons. Test that play animates through post-landfall frames.
+5. **Investigate Phase 2 (NWIS gauges) still failing.** Pull Railway logs from the current deploy, look at the `[gauges]` lines and the `NWIS/NWPS HTTP` warnings. If body preview shows a specific parameter rejection, fix the URL construction. If it's a generic 429-style block, give the IP another 12 hours to cool off and re-test.
+6. **Investigate Phase 3 (FEMA NFHL) still failing.** Same drill — Railway logs from `[fz]` lines.
+7. **Fix the `/api/rainfall_frames` LRU-miss bug** (§4.3) so direct API hits work. Small defensive change.
+8. **THEN** — only after debug pipeline is fully working — return to the persistence-pathway shadow score discussion from earlier in the conversation. The Florence audit motivated it; SurgeDPS is the home; the actual scoring module hasn't been started.
 
-Do NOT start the shadow score until items 1–5 are clean.
+Do NOT start the shadow score until items 1–7 are clean.
 
 ---
 
@@ -232,6 +306,8 @@ Do NOT start the shadow score until items 1–5 are clean.
 - **Windows file encoding default is cp1252.** Python `ast.parse(f.read())` will choke on em-dashes etc. — use `open(path, encoding='utf-8')`.
 - **`min(iterable, key=...)` ties-breaks to the FIRST equal value.** I had to add an at-or-after filter before `min()` to make `landfall_frame_hour` pick post-landfall on ties.
 - **HANDOFF.md in SurgeDPS is from April and is stale on architecture** (says SurgeDPS API is mounted inside StormDPS at /surgedps/api/*; that was removed in commit `f08ea1f`). Trust the live code, not that doc.
+- **NEVER delete persistent data before having a working replacement.** I learned this the hard way at commit `aa334e1` — my self-heal deleted pre-milestone IEM TIFs and then tried to re-fetch. When Phase 5 hung on the 8th storm, the 8 unprocessed storms had their old data destroyed with no rollback path. The fix at `d093082` uses rename-to-`.stale` + restore-on-failure. **Any cache-invalidation logic should use this pattern.**
+- **Always wrap unbounded I/O in a timeout.** `fetch_iem_historical` doesn't have an aggregate timeout — its inner urllib calls have 30s each, but the cfgrib parse loop has none. A single corrupt GRIB or hung mirror response can freeze the whole script. Fix at `d093082` uses `concurrent.futures.ThreadPoolExecutor` with `future.result(timeout=300)`. Note that Python can't actually kill the worker thread on timeout — it leaks until the underlying I/O finishes — but the main loop becomes unblocked.
 
 ---
 
@@ -248,6 +324,9 @@ The session arc was roughly:
 7. Diagnosed NWIS bbox-too-large bug → clamped to 3°
 8. User saw QPF showing wrong data on historical Florence → fixed `/api/qpf` to refuse + relabeled slider with landfall-relative times + added Play/Pause/Landfall buttons
 9. Realized existing 15 storms have pre-milestone TIFs that won't naturally evict (no eviction policy on mrms dir)
-10. Added self-heal to warm_cache.py Phase 5
-11. Phase 5 currently running through 15-storm re-fetch
-12. Next agent picks up here.
+10. Added self-heal v1 (`aa334e1`) — destructive delete-before-refetch pattern
+11. Phase 5 v1 froze after 7 storms, leaving 8 with NO MRMS data (3 of which can never be recovered from IEM)
+12. Wrote first version of this handoff doc
+13. Pushed Phase 5 v2 (`d093082`) — rename-not-delete + 5-min timeout + pre-IEM skip
+14. Updated handoff with URGENT section
+15. Next agent picks up here. Verify v2 recovery first; everything else after.
