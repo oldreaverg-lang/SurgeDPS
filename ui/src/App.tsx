@@ -2412,9 +2412,20 @@ function App() {
   // (T+1, T+3, T+6, T+12, T+24, T+36, T+48, T+60, T+72) when the storm's
   // IEM MRMS data has been fetched under the milestone-aware fetcher.
   // null hour = the 72h cumulative (default — same as before the slider).
-  type RainFrame = { hour: number; max_mm: number | null; max_in: number | null; tile_url_template: string };
+  type RainFrame = {
+    hour: number;                  // hour within the 72h fetch window
+    hours_from_landfall: number | null;  // signed offset; null = unknown
+    max_mm: number | null;
+    max_in: number | null;
+    tile_url_template: string;
+  };
   const [rainfallFrames, setRainfallFrames] = useState<RainFrame[]>([]);
   const [rainfallHour, setRainfallHour] = useState<number | null>(null);
+  // Milestone closest to landfall (T+0). Used as the play-button start
+  // position so animation begins at landfall instead of 17h before.
+  const [rainfallLandfallFrameHour, setRainfallLandfallFrameHour] = useState<number | null>(null);
+  // Play/Pause state for the rainfall accumulation animation.
+  const [rainfallPlaying, setRainfallPlaying] = useState(false);
   // ── QPF sub-mode when hazardView === 'rainfall' ──
   // 'observed' → MRMS accumulation (default); 'forecast' → WPC QPF 72hr.
   const [rainfallMode, setRainfallMode] = useState<'observed' | 'forecast'>('observed');
@@ -2799,7 +2810,7 @@ function App() {
     const url = `/surgedps/api/rainfall_frames?storm_id=${encodeURIComponent(activeStorm.storm_id)}`;
     fetch(url)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`frames ${r.status}`)))
-      .then((data: { frames?: RainFrame[] }) => {
+      .then((data: { frames?: RainFrame[]; landfall_frame_hour?: number | null }) => {
         if (cancelled) return;
         const frames = Array.isArray(data?.frames) ? data.frames : [];
         // Prefix tile URLs with /surgedps so they resolve through the
@@ -2811,16 +2822,52 @@ function App() {
             : f.tile_url_template,
         }));
         setRainfallFrames(prefixed);
+        setRainfallLandfallFrameHour(
+          typeof data?.landfall_frame_hour === 'number' ? data.landfall_frame_hour : null
+        );
         setRainfallHour(null); // default to cumulative on storm change
+        setRainfallPlaying(false);
       })
       .catch(() => {
         if (!cancelled) {
           setRainfallFrames([]);
           setRainfallHour(null);
+          setRainfallLandfallFrameHour(null);
+          setRainfallPlaying(false);
         }
       });
     return () => { cancelled = true; };
   }, [hazardView, rainfallMode, activeStorm, rainfallStats?.tileUrl]);
+
+  // ── Rainfall timelapse playback ──
+  // When playing, advance the rainfall hour every 700 ms through the
+  // frames AT OR AFTER landfall (the user-meaningful post-landfall
+  // accumulation window). On reaching the last frame, stop. Pause is
+  // any state where rainfallPlaying === false.
+  useEffect(() => {
+    if (!rainfallPlaying || rainfallFrames.length === 0) return;
+    const id = window.setInterval(() => {
+      setRainfallHour(curr => {
+        // Restrict playback to landfall-and-after frames. If we don't
+        // know which frame is landfall (catalog missing date) fall back
+        // to playing through every frame from the current position.
+        const startHour = rainfallLandfallFrameHour ?? rainfallFrames[0].hour;
+        const playable = rainfallFrames.filter(f => f.hour >= startHour);
+        if (playable.length === 0) return curr;
+        const idx = curr === null
+          ? -1
+          : playable.findIndex(f => f.hour === curr);
+        const next = idx + 1;
+        if (next >= playable.length) {
+          // End of playback — pause and pin to the final frame.
+          setRainfallPlaying(false);
+          return playable[playable.length - 1].hour;
+        }
+        return playable[next].hour;
+      });
+    }, 700);
+    return () => window.clearInterval(id);
+  }, [rainfallPlaying, rainfallFrames, rainfallLandfallFrameHour]);
 
   // ── Shelter capacity (E5) — fetched when toggle flipped on ──
   useEffect(() => {
@@ -5629,7 +5676,7 @@ ${fieldFlag ? `
                   ? (rainfallMode === 'forecast' ? '🔮 Forecast rainfall (WPC QPF)' : '🌧️ Observed rainfall')
                   : '💧 Compound hazard'}
               </div>
-              {hazardView === 'rainfall' && (
+              {hazardView === 'rainfall' && activeStorm?.status !== 'historical' && (
                 <div className="flex rounded overflow-hidden border border-gray-300 mb-1 text-[10px]">
                   <button
                     onClick={() => setRainfallMode('observed')}
@@ -5641,6 +5688,14 @@ ${fieldFlag ? `
                   >Forecast (72h)</button>
                 </div>
               )}
+              {/* For historical storms the WPC QPF tab serves today's
+                  forecast (irrelevant), so we surface the Observed-only
+                  framing explicitly. */}
+              {hazardView === 'rainfall' && activeStorm?.status === 'historical' && rainfallMode === 'forecast' && (() => {
+                // Auto-correct: snap stale forecast mode → observed.
+                setRainfallMode('observed');
+                return null;
+              })()}
               {rainfallMode === 'forecast' && qpfLoading && <div className="text-gray-500">Loading WPC QPF…</div>}
               {hazardView === 'rainfall' && rainfallMode === 'forecast' && !qpfLoading && qpfStats && qpfStats.maxIn != null && (
                 <>
@@ -5663,51 +5718,112 @@ ${fieldFlag ? `
               {hazardView === 'rainfall' && rainfallMode === 'observed' && !rainfallLoading && rainfallStats && rainfallStats.maxIn == null && (
                 <div className="text-gray-500">{rainfallStats.notes}</div>
               )}
-              {/* ── Accumulation timelapse slider ────────────────────────────────
-                  Shows cumulative-through-hour-N rainfall. Hidden unless the
-                  /api/rainfall_frames endpoint returned 2+ frames (the storm's
-                  IEM data was fetched under the milestone-aware fetcher).
-                  rainfallHour === null → 72h cumulative (default); scrubbing
-                  selects a specific milestone frame from rainfallFrames. */}
-              {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallFrames.length >= 2 && (
-                <div className="mt-1.5 pt-1.5 border-t border-gray-200">
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="text-[10px] font-semibold text-gray-600">
-                      📅 Accumulation timeline
+              {/* ── Accumulation timelapse with play controls ──────────────
+                  Slider shows cumulative-through-hour-N rainfall. Labels
+                  are relative to landfall (T-XXh before, T+XXh after) when
+                  landfall_time is known; falls back to window-relative
+                  labels for storms missing landfall metadata.
+                  Play button starts at the landfall frame and animates
+                  through post-landfall frames. */}
+              {hazardView === 'rainfall' && rainfallMode === 'observed' && rainfallFrames.length >= 2 && (() => {
+                // Format a frame's hour offset relative to landfall.
+                const fmtFrame = (f: RainFrame): string => {
+                  if (f.hours_from_landfall == null) return `T+${f.hour}h`;
+                  const h = Math.round(f.hours_from_landfall);
+                  if (Math.abs(h) <= 2) return 'T≈0 (landfall)';
+                  if (h < 0) return `T${h}h`;  // h already has '-' sign
+                  return `T+${h}h`;
+                };
+                const firstFrame = rainfallFrames[0];
+                const lastFrame = rainfallFrames[rainfallFrames.length - 1];
+                const activeFrame = rainfallHour != null
+                  ? rainfallFrames.find(f => f.hour === rainfallHour)
+                  : null;
+                // Index of the landfall frame so the Play button + reset
+                // know where to snap.
+                const landfallIdx = rainfallLandfallFrameHour != null
+                  ? rainfallFrames.findIndex(f => f.hour === rainfallLandfallFrameHour)
+                  : -1;
+                const canPlay = landfallIdx >= 0 && landfallIdx < rainfallFrames.length - 1;
+                return (
+                  <div className="mt-1.5 pt-1.5 border-t border-gray-200">
+                    <div className="flex items-center justify-between mb-1 gap-1">
+                      <div className="text-[10px] font-semibold text-gray-600">
+                        📅 Accumulation timeline
+                      </div>
+                      <div className="flex items-center gap-0.5">
+                        {/* Play / Pause toggle */}
+                        {canPlay && (
+                          <button
+                            onClick={() => {
+                              if (rainfallPlaying) {
+                                setRainfallPlaying(false);
+                              } else {
+                                // Snap to landfall before pressing play if we're
+                                // currently parked at the cumulative or somewhere
+                                // pre-landfall — playback should always start
+                                // from landfall forward.
+                                if (rainfallHour == null || (activeFrame && (activeFrame.hours_from_landfall ?? 0) < -2)) {
+                                  setRainfallHour(rainfallLandfallFrameHour);
+                                }
+                                setRainfallPlaying(true);
+                              }
+                            }}
+                            className={`text-[9px] px-1.5 py-0.5 rounded transition-colors border ${rainfallPlaying ? 'bg-rose-600 text-white border-rose-700' : 'bg-emerald-600 text-white border-emerald-700 hover:bg-emerald-700'}`}
+                            title={rainfallPlaying ? 'Pause' : 'Play from landfall through post-storm accumulation'}
+                          >{rainfallPlaying ? '⏸ Pause' : '▶ Play'}</button>
+                        )}
+                        {/* Snap-to-landfall reset */}
+                        {rainfallLandfallFrameHour != null && (
+                          <button
+                            onClick={() => {
+                              setRainfallPlaying(false);
+                              setRainfallHour(rainfallLandfallFrameHour);
+                            }}
+                            className="text-[9px] px-1.5 py-0.5 rounded transition-colors text-gray-500 hover:bg-gray-100 border border-gray-300"
+                            title="Snap slider to landfall (T≈0)"
+                          >⏮ Landfall</button>
+                        )}
+                        {/* Full = 72h cumulative (the original default) */}
+                        <button
+                          onClick={() => {
+                            setRainfallPlaying(false);
+                            setRainfallHour(null);
+                          }}
+                          className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${rainfallHour === null ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 border border-gray-300'}`}
+                          title="Show the full 72-hour cumulative total"
+                        >Full</button>
+                      </div>
                     </div>
-                    <button
-                      onClick={() => setRainfallHour(null)}
-                      className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${rainfallHour === null ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 border border-gray-300'}`}
-                      title="Show the full 72-hour cumulative total"
-                    >Full</button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={rainfallFrames.length - 1}
+                      value={rainfallHour === null
+                        ? rainfallFrames.length - 1
+                        : Math.max(0, rainfallFrames.findIndex(f => f.hour === rainfallHour))}
+                      onChange={e => {
+                        setRainfallPlaying(false);
+                        const idx = Number(e.target.value);
+                        const f = rainfallFrames[idx];
+                        if (f) setRainfallHour(f.hour);
+                      }}
+                      className="w-full accent-indigo-600"
+                    />
+                    <div className="flex justify-between text-[9px] text-gray-500 mt-0.5">
+                      <span>{fmtFrame(firstFrame)}</span>
+                      <span className="font-semibold text-gray-800">
+                        {rainfallHour === null
+                          ? `${fmtFrame(lastFrame)} (full)`
+                          : activeFrame
+                            ? `${fmtFrame(activeFrame)}${activeFrame.max_in != null ? ` · max ${activeFrame.max_in} in` : ''}`
+                            : ''}
+                      </span>
+                      <span>{fmtFrame(lastFrame)}</span>
+                    </div>
                   </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={rainfallFrames.length - 1}
-                    value={rainfallHour === null
-                      ? rainfallFrames.length - 1
-                      : Math.max(0, rainfallFrames.findIndex(f => f.hour === rainfallHour))}
-                    onChange={e => {
-                      const idx = Number(e.target.value);
-                      const f = rainfallFrames[idx];
-                      if (f) setRainfallHour(f.hour);
-                    }}
-                    className="w-full accent-indigo-600"
-                  />
-                  <div className="flex justify-between text-[9px] text-gray-500 mt-0.5">
-                    <span>T+{rainfallFrames[0].hour}h</span>
-                    <span className="font-semibold text-gray-800">
-                      {rainfallHour === null
-                        ? `T+${rainfallFrames[rainfallFrames.length - 1].hour}h (full)`
-                        : `T+${rainfallHour}h${rainfallFrames.find(f => f.hour === rainfallHour)?.max_in != null
-                            ? ` · max ${rainfallFrames.find(f => f.hour === rainfallHour)!.max_in} in`
-                            : ''}`}
-                    </span>
-                    <span>T+{rainfallFrames[rainfallFrames.length - 1].hour}h</span>
-                  </div>
-                </div>
-              )}
+                );
+              })()}
               {/* NWS rainfall legend — shown only when the raster is
                   actually mounted. Each row: color swatch + inch range.
                   Keeps the colors in sync with _NWS_RAIN_* in api_server.py.
