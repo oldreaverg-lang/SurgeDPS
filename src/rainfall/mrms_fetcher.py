@@ -57,7 +57,7 @@ import threading
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -621,12 +621,30 @@ class MRMSFetcher:
         # Parse sequentially. cfgrib materializes the full CONUS grid
         # (~300 MB) on each open — threading it just thrashes memory and
         # got OOM-killed under Railway's container limits in testing.
+        # We tag each parsed array with its valid-hour timestamp (extracted
+        # from the GRIB2 filename) so the accumulation loop can build
+        # chronologically-ordered timelapse milestone TIFs.
+        import re as _re
+        _ts_re = _re.compile(r"_(\d{8}-\d{6})\.grib2$")
         parsed: list[tuple] = []
         shape_mismatch = 0
         for gp in downloaded_paths:
+            m = _ts_re.search(os.path.basename(gp))
+            if not m:
+                continue
+            try:
+                hour_t = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                continue
             arr, lats, lons = self._grib_to_clipped_array(gp, storm_bbox)
             if arr is not None:
-                parsed.append((arr, lats, lons))
+                parsed.append((hour_t, arr, lats, lons))
+
+        # Sort chronologically (oldest first) so the timelapse milestone
+        # writes capture cumulative-through-hour-N state correctly.
+        parsed.sort(key=lambda p: p[0])
 
         # Reduce sequentially — adding float32 arrays isn't worth parallelizing
         # at this size (~500x500 per hour) and keeps shape-check logic simple.
@@ -635,7 +653,15 @@ class MRMSFetcher:
         valid_mask_any = None
         hours_accumulated = 0
 
-        for arr, lats, lons in parsed:
+        # Timelapse milestones: cumulative-through-hour-N snapshots written
+        # alongside the 72h sum. Storage cost: ~9 frames × ~1.3 MB ≈ 12 MB
+        # per storm. Window starts at valid_time - duration_hr.
+        MILESTONE_HOURS = (1, 3, 6, 12, 24, 36, 48, 60, 72)
+        window_start = valid_time - timedelta(hours=duration_hr)
+        timelapse_dir = os.path.join(self.cache_dir, "timelapse", cache_key)
+        milestone_paths: dict[int, str] = {}
+
+        for hour_t, arr, lats, lons in parsed:
             if accumulator is None:
                 accumulator = np.zeros_like(arr, dtype=np.float32)
                 valid_mask_any = np.zeros_like(arr, dtype=bool)
@@ -645,6 +671,27 @@ class MRMSFetcher:
                 accumulator[hr_valid] += arr[hr_valid]
                 valid_mask_any |= hr_valid
                 hours_accumulated += 1
+
+                # Check whether we just crossed any timelapse milestone.
+                # `elapsed_hr` is how many hours into the window this sample
+                # represents; written milestones are skipped on the second
+                # crossing so we get one snapshot per threshold.
+                elapsed_hr = round(
+                    (hour_t - window_start).total_seconds() / 3600.0
+                )
+                for m_hr in MILESTONE_HOURS:
+                    if m_hr in milestone_paths:
+                        continue
+                    if elapsed_hr < m_hr:
+                        continue
+                    snap = accumulator.copy()
+                    snap[~valid_mask_any] = -9999.0
+                    mt_path = self._write_timelapse_frame(
+                        snap, accum_lats, accum_lons,
+                        timelapse_dir, m_hr, hours_accumulated,
+                    )
+                    if mt_path:
+                        milestone_paths[m_hr] = mt_path
             else:
                 # Shouldn't happen on a stable MRMS grid + fixed bbox, but
                 # surface it if it ever does rather than silently dropping.
@@ -714,14 +761,74 @@ class MRMSFetcher:
             return None
 
         logger.info(
-            "IEM historical: summed %d/%d hours ending %s → %s",
-            hours_accumulated, duration_hr, valid_time.isoformat(), clipped_tif,
+            "IEM historical: summed %d/%d hours ending %s → %s (timelapse frames: %d)",
+            hours_accumulated, duration_hr, valid_time.isoformat(),
+            clipped_tif, len(milestone_paths),
         )
         return self._result_from_tif(
             clipped_tif,
             f"IEM_GaugeCorr_QPE_{duration_hr:02d}H",
             valid_time, duration_hr, storm_bbox, source="mrms_iem",
         )
+
+    def _write_timelapse_frame(
+        self,
+        snapshot: "np.ndarray",
+        lats: "np.ndarray",
+        lons: "np.ndarray",
+        out_dir: str,
+        hour: int,
+        hours_summed_so_far: int,
+    ) -> Optional[str]:
+        """Write a cumulative-through-hour-N rainfall TIF.
+
+        Path: ``{out_dir}/hour_{NNN}.tif`` (e.g. hour_012.tif for T+12h).
+        Same compression + nodata convention as the cumulative TIF so the
+        existing tile server can serve these without modification.
+
+        Returns the absolute path on success, None on failure (logged).
+        """
+        try:
+            import rasterio
+            from rasterio.transform import from_bounds
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"hour_{hour:03d}.tif")
+            tid = threading.get_ident()
+            tmp = f"{path}.tmp.{os.getpid()}.{tid}"
+            n_rows, n_cols = snapshot.shape
+            transform = from_bounds(
+                float(lons.min()), float(lats.min()),
+                float(lons.max()), float(lats.max()),
+                n_cols, n_rows,
+            )
+            with rasterio.open(
+                tmp, "w",
+                driver="GTiff", dtype="float32", count=1,
+                width=n_cols, height=n_rows,
+                crs="EPSG:4326", transform=transform,
+                nodata=-9999,
+                compress="deflate", predictor=3,
+            ) as dst:
+                dst.write(snapshot, 1)
+                dst.update_tags(
+                    source="MRMS_IEM_archive",
+                    product=f"GaugeCorr_QPE_cumulative_{hour:03d}h",
+                    units="mm",
+                    cumulative_through_hour=str(hour),
+                    hours_summed_so_far=str(hours_summed_so_far),
+                )
+            os.replace(tmp, path)
+            return path
+        except Exception as exc:
+            logger.warning(
+                "Timelapse frame write failed for hour %d: %s", hour, exc,
+            )
+            try:
+                if 'tmp' in locals() and os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            return None
 
     def _grib_to_clipped_array(
         self,
@@ -918,3 +1025,71 @@ def storm_bbox_from_catalog_entry(
         landfall_lon + buffer_deg,
         landfall_lat + buffer_deg,
     )
+
+
+def iem_cache_key(
+    valid_time: datetime,
+    duration_hr: int,
+    storm_bbox: Tuple[float, float, float, float],
+) -> str:
+    """Recompute the 12-char cache key the IEM fetcher uses for a clipped TIF.
+
+    Mirrors the cache_token formula inside ``fetch_iem_historical`` so the
+    API server (or other callers) can map a storm to its expected cumulative
+    TIF + timelapse directory without scanning the filesystem.
+    """
+    bbox_str = "_".join(f"{v:.3f}" for v in storm_bbox)
+    cache_token = f"iem|{valid_time.isoformat()}|{duration_hr}|{bbox_str}"
+    return hashlib.md5(cache_token.encode()).hexdigest()[:12]
+
+
+def list_timelapse_frames(
+    cache_dir: str,
+    cache_key: str,
+) -> List[Dict[str, Any]]:
+    """Enumerate the per-hour cumulative TIFs written by the IEM fetcher.
+
+    Returns a chronologically-sorted list of frames:
+        [{"hour": 1,  "path": ".../hour_001.tif", "max_mm": 12.5, "size_mb": 1.3}, ...]
+
+    Empty list if the timelapse directory doesn't exist (storm not yet
+    re-fetched under the milestone-aware code path).
+    """
+    import re as _re
+    timelapse_dir = os.path.join(cache_dir, "timelapse", cache_key)
+    if not os.path.isdir(timelapse_dir):
+        return []
+
+    hr_re = _re.compile(r"^hour_(\d{3})\.tif$")
+    frames: List[Dict[str, Any]] = []
+    for name in sorted(os.listdir(timelapse_dir)):
+        m = hr_re.match(name)
+        if not m:
+            continue
+        try:
+            hour = int(m.group(1))
+        except ValueError:
+            continue
+        path = os.path.join(timelapse_dir, name)
+        size_mb = round(os.path.getsize(path) / 1_048_576, 2)
+        max_mm: Optional[float] = None
+        try:
+            import rasterio
+            import numpy as np
+            with rasterio.open(path) as src:
+                arr = src.read(1, masked=True)
+                if arr.size > 0:
+                    finite = np.asarray(arr.compressed())
+                    if finite.size > 0:
+                        max_mm = round(float(finite.max()), 1)
+        except Exception as exc:
+            logger.debug("frame stat read failed for %s: %s", path, exc)
+        frames.append({
+            "hour": hour,
+            "path": path,
+            "filename": name,
+            "size_mb": size_mb,
+            "max_mm": max_mm,
+            "max_in": round(max_mm / 25.4, 2) if max_mm is not None else None,
+        })
+    return frames

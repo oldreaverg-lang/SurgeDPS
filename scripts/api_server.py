@@ -21,6 +21,7 @@ import os
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 # Built React frontend lives at <repo_root>/ui/dist/
@@ -2064,21 +2065,53 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(500, str(e))
             return
 
-        # ── GET /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=<id> ──
+        # ── GET /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=<id>[&hour=N] ──
         # On-demand XYZ PNG tile server for the MRMS rainfall raster.
         # Backed by the clipped GeoTIFF registered by /api/rainfall.
         # Colormap: NWS standard precipitation ramp (green→yellow→red→magenta).
         # Tiles are cache-friendly (Cache-Control: public, 24h) because the
         # MRMS product is immutable once archived.
+        #
+        # Optional &hour=N parameter selects a timelapse frame (cumulative
+        # through hour N) from the per-storm timelapse directory.
+        # Available frames are listed by /api/rainfall_frames.
         if path.startswith('/api/rainfall_tile/'):
             try:
                 storm_id = (params.get('storm_id') or [''])[0]
                 if not _valid_storm_id(storm_id):
                     self._send_error(400, 'Missing or invalid storm_id')
                     return
+                # Optional timelapse frame selector
+                hour_param = (params.get('hour') or [''])[0]
+                hour_int: Optional[int] = None
+                if hour_param:
+                    try:
+                        hour_int = int(hour_param)
+                    except ValueError:
+                        self._send_error(400, 'hour must be an integer')
+                        return
+                # Resolve TIF path. Timelapse frame request: derive the
+                # path from the registered cumulative TIF's directory +
+                # cache_key (filename pattern: iem_<key>.tif).
+                tif_path: Optional[str] = None
                 with _rainfall_tif_lock:
-                    tif_path = _rainfall_tif_by_storm.get(storm_id)
-                    tif_ok = bool(tif_path) and os.path.exists(tif_path)
+                    base_tif = _rainfall_tif_by_storm.get(storm_id)
+                if hour_int is not None and base_tif:
+                    base_dir = os.path.dirname(base_tif)
+                    base_name = os.path.basename(base_tif)
+                    if base_name.startswith('iem_') and base_name.endswith('.tif'):
+                        cache_key = base_name[len('iem_'):-len('.tif')]
+                        frame_path = os.path.join(
+                            base_dir, 'timelapse', cache_key,
+                            f'hour_{hour_int:03d}.tif',
+                        )
+                        if os.path.exists(frame_path):
+                            tif_path = frame_path
+                    # Fall through to cumulative on any miss (transparent
+                    # degradation — slider just shows the 72h sum).
+                if tif_path is None:
+                    tif_path = base_tif
+                tif_ok = bool(tif_path) and os.path.exists(tif_path)
                 if not tif_ok:
                     # Client probably hit the tile endpoint before /api/rainfall.
                     # Return a transparent 256x256 PNG so MapLibre doesn't
@@ -2093,14 +2126,73 @@ class CellHandler(BaseHTTPRequestHandler):
                     self._send_error(400, 'Expected /api/rainfall_tile/{z}/{x}/{y}.png with 0≤z≤22')
                     return
                 z, x, y = zxy
+                # Cache key includes hour so frames don't collide with each other.
+                cache_id = storm_id if hour_int is None else f'{storm_id}_h{hour_int:03d}'
                 png_bytes = _tile_cache_get_or_render(
-                    'rainfall', storm_id, tif_path, z, x, y,
+                    'rainfall', cache_id, tif_path, z, x, y,
                     _render_rainfall_tile,
                 )
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=86400')
             except Exception as e:
                 self._send_error(500, f'tile error: {e}')
+            return
+
+        # ── GET /api/rainfall_frames?storm_id=<id> ──
+        # List the per-hour cumulative rainfall frames available for the
+        # storm's timelapse. Returns a chronologically-sorted list with
+        # max_mm + tile URL template per frame. Empty list if the storm
+        # has only the 72h cumulative (legacy cache, pre-milestone fetcher).
+        if path == '/api/rainfall_frames':
+            try:
+                storm_id = (params.get('storm_id') or [''])[0]
+                if not _valid_storm_id(storm_id):
+                    self._send_error(400, 'Missing or invalid storm_id')
+                    return
+                with _rainfall_tif_lock:
+                    base_tif = _rainfall_tif_by_storm.get(storm_id)
+                if not base_tif or not os.path.exists(base_tif):
+                    self._send_json(200, {
+                        'storm_id': storm_id,
+                        'available': False,
+                        'reason': 'no_rainfall_cached_yet',
+                        'frames': [],
+                    })
+                    return
+                base_name = os.path.basename(base_tif)
+                if not (base_name.startswith('iem_') and base_name.endswith('.tif')):
+                    # Parametric fallback — no per-hour frames possible.
+                    self._send_json(200, {
+                        'storm_id': storm_id,
+                        'available': False,
+                        'reason': 'parametric_fallback_no_hourly_data',
+                        'frames': [],
+                    })
+                    return
+                cache_key = base_name[len('iem_'):-len('.tif')]
+                cache_dir = os.path.dirname(base_tif)
+                from rainfall.mrms_fetcher import list_timelapse_frames
+                frames = list_timelapse_frames(cache_dir, cache_key)
+                # Trim filesystem path; include tile URL template.
+                _tif_v = int(os.path.getmtime(base_tif))
+                for f in frames:
+                    f.pop('path', None)
+                    f['tile_url_template'] = (
+                        f'/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png'
+                        f'?storm_id={storm_id}&hour={f["hour"]}&v={_tif_v}'
+                    )
+                self._send_json(200, {
+                    'storm_id': storm_id,
+                    'available': len(frames) > 0,
+                    'cumulative_tile_url_template': (
+                        f'/api/rainfall_tile/{{z}}/{{x}}/{{y}}.png'
+                        f'?storm_id={storm_id}&v={_tif_v}'
+                    ),
+                    'frames': frames,
+                    'frame_count': len(frames),
+                })
+            except Exception as e:
+                self._send_error(500, f'frames error: {e}')
             return
 
         # ── GET /api/qpf_tile/{z}/{x}/{y}.png?storm_id=<id> ──
