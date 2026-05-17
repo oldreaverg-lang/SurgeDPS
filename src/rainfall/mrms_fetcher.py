@@ -69,13 +69,26 @@ _NCEP_BASE = "https://mrms.ncep.noaa.gov/data/2D"
 
 # ── IEM (Iowa Env Mesonet) MRMS archive ─────────────────────────────────────
 # NOAA's S3 MRMS bucket only goes back to 2020-10-14. Iowa State mirrors
-# hourly GaugeCorr_QPE_01H grib2 files from mid-2015 onward, which covers
-# every modern US landfalling hurricane (Matthew 2016, Harvey/Irma/Maria 2017,
-# Florence/Michael 2018, Dorian 2019, pre-Oct-2020 storms). We sum N hourly
-# files to build an N-hour accumulation — slower than S3's pre-aggregated
-# 72H product (~70 downloads of 750 KB each) but the result is real
-# gauge-corrected observation, not a parametric model.
+# hourly grib2 files from mid-2015 onward, which covers every modern US
+# landfalling hurricane (Matthew 2016, Harvey/Irma/Maria 2017,
+# Florence/Michael 2018, Dorian 2019, all 2020+ storms).
+#
+# NOAA renamed the product on 2020-10-13 with the MRMS v12 deployment:
+#   pre-2020-10-13: GaugeCorr_QPE_01H
+#   2020-10-13+:    MultiSensor_QPE_01H_Pass2 (gauge-adjusted, ~2hr latency)
+# IEM mirrors whichever was current on that date, so we must dispatch by date
+# or we get 404s for every hourly file on post-2020-10-13 storms.
 _IEM_BASE = "https://mtarchive.geol.iastate.edu"
+_IEM_PRODUCT_TRANSITION = datetime(2020, 10, 13, tzinfo=timezone.utc)
+
+
+def _iem_product_for(t: datetime) -> str:
+    """Return the IEM hourly QPE product name valid at time t."""
+    return (
+        "GaugeCorr_QPE_01H"
+        if t < _IEM_PRODUCT_TRANSITION
+        else "MultiSensor_QPE_01H_Pass2"
+    )
 
 # Product path templates
 _PRODUCT_PATHS = {
@@ -560,14 +573,18 @@ class MRMSFetcher:
                 valid_time, duration_hr, storm_bbox, source="mrms_iem",
             )
 
-        # Build target URLs for every hour in the window.
+        # Build target URLs for every hour in the window. The product name
+        # depends on `t` because NOAA renamed it on 2020-10-13 (see comment
+        # on _IEM_PRODUCT_TRANSITION). Storms whose 72h window straddles
+        # the cutoff will mix product names hour-by-hour, which is correct.
         hour_targets = []
         for i in range(duration_hr):
             t = valid_time - timedelta(hours=i)
+            product = _iem_product_for(t)
             url = (
                 f"{_IEM_BASE}/{t.year:04d}/{t.month:02d}/{t.day:02d}"
-                f"/mrms/ncep/GaugeCorr_QPE_01H"
-                f"/GaugeCorr_QPE_01H_00.00_{t.strftime('%Y%m%d-%H%M%S')}.grib2.gz"
+                f"/mrms/ncep/{product}"
+                f"/{product}_00.00_{t.strftime('%Y%m%d-%H%M%S')}.grib2.gz"
             )
             fname = os.path.basename(url)
             gz_path = os.path.join(self.cache_dir, fname)
