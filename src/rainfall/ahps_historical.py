@@ -76,12 +76,29 @@ class _SitePeak:
 # ─── Public API ──────────────────────────────────────────────────────────
 
 
-# USGS NWIS API limits bBox to strictly less than 7° on a side. 8°×8°
-# (radius=4.0) returned HTTP 400 with a Tomcat error body, after which
-# the USGS edge dropped subsequent connections (Errno 104) as the IP
-# got flagged. 3.0° gives a safe 6°×6° box (~660 km diameter) which is
-# more than enough to cover the rain field of any landfalling TC.
-_NWIS_BBOX_MAX_RADIUS_DEG = 3.0
+# USGS NWIS rejects bboxes by a latitude-dependent area rule, not a flat
+# side-length limit. The server's own error body is precise:
+#   "Bounding Box too large [6.0x6.0 degrees]. Your requested width must
+#   be less than or equal to 4.6 degrees at latitude 25.0 with requested
+#   height of 6.0 degrees."
+# Back-solving: width × height × cos(lat) ≤ ~25 sq deg. The previous
+# static 3.0° clamp (6×6 box, 36 sq deg equatorial) failed at every
+# Atlantic landfall (lat 24–30), tripping HTTP 400 followed by Errno 104
+# resets as the USGS edge flagged our IP.
+import math as _math
+
+# Headroom under the empirical ~25 cap so storms near the lat-24 floor
+# (Brownsville, far-south FL) still pass.
+_NWIS_BBOX_MAX_AREA_SQDEG = 22.0
+
+
+def _max_safe_radius_deg(landfall_lat: float) -> float:
+    """Largest bbox half-width whose footprint stays under USGS's
+    latitude-scaled area limit. (2r)² × cos(lat) ≤ _NWIS_BBOX_MAX_AREA_SQDEG.
+    """
+    coslat = max(_math.cos(_math.radians(abs(landfall_lat))), 0.2)
+    max_side = _math.sqrt(_NWIS_BBOX_MAX_AREA_SQDEG / coslat)
+    return max_side / 2.0
 
 
 def fetch_historical_gauges(
@@ -155,10 +172,10 @@ def fetch_historical_gauges(
     start_dt = landfall_dt - timedelta(days=1)          # 1 day pre-landfall
     end_dt   = landfall_dt + timedelta(days=window_days)
 
-    # Clamp the bbox half-width to keep the resulting box strictly under
-    # USGS NWIS's 7°-per-side limit. Anything 3.5°+ here would produce a
-    # 7°+ box and trip the API's HTTP 400 + cascade of Errno 104 resets.
-    effective_radius = min(radius_deg, _NWIS_BBOX_MAX_RADIUS_DEG)
+    # Clamp the bbox half-width to keep area × cos(lat) under USGS's
+    # latitude-scaled limit. Atlantic landfalls (lat 24–30) need r ≤ ~2.45°
+    # to stay under the 22 sq deg headroom area.
+    effective_radius = min(radius_deg, _max_safe_radius_deg(landfall_lat))
     if effective_radius != radius_deg:
         logger.info(
             "fetch_historical_gauges %s: clamping radius %.2f° → %.2f° "
