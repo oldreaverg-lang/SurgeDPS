@@ -597,6 +597,50 @@ def _fema_probe() -> dict:
             "error": f"{type(e).__name__}: {e}",
         }
 
+    # 9) Try TLS handshakes to known FEMA NFHL mirrors / alternative endpoints
+    #    in case one of them is on a less-aggressive WAF.
+    alt_hosts = [
+        "services3.arcgis.com",         # ESRI Living Atlas hosts NFHL mirrors
+        "services.arcgis.com",
+        "geo.fema.gov",                  # older FEMA tile endpoint
+        "msc.fema.gov",                  # FEMA Map Service Center
+        "nfhl.fema.gov",                 # legacy NFHL host
+    ]
+    for h in alt_hosts:
+        t = time.time()
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((h, 443), timeout=8) as s:
+                with ctx.wrap_socket(s, server_hostname=h) as ss:
+                    out["tests"][f"tls_alt_{h}"] = {
+                        "ok": True, "elapsed_ms": int((time.time()-t)*1000),
+                        "version": ss.version(),
+                    }
+        except Exception as e:
+            out["tests"][f"tls_alt_{h}"] = {
+                "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    # 10) Egress IP — find out who FEMA's WAF thinks we are. ipify is a
+    #     small public IP-reporter.
+    t = time.time()
+    try:
+        req = urllib.request.Request(
+            "https://api.ipify.org?format=json",
+            headers={"User-Agent": "SurgeDPS/1.0 ip-check"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            ip_body = resp.read().decode("utf-8")
+        out["tests"]["egress_ip"] = {
+            "ok": True, "elapsed_ms": int((time.time()-t)*1000),
+            "body": ip_body[:200],
+        }
+    except Exception as e:
+        out["tests"]["egress_ip"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
     out["summary"] = {
         name: ("ok" if r.get("ok") else "fail")
         for name, r in out["tests"].items()
