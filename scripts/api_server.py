@@ -1291,6 +1291,27 @@ def _render_rainfall_tile(tif_path: str, z: int, x: int, y: int) -> bytes:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class CellHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        """Restricted POST handler: only the token-gated /__val seed
+        endpoints accept POSTs. Everything else returns 404 to match the
+        public face of the API.
+        """
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip('/')
+        if path.startswith('/surgedps'):
+            path = path[len('/surgedps'):]
+        params = parse_qs(parsed.query)
+
+        if path == '/__val' or path.startswith('/__val/'):
+            from validation.private_routes import handle_validation_post
+            try:
+                handle_validation_post(self, path, params)
+            except Exception as e:
+                self._send_error(500, f"seed handler error: {e}")
+            return
+
+        self._send_error(404, 'Not Found')
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip('/')
@@ -2998,9 +3019,33 @@ class CellHandler(BaseHTTPRequestHandler):
                 os.makedirs(fz_cache_dir, exist_ok=True)
                 cache_name = f"fz_{qw:+.2f}_{qs_:+.2f}_{qe:+.2f}_{qn:+.2f}.json"
                 cache_path = os.path.join(fz_cache_dir, cache_name)
+                cache_path_gz = cache_path + '.gz'
                 refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
-                if os.path.exists(cache_path) and not refresh:
+                # Prefer the gzipped seed-uploaded copy if present —
+                # browsers handle Content-Encoding: gzip transparently and
+                # storing compressed shrinks the volume ~5× for typical
+                # NFHL polygon-heavy responses.
+                if not refresh and os.path.exists(cache_path_gz):
+                    with open(cache_path_gz, 'rb') as fh:
+                        gz_bytes = fh.read()
+                    accept_enc = self.headers.get('Accept-Encoding', '')
+                    if 'gzip' in accept_enc:
+                        self._send_raw(
+                            200, gz_bytes,
+                            content_type='application/json',
+                            cache_control='public, max-age=86400',
+                            content_encoding='gzip',
+                        )
+                    else:
+                        import gzip as _gzip_d
+                        self._send_raw(
+                            200, _gzip_d.decompress(gz_bytes),
+                            content_type='application/json',
+                            cache_control='public, max-age=86400',
+                        )
+                    return
+                if not refresh and os.path.exists(cache_path):
                     with open(cache_path, 'rb') as fh:
                         self._send_raw(200, fh.read(),
                                        content_type='application/json',
@@ -3095,20 +3140,22 @@ class CellHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
-    def _send_raw(self, code, body: bytes, content_type: str = 'application/json', cache_control: str | None = None):
-        # Gzip compress large TEXT responses if client supports it. Skip
-        # binary formats (PNG, etc.) — they're already compressed and
-        # layering gzip on top just bloats the byte count.
-        gzippable = content_type.startswith(('application/json', 'text/', 'application/xml'))
+    def _send_raw(self, code, body: bytes, content_type: str = 'application/json', cache_control: str | None = None, content_encoding: str | None = None):
+        # If content_encoding is passed, the caller is handing us bytes that
+        # are ALREADY encoded (e.g. a .json.gz file read from disk). We pass
+        # them through unchanged and just stamp the header. Otherwise we may
+        # opportunistically gzip large TEXT responses if the client supports it.
         try:
-            accept_enc = self.headers.get('Accept-Encoding', '')
-            if gzippable and len(body) > 1024 and 'gzip' in accept_enc:
-                import gzip as _gzip
-                body = _gzip.compress(body, compresslevel=6)
-                self.send_response(code)
-                self.send_header('Content-Encoding', 'gzip')
+            self.send_response(code)
+            if content_encoding:
+                self.send_header('Content-Encoding', content_encoding)
             else:
-                self.send_response(code)
+                gzippable = content_type.startswith(('application/json', 'text/', 'application/xml'))
+                accept_enc = self.headers.get('Accept-Encoding', '')
+                if gzippable and len(body) > 1024 and 'gzip' in accept_enc:
+                    import gzip as _gzip
+                    body = _gzip.compress(body, compresslevel=6)
+                    self.send_header('Content-Encoding', 'gzip')
             self.send_header('Content-Type', content_type)
             self.send_header('Access-Control-Allow-Origin', '*')
             if cache_control:

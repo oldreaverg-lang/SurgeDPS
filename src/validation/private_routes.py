@@ -653,6 +653,122 @@ def _fema_probe() -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def handle_validation_post(handler, path: str, params: Dict[str, List[str]]) -> None:
+    """POST handler for the /__val namespace. Currently only supports
+    /__val/seed_flood_zone — used to seed the FEMA NFHL cache from a
+    machine that can reach hazards.fema.gov (Railway's egress is blocked
+    by FEMA's WAF, so the cache is filled out-of-band).
+
+    Body: raw GeoJSON FeatureCollection bytes as returned by FEMA's
+    /MapServer/28/query endpoint.
+
+    Query params:
+        t          — VALIDATION_TOKEN (required)
+        tile_key   — cache filename, e.g. fz_-97.10_+27.90_-97.00_+28.00.json
+                     Must match the api_server cache-key pattern exactly,
+                     otherwise the cached file will never be served.
+    """
+    rel = path[len("/__val"):].lstrip("/")
+    segments = [s for s in rel.split("/") if s]
+
+    if not _token_ok(handler, params):
+        _not_found(handler)
+        return
+
+    if segments == ["seed_flood_zone"]:
+        tile_key = (params.get("tile_key", [""])[0]).strip()
+        # Restrict tile_key to the same fz_… pattern warm_cache writes;
+        # prevents path traversal.
+        if not re.match(r"^fz_[-+0-9._]+\.json$", tile_key):
+            _send_json(handler, {"error": "bad or missing tile_key"})
+            return
+
+        try:
+            content_length = int(handler.headers.get("Content-Length", "0"))
+        except ValueError:
+            _send_json(handler, {"error": "missing Content-Length"})
+            return
+        # Compressed body limit: 60 MB gzip ≈ 300 MB JSON, more than any
+        # single FEMA NFHL tile we've seen (~35 MB raw on the densest
+        # coastal tiles).
+        if content_length <= 0 or content_length > 60 * 1024 * 1024:
+            _send_json(handler, {"error": f"bad Content-Length {content_length}"})
+            return
+        body = handler.rfile.read(content_length)
+
+        # Bodies arrive gzip-compressed (Content-Encoding: gzip) to fit
+        # within Railway's volume. Decompress for validation, but write
+        # the original gzip bytes — api_server serves them with
+        # Content-Encoding: gzip so the browser decompresses transparently.
+        encoding = (handler.headers.get("Content-Encoding") or "").lower()
+        if encoding == "gzip":
+            try:
+                import gzip as _gz
+                raw_json = _gz.decompress(body)
+            except Exception as e:
+                _send_json(handler, {"error": f"gzip decompress failed: {e}"})
+                return
+            disk_bytes = body          # write the compressed bytes
+            suffix = ".gz"
+        else:
+            raw_json = body
+            disk_bytes = body
+            suffix = ""
+
+        # Validate JSON shape — refuse to cache FEMA error responses or
+        # corrupt bodies that would poison the cache.
+        try:
+            parsed = json.loads(raw_json)
+        except Exception as e:
+            _send_json(handler, {"error": f"invalid JSON: {e}"})
+            return
+        if not isinstance(parsed, dict):
+            _send_json(handler, {"error": "top-level JSON must be an object"})
+            return
+        if "error" in parsed:
+            _send_json(handler, {"error": f"refusing to cache upstream error: {parsed['error']}"})
+            return
+        if parsed.get("type") != "FeatureCollection":
+            _send_json(handler, {"error": f"expected FeatureCollection, got type={parsed.get('type')!r}"})
+            return
+
+        persistent = (
+            os.environ.get("PERSISTENT_DATA_DIR")
+            or os.environ.get("PERSISTENT_DIR")
+            or "/app/persistent"
+        )
+        cache_dir = os.path.join(persistent, "cache", "flood_zones")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, tile_key + suffix)
+
+        tmp = f"{cache_path}.tmp.{os.getpid()}"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(disk_bytes)
+            os.replace(tmp, cache_path)
+        except OSError as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            _send_json(handler, {"error": f"write failed: {e}"})
+            return
+
+        feat_count = len(parsed.get("features") or [])
+        _send_json(handler, {
+            "ok": True,
+            "tile_key": tile_key,
+            "cache_path": cache_path,
+            "encoded": suffix == ".gz",
+            "bytes_written": len(disk_bytes),
+            "bytes_uncompressed": len(raw_json),
+            "feature_count": feat_count,
+        })
+        return
+
+    _not_found(handler)
+
+
 def handle_validation_request(handler, path: str, params: Dict[str, List[str]]) -> None:
     """
     Entry point for /__val/... requests. Returns 404 for any unauthenticated

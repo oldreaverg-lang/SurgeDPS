@@ -205,29 +205,33 @@ def _inspect_gauges(persistent_dir: Path, storm_id: str) -> Dict[str, Any]:
 def _inspect_flood_zones(persistent_dir: Path, storm: Any) -> Dict[str, Any]:
     """FEMA NFHL: cached in persistent/cache/flood_zones/ keyed by bbox.
 
-    For each storm we expect ~16 tiles (4×4 grid around landfall).
+    Pre-warm / local-seed uses radius=2°, tile=0.25°, snapped to 0.01°
+    → 16×16 = 256 tiles per storm. Keep these constants in lockstep
+    with scripts/warm_cache.py and scripts/seed_flood_zones_local.py.
     """
+    EXPECTED = 256
     fz_dir = persistent_dir / "cache" / "flood_zones"
     if not fz_dir.is_dir():
-        return {"cached": 0, "expected": 16, "complete": False}
+        return {"cached": 0, "expected": EXPECTED, "complete": False}
 
-    # Match tile envelopes whose bbox falls within the storm's pre-warm box.
-    # Pre-warm uses radius=4°, tile=2°, snapped to 0.01°.
     lat0 = storm.landfall_lat
     lon0 = storm.landfall_lon
-    radius = 4.0
-    tile = 2.0
+    radius = 2.0
+    tile = 0.25
+    n = int(2 * radius / tile)  # 16
     matching = 0
-    for row in range(4):
-        for col in range(4):
+    for row in range(n):
+        for col in range(n):
             qw = round(lon0 - radius + col * tile, 2)
             qs = round(lat0 - radius + row * tile, 2)
             qe = round(qw + tile, 2)
             qn = round(qs + tile, 2)
             cache_name = f"fz_{qw:+.2f}_{qs:+.2f}_{qe:+.2f}_{qn:+.2f}.json"
-            if (fz_dir / cache_name).exists():
+            # Either .json (legacy warm_cache writes) or .json.gz
+            # (seed-uploaded compressed tiles) counts as cached.
+            if (fz_dir / cache_name).exists() or (fz_dir / (cache_name + ".gz")).exists():
                 matching += 1
-    return {"cached": matching, "expected": 16, "complete": matching >= 16}
+    return {"cached": matching, "expected": EXPECTED, "complete": matching >= EXPECTED}
 
 
 def _inspect_compound(cells_dir: Path, storm_id: str) -> Dict[str, Any]:

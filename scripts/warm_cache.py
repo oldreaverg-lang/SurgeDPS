@@ -569,15 +569,49 @@ def main():
         'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query'
     )
     _FEMA_UA = 'SurgeDPS/1.0 (+https://stormdps.com) warm_cache'
-    _FZ_TILE_DEG = 2.0      # fetch one 2° × 2° tile per request
-    _FZ_RADIUS_DEG = 4.0    # cover ±4° around landfall in each axis → 4×4 grid
+    # FEMA NFHL MapServer/28 returns ArcGIS error 400 on anything ≥ 0.5°.
+    # 0.25° is the empirical max that still passes. With ±2° radius
+    # that produces a 16×16 grid (256 tiles) per storm.
+    # NOTE: these constants MUST match scripts/seed_flood_zones_local.py
+    # and src/validation/debug_inventory.py so cache keys + counts align.
+    _FZ_TILE_DEG = 0.25
+    _FZ_RADIUS_DEG = 2.0
     _FZ_TIMEOUT = 45        # seconds per FEMA request (raised; hazards.fema.gov is slow)
 
     fz_cache_dir = os.path.join(str(PERSISTENT_DIR), 'cache', 'flood_zones')
     os.makedirs(fz_cache_dir, exist_ok=True)
     fz_ok = fz_skip = fz_fail = 0
 
-    for storm in HISTORICAL_STORMS:
+    # Pre-flight: FEMA's WAF blocks Railway's egress IP at the TLS layer
+    # (every handshake to hazards.fema.gov returns SSL_ERROR_SYSCALL /
+    # UNEXPECTED_EOF_WHILE_READING). Without this check, Phase 3 wastes
+    # ~18 min on every container start retrying 240 doomed requests.
+    # If the pre-flight fails, we abort and rely on the out-of-band seed
+    # path (POST /__val/seed_flood_zone) to populate the cache.
+    import socket as _fz_socket
+    import ssl as _fz_ssl
+    _fz_reachable = False
+    try:
+        _fz_ctx = _fz_ssl.create_default_context()
+        with _fz_socket.create_connection(("hazards.fema.gov", 443), timeout=8) as _fz_s:
+            with _fz_ctx.wrap_socket(_fz_s, server_hostname="hazards.fema.gov") as _fz_ss:
+                _fz_reachable = bool(_fz_ss.version())
+    except Exception as _fz_pre_err:
+        print(f"  [fema] pre-flight TLS to hazards.fema.gov failed: "
+              f"{type(_fz_pre_err).__name__}: {_fz_pre_err}")
+        print("  [fema] skipping Phase 3 — populate cache via "
+              "POST /__val/seed_flood_zone from a host that can reach FEMA")
+    if not _fz_reachable:
+        # Skip the inner loop entirely; preserve the summary line shape.
+        print("  FEMA tile summary: 0 newly fetched · 0 already cached · 0 failed (PHASE SKIPPED)")
+        print("=" * 60)
+        # Jump past Phase 3's tile loop by replacing HISTORICAL_STORMS local
+        # alias with an empty iterable for the for-loop below.
+        _phase3_iter = []
+    else:
+        _phase3_iter = HISTORICAL_STORMS
+
+    for storm in _phase3_iter:
         lat0 = storm.landfall_lat
         lon0 = storm.landfall_lon
 
@@ -675,8 +709,11 @@ def main():
         fz_skip += tiles_skipped
         fz_fail += tiles_failed
 
-    print(f"  FEMA tile summary: {fz_ok} newly fetched · {fz_skip} already cached · {fz_fail} failed")
-    print("=" * 60)
+    if _phase3_iter:
+        # Only print the trailing summary when Phase 3 actually ran a tile
+        # loop. The skip-path printed its own summary + separator above.
+        print(f"  FEMA tile summary: {fz_ok} newly fetched · {fz_skip} already cached · {fz_fail} failed")
+        print("=" * 60)
 
     # ── Phase 4: Compound raster mosaics ─────────────────────────────────
     # For every storm whose 3×3 cells include compound tifs (produced during
