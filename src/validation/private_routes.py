@@ -358,6 +358,253 @@ def _escape(s) -> str:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FEMA NFHL connectivity probe
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _fema_probe() -> dict:
+    """Run a battery of transport tests against hazards.fema.gov to
+    identify why warm_cache Phase 3 fails with SSL EOF on Railway.
+
+    Each test reports outcome + elapsed time so we can pick the
+    transport that actually works from inside the container.
+    """
+    import json as _json
+    import socket
+    import ssl
+    import subprocess
+    import time
+    import urllib.request
+
+    HOST = "hazards.fema.gov"
+    PORT = 443
+    # Small (~0.1°) bbox known to work from outside Railway with HTTP 200.
+    SMALL_BBOX_URL = (
+        "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
+        "?where=1%3D1"
+        "&geometry=%7B%22xmin%22%3A-97.1%2C%22ymin%22%3A27.9%2C%22xmax%22%3A-97.0"
+        "%2C%22ymax%22%3A28.0%2C%22spatialReference%22%3A%7B%22wkid%22%3A4326%7D%7D"
+        "&geometryType=esriGeometryEnvelope&inSR=4326&outSR=4326"
+        "&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE"
+        "&returnGeometry=true&resultRecordCount=2000&f=geojson"
+    )
+
+    out: dict = {"host": HOST, "tests": {}}
+
+    # 1) Plain TCP — rules out firewall / DNS / TCP-level blocks.
+    t = time.time()
+    try:
+        with socket.create_connection((HOST, PORT), timeout=10) as s:
+            out["tests"]["tcp_connect"] = {
+                "ok": True, "elapsed_ms": int((time.time()-t)*1000),
+                "peer": s.getpeername(),
+            }
+    except Exception as e:
+        out["tests"]["tcp_connect"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 2) TLS handshake (default Python ssl context) — what stock urllib uses.
+    t = time.time()
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((HOST, PORT), timeout=10) as s:
+            with ctx.wrap_socket(s, server_hostname=HOST) as ss:
+                out["tests"]["tls_default"] = {
+                    "ok": True, "elapsed_ms": int((time.time()-t)*1000),
+                    "version": ss.version(),
+                    "cipher": ss.cipher(),
+                }
+    except Exception as e:
+        out["tests"]["tls_default"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 3) TLS handshake forced to 1.2 — some WAFs reject 1.3 0-RTT requests.
+    t = time.time()
+    try:
+        ctx12 = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx12.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx12.maximum_version = ssl.TLSVersion.TLSv1_2
+        ctx12.check_hostname = True
+        ctx12.verify_mode = ssl.CERT_REQUIRED
+        ctx12.load_default_certs()
+        with socket.create_connection((HOST, PORT), timeout=10) as s:
+            with ctx12.wrap_socket(s, server_hostname=HOST) as ss:
+                out["tests"]["tls_forced_1_2"] = {
+                    "ok": True, "elapsed_ms": int((time.time()-t)*1000),
+                    "version": ss.version(),
+                    "cipher": ss.cipher(),
+                }
+    except Exception as e:
+        out["tests"]["tls_forced_1_2"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 4) Option A: subprocess curl — uses a separate TLS stack entirely.
+    t = time.time()
+    try:
+        proc = subprocess.run(
+            [
+                "curl", "-sS", "--max-time", "30",
+                "-A", "SurgeDPS/1.0 fema_probe",
+                "-o", "/dev/null",
+                "-w", "HTTP %{http_code} time_total=%{time_total}s size=%{size_download}\n",
+                SMALL_BBOX_URL,
+            ],
+            capture_output=True, text=True, timeout=45,
+        )
+        out["tests"]["curl_subprocess"] = {
+            "ok": proc.returncode == 0,
+            "elapsed_ms": int((time.time()-t)*1000),
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout[:400],
+            "stderr": proc.stderr[:400],
+        }
+    except FileNotFoundError:
+        out["tests"]["curl_subprocess"] = {
+            "ok": False, "error": "curl binary not in container PATH",
+        }
+    except Exception as e:
+        out["tests"]["curl_subprocess"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 5) urllib.request (what api_server.py /api/flood_zones uses).
+    t = time.time()
+    try:
+        req = urllib.request.Request(
+            SMALL_BBOX_URL,
+            headers={"User-Agent": "SurgeDPS/1.0 (+https://stormdps.com)"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+        body = raw[:200].decode("utf-8", errors="replace") if raw else ""
+        try:
+            parsed = _json.loads(raw) if raw else {}
+            is_error = isinstance(parsed, dict) and "error" in parsed
+        except Exception:
+            is_error = False
+        out["tests"]["urllib_request"] = {
+            "ok": not is_error,
+            "elapsed_ms": int((time.time()-t)*1000),
+            "http_status": resp.status,
+            "size": len(raw),
+            "body_preview": body,
+            "is_arcgis_error": is_error,
+        }
+    except Exception as e:
+        out["tests"]["urllib_request"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 6) requests library — what warm_cache currently uses.
+    t = time.time()
+    try:
+        import requests as _requests
+        r = _requests.get(
+            SMALL_BBOX_URL,
+            headers={"User-Agent": "SurgeDPS/1.0 fema_probe"},
+            timeout=30,
+        )
+        body = r.text[:200] if r.text else ""
+        try:
+            parsed = r.json()
+            is_error = isinstance(parsed, dict) and "error" in parsed
+        except Exception:
+            is_error = False
+        out["tests"]["requests_default"] = {
+            "ok": r.ok and not is_error,
+            "elapsed_ms": int((time.time()-t)*1000),
+            "http_status": r.status_code,
+            "size": len(r.content),
+            "body_preview": body,
+            "is_arcgis_error": is_error,
+        }
+    except Exception as e:
+        out["tests"]["requests_default"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 7) requests with explicit retry + connection pool + browser UA — most
+    #    aggressive Python-side workaround before giving up on Python entirely.
+    t = time.time()
+    try:
+        import requests as _requests
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util.retry import Retry
+            retry = Retry(
+                total=3, backoff_factor=2.0,
+                status_forcelist=[500, 502, 503, 504],
+                allowed_methods=["GET"],
+            )
+            adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
+        except Exception:
+            adapter = HTTPAdapter(max_retries=3)
+        sess = _requests.Session()
+        sess.mount("https://", adapter)
+        r = sess.get(
+            SMALL_BBOX_URL,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) "
+                              "Gecko/20100101 Firefox/124.0",
+                "Accept": "application/json, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=30,
+        )
+        body = r.text[:200] if r.text else ""
+        try:
+            parsed = r.json()
+            is_error = isinstance(parsed, dict) and "error" in parsed
+        except Exception:
+            is_error = False
+        out["tests"]["requests_browser_ua"] = {
+            "ok": r.ok and not is_error,
+            "elapsed_ms": int((time.time()-t)*1000),
+            "http_status": r.status_code,
+            "size": len(r.content),
+            "body_preview": body,
+            "is_arcgis_error": is_error,
+        }
+    except Exception as e:
+        out["tests"]["requests_browser_ua"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    # 8) Sanity: hit a different HTTPS host from the same container to confirm
+    #    egress generally works. If THIS fails, the issue is broader than FEMA.
+    t = time.time()
+    try:
+        req = urllib.request.Request("https://www.fema.gov/", headers={
+            "User-Agent": "SurgeDPS/1.0 sanity"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            out["tests"]["sanity_other_https"] = {
+                "ok": True, "elapsed_ms": int((time.time()-t)*1000),
+                "http_status": resp.status,
+            }
+    except Exception as e:
+        out["tests"]["sanity_other_https"] = {
+            "ok": False, "elapsed_ms": int((time.time()-t)*1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+    out["summary"] = {
+        name: ("ok" if r.get("ok") else "fail")
+        for name, r in out["tests"].items()
+    }
+    return out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Dispatcher
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -413,6 +660,11 @@ def handle_validation_request(handler, path: str, params: Dict[str, List[str]]) 
                 "/__val/__status               — token diagnostic",
             ],
         })
+        return
+
+    # GET /__val/fema_probe — diagnose why Phase 3 SSL EOFs from Railway IP
+    if segments[0] == "fema_probe":
+        _send_json(handler, _fema_probe())
         return
 
     # GET /__val/inventory.json | /__val/inventory.html — cache inventory
