@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 _NWIS_BASE = "https://waterservices.usgs.gov/nwis/iv"
 _NWPS_BASE = "https://api.water.noaa.gov/nwps/v1"
+# USGS OGC Water Data API — annual peak flow records, archive coverage
+# extends back to the early 20th century at many sites. Used as a fallback
+# for pre-2007 storms (Katrina, Sandy retroactives, etc.) whose landfall
+# windows predate the NWIS Instantaneous Values modern archive.
+_NWIS_PEAK_OGC_BASE = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/peaks/items"
 _REQUEST_TIMEOUT = 25
 _USER_AGENT = "SurgeDPS/1.0 (surgedps.com) historical"
 
@@ -196,6 +201,30 @@ def fetch_historical_gauges(
                 len(site_peaks), storm_id,
                 start_dt.date(), end_dt.date(), nwis_fetch_ok)
 
+    # 1b) Fall back to NWIS Annual Peak Flow when IV returned nothing useful
+    # (pre-2007 storms — primarily Katrina 2005). The peaks archive covers
+    # the early 20th century onward and records the per-water-year peak
+    # gage height with its date; the fetcher filters those to the storm
+    # window so we attribute the actual event, not a different flood that
+    # year. For modern storms with rich IV data, this fallback is a no-op
+    # because the early-return check skips the upstream call.
+    sources = ["usgs_nwis_iv_historical"]
+    if not site_peaks:
+        peak_records, peak_fetch_ok = _fetch_nwis_peak_period(
+            lon_min=landfall_lon - effective_radius,
+            lat_min=landfall_lat - effective_radius,
+            lon_max=landfall_lon + effective_radius,
+            lat_max=landfall_lat + effective_radius,
+            start=start_dt,
+            end=end_dt,
+        )
+        logger.info("USGS Peak fallback: %d site-peaks for %s (fetch_ok=%s)",
+                    len(peak_records), storm_id, peak_fetch_ok)
+        if peak_records:
+            site_peaks = peak_records
+            nwis_fetch_ok = peak_fetch_ok
+            sources.append("usgs_nwis_peak_ogc")
+
     # 2) For each site, look up NWS flood thresholds (shared cache on volume)
     thresholds_cache = _load_thresholds_cache(persistent_dir)
     features = []
@@ -243,7 +272,7 @@ def fetch_historical_gauges(
         "at_or_above_moderate": counts["major"] + counts["moderate"],
         "at_or_above_minor":    counts["major"] + counts["moderate"] + counts["minor"],
         "gauges": {"type": "FeatureCollection", "features": features},
-        "source": "usgs_nwis_iv_historical",
+        "source": "+".join(sources),
         "window_days": window_days,
         "_cached_at": datetime.now(timezone.utc).isoformat(),
         "_fetch_error": fetch_error,
@@ -362,6 +391,107 @@ def _fetch_nwis_iv_peaks(
             logger.debug("Skipping malformed NWIS timeSeries entry: %s", e)
 
     return peaks, True  # fetch succeeded (even if 0 stream gauges in bbox)
+
+
+# ─── NWIS Peak Flow fallback (pre-2007 archive) ───────────────────────────
+
+
+def _fetch_nwis_peak_period(
+    lon_min: float, lat_min: float, lon_max: float, lat_max: float,
+    start: datetime, end: datetime,
+) -> Tuple[List[_SitePeak], bool]:
+    """Fetch USGS NWIS annual peak-stage records that occurred during the
+    storm window. Used when /nwis/iv returns no data (pre-2007 storms).
+
+    Each record is a single site's WATER YEAR peak with the date it
+    occurred — we only keep records whose date falls inside [start, end],
+    so we're attributing the actual storm event, not (say) a spring
+    flood from the same water year.
+
+    Returns (peaks, fetch_ok). fetch_ok=False on any HTTP/parse error.
+    """
+    # The OGC API filters by water-year / calendar month rather than a
+    # datetime range, so we iterate one month-per-query across the window.
+    months: list[tuple[int, int]] = []
+    cur = datetime(start.year, start.month, 1, tzinfo=timezone.utc)
+    end_m = datetime(end.year, end.month, 1, tzinfo=timezone.utc)
+    while cur <= end_m:
+        months.append((cur.year, cur.month))
+        # Advance one month
+        if cur.month == 12:
+            cur = cur.replace(year=cur.year + 1, month=1)
+        else:
+            cur = cur.replace(month=cur.month + 1)
+
+    all_peaks: list[_SitePeak] = []
+    fetch_ok = True
+    for (yr, mo) in months:
+        # Parameter 00065 = gage height (ft). The OGC endpoint can return
+        # 00060 (discharge) for the same site/year; we keep the gage-height
+        # variant so the result reconciles with NWPS flood thresholds.
+        params = urllib.parse.urlencode({
+            "bbox":            f"{lon_min:.4f},{lat_min:.4f},{lon_max:.4f},{lat_max:.4f}",
+            "parameter_code":  "00065",
+            "year":            str(yr),
+            "month":           str(mo),
+            "limit":           "1000",
+            "f":               "json",
+        })
+        url = f"{_NWIS_PEAK_OGC_BASE}?{params}"
+        data = _get_json(url)
+        if data is None:
+            fetch_ok = False
+            continue
+        for f in data.get("features") or []:
+            p = f.get("properties") or {}
+            geom = f.get("geometry") or {}
+            coords = geom.get("coordinates") or []
+            if len(coords) < 2:
+                continue
+            try:
+                lon = float(coords[0]); lat = float(coords[1])
+            except (TypeError, ValueError):
+                continue
+            t = p.get("time")
+            if not t:
+                continue
+            # Window filter — only records dated inside [start, end]. The
+            # peaks endpoint can return any peak in the requested calendar
+            # month; we want the ones actually triggered by the storm.
+            try:
+                rec_dt = datetime.strptime(t[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if rec_dt < start or rec_dt > end:
+                continue
+            stage = p.get("value")
+            try:
+                stage_ft = float(stage) if stage is not None else None
+            except (TypeError, ValueError):
+                stage_ft = None
+            if stage_ft is None or stage_ft <= 0:
+                continue
+            site_id = str(p.get("monitoring_location_id") or "")
+            # OGC API prefixes site IDs with "USGS-"; strip for compatibility
+            # with the NWPS threshold lookup which expects bare numerics.
+            site_no = site_id.removeprefix("USGS-") if site_id else ""
+            all_peaks.append(_SitePeak(
+                site_no   = site_no,
+                site_name = site_no or "(unknown)",  # peaks endpoint omits names
+                lat       = lat,
+                lon       = lon,
+                peak_stage_ft = stage_ft,
+                peak_time = rec_dt.isoformat(),
+            ))
+
+    # Dedupe — a single site can have multiple per-month rows in edge cases;
+    # keep the highest stage per site.
+    by_site: dict[str, _SitePeak] = {}
+    for sp in all_peaks:
+        prev = by_site.get(sp.site_no)
+        if prev is None or (sp.peak_stage_ft or 0) > (prev.peak_stage_ft or 0):
+            by_site[sp.site_no] = sp
+    return list(by_site.values()), fetch_ok
 
 
 # ─── NWPS threshold cache ────────────────────────────────────────────────
