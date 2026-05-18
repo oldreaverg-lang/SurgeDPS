@@ -546,10 +546,21 @@ def load_cell(col: int, row: int, refresh: bool = False) -> dict:
     raster_path = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
 
     if refresh:
-        for p in (damage_path, flood_path, raster_path):
+        # Must drop the COMPOUND raster too. Flood polygons render from
+        # the compound raster (surge ∪ rainfall ∪ fluvial), so refreshing
+        # just the surge raster regenerates depth.tif but the cached
+        # compound.tif still holds the stale merged values — flood
+        # polygons stay broken until compound is also rebuilt. Same for
+        # rainfall_ft (derived from rainfall.tif, units-converted).
+        compound_path = os.path.join(sdir, f'cell_{col}_{row}_compound.tif')
+        rainfall_ft_path = os.path.join(sdir, f'cell_{col}_{row}_rainfall_ft.tif')
+        ticks_path = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
+        for p in (damage_path, flood_path, raster_path,
+                  compound_path, rainfall_ft_path, ticks_path):
             try: os.remove(p)
             except OSError: pass
-        print(f"  [refresh] cleared cell ({col},{row}) for {storm.storm_id}")
+        print(f"  [refresh] cleared cell ({col},{row}) for {storm.storm_id} "
+              f"(surge + compound + derived)")
 
     # Check cache. Ticks bundle is generated lazily by /api/cell_ticks on
     # demand, so we only require damage + flood here.
