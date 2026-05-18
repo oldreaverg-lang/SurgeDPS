@@ -2120,20 +2120,11 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           size. Click X (or any empty area on the map) to return to totals. */}
       {selectedCity ? (
         <div className="bg-indigo-50 rounded-xl p-3 text-center border border-indigo-200 shadow-sm mb-3">
-          <div className="flex items-center justify-between mb-0.5">
-            <div className="text-[10px] text-indigo-700 font-bold uppercase tracking-wider">
-              {selectedCity.name === 'Unincorporated' && selectedCity.countyName
-                ? `Unincorp. ${selectedCity.countyName}`
-                : selectedCity.name}
-              {selectedCity.state ? `, ${selectedCity.state}` : ''}
-            </div>
-            <button
-              type="button"
-              onClick={onClearSelectedCity}
-              title="Show storm-wide totals"
-              className="text-indigo-500 hover:text-indigo-800 text-sm font-bold leading-none px-1"
-              aria-label="Clear city filter"
-            >✕</button>
+          <div className="text-[10px] text-indigo-700 font-bold uppercase tracking-wider mb-0.5">
+            {selectedCity.name === 'Unincorporated' && selectedCity.countyName
+              ? `Unincorp. ${selectedCity.countyName}`
+              : selectedCity.name}
+            {selectedCity.state ? `, ${selectedCity.state}` : ''}
           </div>
           <div className="text-2xl font-black text-red-600 tracking-tighter">
             {selectedCity.loss > 0 ? formatLossOps(selectedCity.loss, mode) : '...'}
@@ -2154,6 +2145,18 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           <div className="mt-1 text-[9px] text-gray-400 italic">
             Buildings assigned to nearest city centroid — see "About" for methodology.
           </div>
+          {/* "Clear filter" button — explicit exit affordance that works the
+              same on mobile, tablet, and desktop (no hover, no keyboard). */}
+          <button
+            type="button"
+            onClick={onClearSelectedCity}
+            title="Return to storm-wide totals"
+            className="mt-2 w-full inline-flex items-center justify-center gap-1.5 rounded-md border border-indigo-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-indigo-700 shadow-sm hover:bg-indigo-100 hover:border-indigo-400 active:bg-indigo-200 transition-colors"
+            aria-label="Clear city filter and show storm-wide totals"
+          >
+            <span aria-hidden="true">✕</span>
+            <span>Clear filter</span>
+          </button>
         </div>
       ) : totals.buildings > 0 && (
         <div className="bg-gray-100/50 rounded-xl p-3 text-center border border-gray-200/60 shadow-sm mb-3">
