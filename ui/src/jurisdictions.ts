@@ -408,10 +408,13 @@ export function rollupByCity(
       // Back-fill the parent county so adjacent unincorp clusters are
       // distinguishable on the map ("Unincorp. Plaquemines" vs
       // "Unincorp. St. Bernard") instead of all reading "Unincorporated".
+      // County GEOID goes in the bucket key so buildings on either side
+      // of a parish line don't merge into a single mislabeled cluster.
       const gLon = Math.round(lon * 5) / 5;
       const gLat = Math.round(lat * 5) / 5;
       const nc = nearestCountyByLatLon(lat, lon);
-      key         = `unincorp|${gLat}|${gLon}`;
+      const cgid = nc?.geoid || 'unk';
+      key         = `unincorp|${cgid}|${gLat}|${gLon}`;
       name        = 'Unincorporated';
       state       = '';
       countyGeoid = nc?.geoid || '';
@@ -445,7 +448,8 @@ export function rollupByCity(
         const gLon = Math.round(lon * 5) / 5;
         const gLat = Math.round(lat * 5) / 5;
         const nc = nearestCountyByLatLon(lat, lon);
-        key         = `unincorp|${gLat}|${gLon}`;
+        const cgid = nc?.geoid || 'unk';
+        key         = `unincorp|${cgid}|${gLat}|${gLon}`;
         name        = 'Unincorporated';
         state       = '';
         countyGeoid = nc?.geoid || '';
