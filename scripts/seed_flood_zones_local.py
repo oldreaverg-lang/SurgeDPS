@@ -66,7 +66,10 @@ def _fema_url(qw: float, qs: float, qe: float, qn: float) -> str:
             "inSR": "4326",
             "outSR": "4326",
             "spatialRel": "esriSpatialRelIntersects",
-            "outFields": "FLD_ZONE,SFHA_TF,FLOODWAY",
+            # FLOODWAY no longer exists in FEMA's MapServer/28; requesting
+            # it 400s the whole query. FLD_ZONE is what the frontend styles
+            # by, so that's all we need.
+            "outFields": "FLD_ZONE",
             "returnGeometry": "true",
             "resultRecordCount": "2000",
             "f": "geojson",
@@ -78,26 +81,48 @@ def _fema_url(qw: float, qs: float, qe: float, qn: float) -> str:
 def _fetch_fema(url: str) -> bytes:
     """Fetch a single FEMA NFHL tile. Returns raw GeoJSON bytes.
 
-    Retries once on ArcGIS error response since the service is flaky.
+    FEMA's MapServer/28 throttles aggressively when our request rate
+    spikes — the failure mode is HTTP 200 + ``{'error': {'code': 400,
+    'message': 'Failed to execute query.'}}``. Once the rate-limit
+    counter is tripped, every subsequent request returns the same body
+    until ~60 seconds of quiet has passed.
+
+    Strategy: 3 attempts with long backoffs (15s, 45s). After the third
+    failure, give up on this tile and let the caller record it for a
+    later retry run. Hammering more doesn't unstick the rate limiter —
+    only quiet time does.
     """
-    for attempt in range(2):
+    backoffs = [15.0, 45.0]
+    last_err: str = ""
+    for attempt in range(3):
         req = urllib.request.Request(
             url, headers={"User-Agent": "SurgeDPS-seed/1.0 (+local)"}
         )
-        with urllib.request.urlopen(req, timeout=_FZ_TIMEOUT) as resp:
-            raw = resp.read()
-        # ArcGIS sometimes returns HTTP 200 with {"error":...} body.
+        try:
+            with urllib.request.urlopen(req, timeout=_FZ_TIMEOUT) as resp:
+                raw = resp.read()
+        except Exception as e:
+            last_err = f"http: {type(e).__name__}: {e}"
+            if attempt < len(backoffs):
+                time.sleep(backoffs[attempt])
+                continue
+            raise RuntimeError(last_err) from None
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, dict) and "error" in parsed:
-                if attempt == 0:
-                    time.sleep(2.0)
-                    continue
-                raise RuntimeError(f"FEMA error response: {parsed['error']}")
         except json.JSONDecodeError as e:
-            raise RuntimeError(f"FEMA returned non-JSON: {e}") from None
+            last_err = f"non-JSON body: {e}; first 120 bytes: {raw[:120]!r}"
+            if attempt < len(backoffs):
+                time.sleep(backoffs[attempt])
+                continue
+            raise RuntimeError(last_err) from None
+        if isinstance(parsed, dict) and "error" in parsed:
+            last_err = f"arcgis error: {parsed['error']}"
+            if attempt < len(backoffs):
+                time.sleep(backoffs[attempt])
+                continue
+            raise RuntimeError(last_err)
         return raw
-    raise RuntimeError("unreachable")
+    raise RuntimeError(last_err or "unreachable")
 
 
 def _upload_to_railway(tile_key: str, raw: bytes) -> dict:
@@ -174,6 +199,14 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="fetch from FEMA but don't upload",
     )
+    parser.add_argument(
+        "--retry-from", default=None,
+        help="path to a previous run's failed-tiles file; only retry those",
+    )
+    parser.add_argument(
+        "--failed-out", default="seed_failed.txt",
+        help="write failed (storm,tile_key) pairs to this file for later retry",
+    )
     args = parser.parse_args()
 
     if not _TOKEN:
@@ -188,18 +221,39 @@ def main() -> int:
         print(f"ERROR: no storm matched --storm={args.storm}")
         return 2
 
+    # Load retry filter if provided. File format: "storm_id<TAB>tile_key" lines.
+    retry_filter: set | None = None
+    if args.retry_from:
+        retry_filter = set()
+        try:
+            for line in open(args.retry_from, encoding="utf-8"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) == 2:
+                    retry_filter.add((parts[0], parts[1]))
+            print(f"Retry mode: only attempting {len(retry_filter)} tiles from {args.retry_from}")
+        except FileNotFoundError:
+            print(f"ERROR: --retry-from file not found: {args.retry_from}")
+            return 2
+
     print(f"Seeding {len(storms)} storm(s). Base: {_RAILWAY_BASE}")
     print("=" * 60)
 
     total_fetched = total_uploaded = total_failed = 0
     total_features = 0
     total_bytes = 0
+    failed_lines: list[str] = []
 
     for storm in storms:
         print(f"\n[{storm.storm_id}]  landfall ({storm.landfall_lat:.2f}, "
               f"{storm.landfall_lon:.2f})")
         s_ok = s_skip = s_fail = 0
         for qw, qs, qe, qn, tile_key in _build_tile_grid(storm):
+            if retry_filter is not None and (storm.storm_id, tile_key) not in retry_filter:
+                s_skip += 1
+                continue
             if not args.force and _railway_has_tile(tile_key):
                 s_skip += 1
                 continue
@@ -210,6 +264,10 @@ def main() -> int:
                 print(f"    {tile_key} — FEMA fetch failed: {e}")
                 s_fail += 1
                 total_failed += 1
+                failed_lines.append(f"{storm.storm_id}\t{tile_key}")
+                # Long cooldown after consecutive failures to let FEMA's
+                # rate-limit counter drain.
+                time.sleep(15.0)
                 continue
             total_fetched += 1
             try:
@@ -223,6 +281,9 @@ def main() -> int:
             if args.dry_run:
                 print(f"    {tile_key} — fetched {len(raw):>8d}B "
                       f"({fc:>5d} feat) [dry-run]")
+                # Maintain pacing in dry-run too so we don't blast FEMA
+                # and trigger 400s on the subsequent live run.
+                time.sleep(1.5)
                 continue
 
             try:
@@ -231,6 +292,7 @@ def main() -> int:
                 print(f"    {tile_key} — upload failed: {e}")
                 s_fail += 1
                 total_failed += 1
+                failed_lines.append(f"{storm.storm_id}\t{tile_key}")
                 continue
 
             if not resp.get("ok"):
@@ -257,6 +319,16 @@ def main() -> int:
     print(f"TOTAL: {total_fetched} fetched · {total_uploaded} uploaded · "
           f"{total_failed} failed")
     print(f"       {total_features} features, {total_bytes/1024/1024:.1f} MB")
+
+    if failed_lines:
+        try:
+            with open(args.failed_out, "w", encoding="utf-8") as f:
+                f.write("# storm_id<TAB>tile_key — re-run with --retry-from <this file>\n")
+                f.write("\n".join(failed_lines) + "\n")
+            print(f"Wrote {len(failed_lines)} failed tiles to {args.failed_out}")
+        except OSError as e:
+            print(f"WARN: could not write failed-tiles list: {e}")
+
     return 0 if total_failed == 0 else 1
 
 

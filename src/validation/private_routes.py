@@ -732,12 +732,11 @@ def handle_validation_post(handler, path: str, params: Dict[str, List[str]]) -> 
             _send_json(handler, {"error": f"expected FeatureCollection, got type={parsed.get('type')!r}"})
             return
 
-        persistent = (
-            os.environ.get("PERSISTENT_DATA_DIR")
-            or os.environ.get("PERSISTENT_DIR")
-            or "/app/persistent"
-        )
-        cache_dir = os.path.join(persistent, "cache", "flood_zones")
+        # Use the same module-level constant the rest of the app reads
+        # from (persistent_paths.py). This avoids a path-mismatch bug where
+        # /app/persistent was written but /app/tmp_integration was read.
+        from persistent_paths import PERSISTENT_DATA_DIR as _PERSIST
+        cache_dir = os.path.join(str(_PERSIST), "cache", "flood_zones")
         os.makedirs(cache_dir, exist_ok=True)
         cache_path = os.path.join(cache_dir, tile_key + suffix)
 

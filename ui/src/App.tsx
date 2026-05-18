@@ -2542,31 +2542,62 @@ function App() {
   const fetchFloodZones = useCallback((bounds: { west: number; south: number; east: number; north: number }) => {
     if (floodZonesFetchTimer.current) clearTimeout(floodZonesFetchTimer.current);
     floodZonesFetchTimer.current = setTimeout(async () => {
-      // Proxy through our backend to avoid CORS issues with hazards.fema.gov
-      const proxyParams = new URLSearchParams({
-        west:  String(bounds.west),
-        south: String(bounds.south),
-        east:  String(bounds.east),
-        north: String(bounds.north),
-      });
-      const url = `/surgedps/api/flood_zones?${proxyParams}`;
+      // Phase 3 of warm_cache can't reach hazards.fema.gov from Railway's
+      // egress, so flood-zone tiles are seeded out-of-band on a 0.25° grid
+      // covering ±2° around each historic storm's landfall. Issue ONE
+      // request per visible 0.25° tile so each request hits a cached file
+      // exactly (or — if uncached — yields a small enough bbox that FEMA
+      // would have served it directly). Cap the tile count to keep the
+      // request count bounded on zoom-out.
+      const FZ_GRID = 0.25;
+      const MAX_TILES = 36;  // hard cap; zoomed out further => skip layer
+      const snapDown = (v: number) => Math.round(Math.floor(v / FZ_GRID) * FZ_GRID * 100) / 100;
+      const snapUp   = (v: number) => Math.round(Math.ceil(v / FZ_GRID) * FZ_GRID * 100) / 100;
+      const w0 = snapDown(bounds.west);
+      const s0 = snapDown(bounds.south);
+      const e0 = snapUp(bounds.east);
+      const n0 = snapUp(bounds.north);
+      const nx = Math.max(1, Math.round((e0 - w0) / FZ_GRID));
+      const ny = Math.max(1, Math.round((n0 - s0) / FZ_GRID));
+      if (nx * ny > MAX_TILES) {
+        // Zoomed out too far — don't render flood zones at this zoom.
+        setFloodZonesGeoJSON({ type: 'FeatureCollection', features: [] });
+        setFloodZonesError(null);
+        setFloodZonesLoading(false);
+        return;
+      }
+
       setFloodZonesLoading(true);
       setFloodZonesError(null);
       const ac = new AbortController();
-      // 60s — first bbox takes up to 20s from FEMA NFHL, then it's cached
-      // permanently on the Railway volume.
       const timeout = setTimeout(() => ac.abort(), 60_000);
-      try {
-        const res = await fetch(url, { signal: ac.signal });
-        clearTimeout(timeout);
-        if (!res.ok) throw new Error(`NFHL ${res.status}`);
-        const data = await res.json();
-        if (data?.error) throw new Error(data.error.message || 'NFHL error');
-        if (data?.features?.length) {
-          setFloodZonesGeoJSON(data);
-        } else {
-          setFloodZonesGeoJSON({ type: 'FeatureCollection', features: [] });
+
+      const tilePromises: Promise<any>[] = [];
+      for (let ix = 0; ix < nx; ix++) {
+        for (let iy = 0; iy < ny; iy++) {
+          const tw = Math.round((w0 + ix * FZ_GRID) * 100) / 100;
+          const ts = Math.round((s0 + iy * FZ_GRID) * 100) / 100;
+          const te = Math.round((tw + FZ_GRID) * 100) / 100;
+          const tn = Math.round((ts + FZ_GRID) * 100) / 100;
+          const params = new URLSearchParams({
+            west: String(tw), south: String(ts), east: String(te), north: String(tn),
+          });
+          tilePromises.push(
+            fetch(`/surgedps/api/flood_zones?${params}`, { signal: ac.signal })
+              .then(r => r.ok ? r.json() : { type: 'FeatureCollection', features: [] })
+              .catch(() => ({ type: 'FeatureCollection', features: [] }))
+          );
         }
+      }
+
+      try {
+        const results = await Promise.all(tilePromises);
+        clearTimeout(timeout);
+        const merged: any[] = [];
+        for (const r of results) {
+          if (r && Array.isArray(r.features)) merged.push(...r.features);
+        }
+        setFloodZonesGeoJSON({ type: 'FeatureCollection', features: merged });
       } catch (err: any) {
         clearTimeout(timeout);
         console.warn('[flood-zones] fetch failed:', err?.message || err);

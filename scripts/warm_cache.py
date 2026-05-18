@@ -653,7 +653,9 @@ def main():
                     'inSR': '4326',
                     'outSR': '4326',
                     'spatialRel': 'esriSpatialRelIntersects',
-                    'outFields': 'FLD_ZONE,SFHA_TF,FLOODWAY',
+                    # FLOODWAY no longer in MapServer/28 — including it 400s
+                    # the query. Frontend only styles by FLD_ZONE anyway.
+                    'outFields': 'FLD_ZONE',
                     'returnGeometry': 'true',
                     'resultRecordCount': '2000',
                     'f': 'geojson',
