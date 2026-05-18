@@ -125,6 +125,18 @@ export interface CityRollup {
   centerLon: number;
   centerLat: number;
   pop: number;
+  /**
+   * Per-city loss uncertainty band (percent). Cities are assigned buildings
+   * via nearest-centroid Voronoi, which misassigns ~5–20% of buildings near
+   * city edges. The band scales with city size (small CDPs have more edge
+   * relative to area, so higher uncertainty):
+   *   pop ≥ 100k       →  5%
+   *   pop  20k–100k    → 10%
+   *   pop  < 20k       → 20%
+   *   "Unincorporated" → 20% (pop = 0 falls into the small-CDP tier)
+   * Used by the per-city hero card when the user filters on a single city.
+   */
+  lossUncertaintyPct: number;
 }
 
 export interface CountyRollup {
@@ -378,6 +390,11 @@ export function rollupByCity(
       countyName  = '';
     }
 
+    // Stamp the assignment onto the building feature so the map-side filter
+    // expression can match buildings to the selected city bubble. Additive —
+    // doesn't touch any property other consumers depend on.
+    b.properties = { ...p, assigned_city_key: key };
+
     if (!buckets[key]) {
       buckets[key] = {
         rollup: {
@@ -388,6 +405,7 @@ export function rollupByCity(
           centerLon: bestCity?.lon ?? lon,
           centerLat: bestCity?.lat ?? lat,
           pop: bestCity?.pop ?? 0,
+          lossUncertaintyPct: 0, // set in finalize loop based on pop tier
         },
         sumLon: 0, sumLat: 0, count: 0,
         resMajorSevere: 0,
@@ -420,7 +438,7 @@ export function rollupByCity(
     }
   }
 
-  // Finalize unincorporated centroids + displacement
+  // Finalize unincorporated centroids + displacement + uncertainty tier
   const rows: CityRollup[] = [];
   for (const { rollup, sumLon, sumLat, count, resMajorSevere } of Object.values(buckets)) {
     if (rollup.buildings === 0) continue;
@@ -430,6 +448,15 @@ export function rollupByCity(
     }
     // Same formula as rollupByCounty: residential major+severe × haircut × hh.
     rollup.estDisplaced = Math.round(resMajorSevere * DISPLACEMENT_HAIRCUT * AVG_HOUSEHOLD);
+
+    // Loss-uncertainty band scales with city size — bigger cities have a
+    // lower edge-to-area ratio so fewer buildings sit in Voronoi-disputed
+    // zones. "Unincorporated" buckets have pop=0 and fall into the small
+    // tier automatically.
+    if (rollup.pop >= 100_000) rollup.lossUncertaintyPct = 5;
+    else if (rollup.pop >= 20_000) rollup.lossUncertaintyPct = 10;
+    else rollup.lossUncertaintyPct = 20;
+
     rows.push(rollup);
   }
 
@@ -468,7 +495,9 @@ export function cityRollupToCentroidGeoJSON(rows: CityRollup[]): any {
         minor: r.minor,
         criticalFacilities: r.criticalFacilities,
         estDisplaced: r.estDisplaced,
+        maxDepthFt: r.maxDepthFt,
         pop: r.pop,
+        lossUncertaintyPct: r.lossUncertaintyPct,
         worstCategory: worst,
         label: `${displayName}  ${r.buildings.toLocaleString()}`,
       },

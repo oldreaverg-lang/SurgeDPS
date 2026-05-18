@@ -1779,7 +1779,7 @@ function JurisdictionsPanel({
   );
 }
 
-function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange, betaLayersEnabled, countyRollup, countiesGeoJSON, totalDisplaced, showCounties }: {
+function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, eli: _eli, validatedDps: _validatedDps, onOpenSidebar, zoom, onClearStorm, estimatedPop, severityCounts, criticalCount, criticalBreakdown, hotspots, onFlyTo, mode, onModeChange, subPersona, onSubPersonaChange, onGenerateCatReport, onGenerateSitRep, teamSize, windowDays, onTeamSizeChange, onWindowDaysChange, betaLayersEnabled, countyRollup, countiesGeoJSON, totalDisplaced, showCounties, selectedCity, onClearSelectedCity }: {
   storm: StormInfo | null;
   totals: { buildings: number; loss: number; totalDepth: number };
   loadedCells: Set<string>;
@@ -1811,6 +1811,14 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   countiesGeoJSON: any;
   totalDisplaced: number;
   showCounties: boolean;
+  /**
+   * Currently-filtered city. When non-null, the dashboard's hero card
+   * swaps from storm-wide totals to this city's totals + a Voronoi
+   * uncertainty band. Set by clicking a city-aggregate bubble in the
+   * map view; cleared by clicking empty map or the X button below.
+   */
+  selectedCity: import('./jurisdictions').CityRollup | null;
+  onClearSelectedCity: () => void;
 }) {
   // Auto-expand on desktop, collapsed by default on mobile
   const [expanded, setExpanded] = useState(false);
@@ -2106,8 +2114,48 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
 
 
 
-      {/* Scoreboard */}
-      {totals.buildings > 0 && (
+      {/* Scoreboard — swaps between storm-wide totals and per-city drill-down.
+          Per-city view kicks in when the user clicks a city-aggregate bubble
+          on the map and displays a Voronoi-uncertainty band scaled by city
+          size. Click X (or any empty area on the map) to return to totals. */}
+      {selectedCity ? (
+        <div className="bg-indigo-50 rounded-xl p-3 text-center border border-indigo-200 shadow-sm mb-3">
+          <div className="flex items-center justify-between mb-0.5">
+            <div className="text-[10px] text-indigo-700 font-bold uppercase tracking-wider">
+              {selectedCity.name === 'Unincorporated' && selectedCity.countyName
+                ? `Unincorp. ${selectedCity.countyName}`
+                : selectedCity.name}
+              {selectedCity.state ? `, ${selectedCity.state}` : ''}
+            </div>
+            <button
+              type="button"
+              onClick={onClearSelectedCity}
+              title="Show storm-wide totals"
+              className="text-indigo-500 hover:text-indigo-800 text-sm font-bold leading-none px-1"
+              aria-label="Clear city filter"
+            >✕</button>
+          </div>
+          <div className="text-2xl font-black text-red-600 tracking-tighter">
+            {selectedCity.loss > 0 ? formatLossOps(selectedCity.loss, mode) : '...'}
+          </div>
+          <div className="text-[10px] text-indigo-700 mt-0.5">
+            ± {selectedCity.lossUncertaintyPct}% city-boundary uncertainty
+            {selectedCity.lossUncertaintyPct >= 20 && ' (small place / unincorporated)'}
+          </div>
+          <div className="text-xs text-gray-600 mt-1">
+            {formatCountOps(selectedCity.buildings, mode)} buildings analyzed
+            {selectedCity.pop > 0 && ` · pop ${formatCountOps(selectedCity.pop, mode)}`}
+          </div>
+          {selectedCity.estDisplaced > 0 && (
+            <div className="text-[10px] text-gray-500 mt-0.5">
+              ~{formatCountOps(selectedCity.estDisplaced, mode)} potentially displaced
+            </div>
+          )}
+          <div className="mt-1 text-[9px] text-gray-400 italic">
+            Buildings assigned to nearest city centroid — see "About" for methodology.
+          </div>
+        </div>
+      ) : totals.buildings > 0 && (
         <div className="bg-gray-100/50 rounded-xl p-3 text-center border border-gray-200/60 shadow-sm mb-3">
           <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-0.5">
             {mode === 'ops' ? 'Modeled Loss (rounded)' : 'Total Modeled Loss'}
@@ -2299,6 +2347,11 @@ function App() {
   const [activating, setActivating] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<any>(null);
   const [pinnedInfo, setPinnedInfo] = useState<any>(null);
+  // Per-city filter — set when the user clicks a city-aggregate bubble.
+  // Filters damage-points / damage-clusters / city-aggregate-circle layers
+  // to only the matching `assigned_city_key`, and switches the dashboard
+  // hero card to show that city's totals with a Voronoi uncertainty band.
+  const [selectedCityKey, setSelectedCityKey] = useState<string | null>(null);
   const [impactTotals, setImpactTotals] = useState({ buildings: 0, loss: 0, totalDepth: 0 });
   const [loadedCells, setLoadedCells] = useState<Set<string>>(new Set());
   const [loadingCells, setLoadingCells] = useState<Set<string>>(new Set());
@@ -4287,14 +4340,25 @@ ${fieldFlag ? `
   const onClick = useCallback((event: any) => {
     // Close any open menus when map is clicked
     setMoreMenuOpen(false);
-    // City aggregate bubble click → fly in to zoom 11 (individual building zoom).
+    // City aggregate bubble click → fly in to zoom 11 (individual building zoom)
+    // AND filter damage layers + dashboard to that city. Clicking elsewhere
+    // (handled below) clears the filter.
     const cityBubble = event.features?.find((f: any) => f.layer.id === 'city-aggregate-circle');
     if (cityBubble && mapRef.current) {
+      const key = cityBubble.properties?.key;
+      if (key) setSelectedCityKey(String(key));
       mapRef.current.flyTo({
         center: [event.lngLat.lng, event.lngLat.lat],
         zoom: 11,
         duration: 700,
       });
+      return;
+    }
+    // Click on empty map (no feature matched in any interactive layer) clears
+    // any active per-city filter. Lets the user step out of "drilled in" mode
+    // without hunting for a small X button.
+    if (!event.features?.length && selectedCityKey) {
+      setSelectedCityKey(null);
       return;
     }
     // County aggregate bubble click → fly in to zoom 9 (above the minzoom
@@ -4335,7 +4399,7 @@ ${fieldFlag ? `
     const f = event.features?.find((f: any) => f.layer.id === 'grid-available-fill' || f.layer.id === 'grid-ready-fill');
     if (f) loadCell(f.properties.col, f.properties.row);
     else setPinnedInfo(null); // Click on empty space → clear pinned popup
-  }, [loadCell]);
+  }, [loadCell, selectedCityKey]);
 
   const showGrid = zoom < 13;
 
@@ -4555,14 +4619,21 @@ ${fieldFlag ? `
 
           {allBuildings && mapView === 'damage' && (
             <Source id="damage-data" type="geojson" data={displayBuildings ?? allBuildings}
-              cluster={true} clusterMaxZoom={14} clusterRadius={50}
+              // Disable clustering when a city filter is active. Cluster
+              // filters can't reference per-feature properties, so the
+              // cleanest way to keep visible bubbles strictly within the
+              // selected city is to render individual points only.
+              cluster={!selectedCityKey} clusterMaxZoom={14} clusterRadius={50}
               clusterProperties={{ total_loss: ['+', ['get', 'estimated_loss_usd']] }}
             >
               {/* Individual-building and supercluster bubbles only at zoom ≥ 11.
                   Below zoom 11 city-aggregate bubbles take over (zoom 8–11),
                   and below zoom 8 county-aggregate bubbles are shown instead,
                   so the EM sees one clearly-labeled marker per jurisdiction. */}
-              <Layer id="damage-points" type="circle" filter={['!', ['has', 'point_count']]}
+              <Layer id="damage-points" type="circle"
+                filter={selectedCityKey
+                  ? ['all', ['!', ['has', 'point_count']], ['==', ['get', 'assigned_city_key'], selectedCityKey]]
+                  : ['!', ['has', 'point_count']]}
                 minzoom={11}
                 paint={{
                   'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 13, 8, 14, 12, 16, 16, 18, 22],
@@ -4697,6 +4768,9 @@ ${fieldFlag ? `
             <Source id="city-aggregate-data" type="geojson" data={cityAggregatePoints}>
               <Layer id="city-aggregate-circle" type="circle"
                 minzoom={8} maxzoom={11}
+                filter={selectedCityKey
+                  ? ['==', ['get', 'key'], selectedCityKey]
+                  : ['has', 'key']}
                 paint={mapView === 'damage' ? {
                   'circle-radius': ['interpolate', ['linear'], ['get', 'buildings'],
                     1, 8, 50, 12, 500, 18, 5000, 28, 20000, 38],
@@ -4726,6 +4800,9 @@ ${fieldFlag ? `
                 }} />
               <Layer id="city-aggregate-label" type="symbol"
                 minzoom={8} maxzoom={11}
+                filter={selectedCityKey
+                  ? ['==', ['get', 'key'], selectedCityKey]
+                  : ['has', 'key']}
                 layout={mapView === 'damage' ? {
                   'text-field': ['get', 'label'],
                   'text-size': 10,
@@ -5269,7 +5346,7 @@ ${fieldFlag ? `
         )}
 
         {/* Dashboard overlay */}
-        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} countyRollup={countyRollup} countiesGeoJSON={countiesGeoJSON} totalDisplaced={totalDisplaced} showCounties={showCounties} onClearStorm={() => {
+        <DashboardPanel storm={activeStorm} totals={impactTotals} loadedCells={loadedCells} loadingCells={loadingCells} confidence={confidence} eli={eli} validatedDps={validatedDps} mode={mode} onModeChange={setMode} subPersona={subPersona} onSubPersonaChange={setSubPersona} onOpenSidebar={() => setSidebarOpen(true)} zoom={zoom} estimatedPop={estimatedPop} severityCounts={severityCounts} criticalCount={criticalCount} criticalBreakdown={criticalBreakdown} hotspots={hotspots} onFlyTo={handleFlyToHotspot} onGenerateCatReport={handleGenerateCatReport} onGenerateSitRep={handleGenerateSitRep} teamSize={teamSize} windowDays={windowDays} onTeamSizeChange={setTeamSize} onWindowDaysChange={setWindowDays} betaLayersEnabled={betaLayersEnabled} countyRollup={countyRollup} countiesGeoJSON={countiesGeoJSON} totalDisplaced={totalDisplaced} showCounties={showCounties} selectedCity={selectedCityKey ? (cityRollup?.find(r => r.key === selectedCityKey) ?? null) : null} onClearSelectedCity={() => setSelectedCityKey(null)} onClearStorm={() => {
           setActiveStorm(null); setAllBuildings(null); setAllFlood(null);
           setLoadedCells(new Set()); setLoadingCells(new Set());
           setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
