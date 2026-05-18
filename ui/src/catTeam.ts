@@ -125,7 +125,7 @@ export function routingHint(windPct: number, waterPct: number): RoutingTag {
       hint: 'nfip',
       label: 'NFIP primary',
       short: 'NFIP',
-      description: 'Flood carrier leads — route to NFIP adjusters first',
+      description: 'NFIP (National Flood Insurance Program) — flood carrier leads. Route claims to NFIP adjusters first.',
       classes: 'bg-indigo-100 text-indigo-800 border border-indigo-200',
     };
   }
@@ -134,7 +134,7 @@ export function routingHint(windPct: number, waterPct: number): RoutingTag {
       hint: 'ho3',
       label: 'HO3 primary',
       short: 'HO3',
-      description: 'Standard homeowners carrier leads — wind-driven losses',
+      description: 'HO3 (standard homeowners policy) — wind-driven losses. Route claims to the homeowners carrier first.',
       classes: 'bg-sky-100 text-sky-800 border border-sky-200',
     };
   }
@@ -142,7 +142,7 @@ export function routingHint(windPct: number, waterPct: number): RoutingTag {
     hint: 'mixed',
     label: 'Mixed — dual-route',
     short: 'Mixed',
-    description: 'Both flood and wind carriers in play — coordinate dual adjustment',
+    description: 'Both NFIP (flood) and HO3 (homeowners) in play — coordinate dual adjustment.',
     classes: 'bg-purple-100 text-purple-800 border border-purple-200',
   };
 }

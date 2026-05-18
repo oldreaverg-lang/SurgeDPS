@@ -11,6 +11,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Hotspot as _HotspotExtracted } from './types';
 import { StormBrowser as _SB } from './components/StormBrowser';
 import { DashboardPanel as _DP } from './components/DashboardPanel';
+import { MapLegend } from './components/MapLegend';
 void ({} as _HotspotExtracted); void _SB; void _DP;
 import {
   recommendAdjusters,
@@ -924,12 +925,21 @@ function CatDeploymentSummary({
   const top = hotspots[0];
 
   // Deployment-urgency color borrowed from the workloadSummary headline.
-  const urgencyColor =
+  // Solid dot + muted background reads as a status indicator rather than
+  // a clickable button — the headline used to render as a saturated red
+  // pill that users repeatedly tried to click.
+  const urgencyDot =
     headline === 'Deploy immediately' ? 'bg-red-600'
     : headline === 'Deploy CAT team' ? 'bg-orange-500'
     : headline === 'Deploy field adjusters' ? 'bg-amber-500'
     : headline === 'Standard claims handling' ? 'bg-sky-500'
     : 'bg-slate-400';
+  const urgencyChip =
+    headline === 'Deploy immediately' ? 'bg-red-50 text-red-700 border-red-200'
+    : headline === 'Deploy CAT team' ? 'bg-orange-50 text-orange-700 border-orange-200'
+    : headline === 'Deploy field adjusters' ? 'bg-amber-50 text-amber-800 border-amber-200'
+    : headline === 'Standard claims handling' ? 'bg-sky-50 text-sky-700 border-sky-200'
+    : 'bg-slate-50 text-slate-600 border-slate-200';
 
   // EM-specific aggregates: worst shelter posture across the footprint
   // and staging plan for the Top Priority callout. Per-hotspot peril
@@ -952,8 +962,12 @@ function CatDeploymentSummary({
     <div className={panelClass}>
       <div className="flex items-center gap-2 mb-2">
         <span className={`text-[10px] font-bold uppercase tracking-wider ${headerColor}`}>{headerText}</span>
-        <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-white shrink-0" style={{ backgroundColor: 'transparent' }}>
-          <span className={`px-1.5 py-0.5 rounded-sm ${urgencyColor}`}>{headline}</span>
+        <span
+          className={`ml-auto inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full border ${urgencyChip} shrink-0`}
+          title="Deployment-urgency status for this storm (not a clickable action — set the deploy plan via the slider below)"
+        >
+          <span aria-hidden className={`inline-block w-1.5 h-1.5 rounded-full ${urgencyDot}`} />
+          {headline}
         </span>
       </div>
 
@@ -973,6 +987,12 @@ function CatDeploymentSummary({
           When the rainfall pipeline populated per-building rainfall_depth_ft
           we render a 3-segment bar (surge / rain / wind); otherwise the
           classic 2-segment water/wind bar. */}
+      <div
+        className="text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1"
+        title="Share of total loss attributable to each peril, weighted by buildings in the hardest-hit areas"
+      >
+        Peril mix
+      </div>
       {stormMix.rainPct > 0 ? (
         <div className="flex items-center gap-2 mb-2" title={`${stormMix.surgePct}% surge · ${stormMix.rainPct}% rain · ${stormMix.windPct}% wind (weighted by building count in hardest-hit areas)`}>
           <div className="flex-1 h-3 rounded-full overflow-hidden bg-slate-200 flex">
@@ -2088,6 +2108,13 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
             </div>
             <p className={`text-[10px] mt-0.5 ${cs.text} opacity-75`}>{tip}</p>
             <div className="mt-1.5 pt-1.5 border-t border-white/60 grid grid-cols-1 gap-0.5">
+              <div
+                className={`flex items-center justify-between text-[9px] ${cs.text} opacity-60 mb-0.5 uppercase tracking-wider`}
+                title="Each row shows data-quality confidence on a 5-dot scale: 5 = strong, 3 = moderate, 2 = limited."
+              >
+                <span>Data quality</span>
+                <span className="tabular-nums">5 = strong · 2 = limited</span>
+              </div>
               <Pip label="Surge"     lv={surgeLevel}     title="SLOSH maximum-of-maximums modeling for this event" />
               <Pip label="Buildings" lv={buildingsLevel} title="Building inventory coverage in the loaded grid cells" />
               <Pip label="Populatn." lv={popLevel}       title="County-level population data availability for the affected area" />
@@ -2251,7 +2278,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
                 <button
                   key={h.rank}
                   onClick={() => onFlyTo?.(h.lon, h.lat)}
-                  className="w-full text-left hover:bg-red-100/50 rounded px-1 py-1 transition-colors"
+                  className="group w-full text-left hover:bg-red-100/60 hover:shadow-sm rounded px-1 py-1 transition-all cursor-pointer"
+                  title={h.areaName ? `Fly to ${h.areaName}` : 'Fly to hotspot'}
                 >
                   {/* Top line: rank, area name + loss, routing tag (CAT) or shelter posture (EM) */}
                   <div className="flex items-center gap-2">
@@ -2282,6 +2310,11 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
                         title={h.routing.description}
                       >{h.routing.short}</span>
                     )}
+                    {/* Click affordance — fades in on hover so it doesn't add visual noise to the row. */}
+                    <span
+                      aria-hidden
+                      className="text-red-400 text-sm leading-none opacity-30 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all shrink-0"
+                    >›</span>
                   </div>
 
                   {/* Peril mix bar (B2) — shown in both personas */}
@@ -5658,6 +5691,21 @@ ${fieldFlag ? `
               </div>
             </div>
           </div>
+        )}
+
+        {/* ── Map legend — collapsible key for active layers.
+            Hidden while methodology is open so the two bottom-right panels
+            don't stack on top of each other. */}
+        {activeStorm && !methodologyOpen && (
+          <MapLegend
+            showSurge={layerSurge}
+            showRainfall={layerRainfall}
+            showDamage={mapView === 'damage'}
+            showPopulation={mapView === 'population'}
+            showFEMAZones={showFloodZones}
+            showGauges={showGauges}
+            showShelters={showShelters}
+          />
         )}
 
         {/* ── Methodology Disclosure Panel ── */}

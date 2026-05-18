@@ -66,12 +66,20 @@ export function CatDeploymentSummary({
   const headline = wl.headline;
   const top = hotspots[0];
 
-  const urgencyColor =
+  // Status-chip styling (muted background + colored dot) — reads as an
+  // indicator rather than a clickable button.
+  const urgencyDot =
     headline === 'Deploy immediately' ? 'bg-red-600'
     : headline === 'Deploy CAT team' ? 'bg-orange-500'
     : headline === 'Deploy field adjusters' ? 'bg-amber-500'
     : headline === 'Standard claims handling' ? 'bg-sky-500'
     : 'bg-slate-400';
+  const urgencyChip =
+    headline === 'Deploy immediately' ? 'bg-red-50 text-red-700 border-red-200'
+    : headline === 'Deploy CAT team' ? 'bg-orange-50 text-orange-700 border-orange-200'
+    : headline === 'Deploy field adjusters' ? 'bg-amber-50 text-amber-800 border-amber-200'
+    : headline === 'Standard claims handling' ? 'bg-sky-50 text-sky-700 border-sky-200'
+    : 'bg-slate-50 text-slate-600 border-slate-200';
 
   const worstPost = worstShelterPosture(
     hotspots.map(h => ({ maxDepthFt: h.maxDepthFt, windPct: h.windPct, waterPct: h.waterPct })),
@@ -90,8 +98,12 @@ export function CatDeploymentSummary({
     <div className={panelClass}>
       <div className="flex items-center gap-2 mb-2">
         <span className={`text-[10px] font-bold uppercase tracking-wider ${headerColor}`}>{headerText}</span>
-        <span className="ml-auto text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-white shrink-0" style={{ backgroundColor: 'transparent' }}>
-          <span className={`px-1.5 py-0.5 rounded-sm ${urgencyColor}`}>{headline}</span>
+        <span
+          className={`ml-auto inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full border ${urgencyChip} shrink-0`}
+          title="Deployment-urgency status for this storm (not a clickable action — set the deploy plan via the slider below)"
+        >
+          <span aria-hidden className={`inline-block w-1.5 h-1.5 rounded-full ${urgencyDot}`} />
+          {headline}
         </span>
       </div>
 
@@ -108,6 +120,12 @@ export function CatDeploymentSummary({
       </div>
 
       {/* Peril mix bar */}
+      <div
+        className="text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1"
+        title="Share of total loss attributable to each peril, weighted by buildings in the hardest-hit areas"
+      >
+        Peril mix
+      </div>
       {stormMix.rainPct > 0 ? (
         <div className="flex items-center gap-2 mb-2" title={`${stormMix.surgePct}% surge · ${stormMix.rainPct}% rain · ${stormMix.windPct}% wind`}>
           <div className="flex-1 h-3 rounded-full overflow-hidden bg-slate-200 flex">

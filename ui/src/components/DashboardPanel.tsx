@@ -315,6 +315,13 @@ export function DashboardPanel({
                 </div>
                 <p className={`text-[10px] mt-0.5 ${cs.text} opacity-75`}>{tip}</p>
                 <div className="mt-1.5 pt-1.5 border-t border-white/60 grid grid-cols-1 gap-0.5">
+                  <div
+                    className={`flex items-center justify-between text-[9px] ${cs.text} opacity-60 mb-0.5 uppercase tracking-wider`}
+                    title="Each row shows data-quality confidence on a 5-dot scale: 5 = strong, 3 = moderate, 2 = limited."
+                  >
+                    <span>Data quality</span>
+                    <span className="tabular-nums">5 = strong · 2 = limited</span>
+                  </div>
                   <Pip label="Surge"     lv="high"          title="SLOSH maximum-of-maximums modeling for this event" />
                   <Pip label="Buildings" lv={buildingsLevel} title="Building inventory coverage in the loaded grid cells" />
                   <Pip label="Populatn." lv={popLevel}       title="County-level population data availability for the affected area" />
@@ -432,7 +439,8 @@ export function DashboardPanel({
                     <button
                       key={h.rank}
                       onClick={() => onFlyTo?.(h.lon, h.lat)}
-                      className="w-full text-left hover:bg-red-100/50 rounded px-1 py-1 transition-colors"
+                      className="group w-full text-left hover:bg-red-100/60 hover:shadow-sm rounded px-1 py-1 transition-all cursor-pointer"
+                      title={h.areaName ? `Fly to ${h.areaName}` : 'Fly to hotspot'}
                     >
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
@@ -460,6 +468,10 @@ export function DashboardPanel({
                             {h.routing.short}
                           </span>
                         )}
+                        <span
+                          aria-hidden
+                          className="text-red-400 text-sm leading-none opacity-30 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all shrink-0"
+                        >›</span>
                       </div>
 
                       {/* Peril mix bar */}
