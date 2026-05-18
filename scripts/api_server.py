@@ -569,6 +569,7 @@ def load_cell(col: int, row: int) -> dict:
             min_pressure_mb=storm.min_pressure_mb,
             heading_deg=storm.heading_deg,
             speed_kt=storm.speed_kt,
+            storm_rmax_nm=storm.rmax_nm,
         )
 
     # 2. Rainfall raster (parametric, always available) + optional HAND fluvial
@@ -1811,6 +1812,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 min_pressure_mb=sim_storm.min_pressure_mb,
                 heading_deg=sim_storm.heading_deg,
                 speed_kt=sim_storm.speed_kt,
+                storm_rmax_nm=sim_storm.rmax_nm,
             )
 
             # 2. Flood polygons
