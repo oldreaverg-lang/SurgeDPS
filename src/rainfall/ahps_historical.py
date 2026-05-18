@@ -201,15 +201,22 @@ def fetch_historical_gauges(
                 len(site_peaks), storm_id,
                 start_dt.date(), end_dt.date(), nwis_fetch_ok)
 
-    # 1b) Fall back to NWIS Annual Peak Flow when IV returned nothing useful
-    # (pre-2007 storms — primarily Katrina 2005). The peaks archive covers
-    # the early 20th century onward and records the per-water-year peak
-    # gage height with its date; the fetcher filters those to the storm
-    # window so we attribute the actual event, not a different flood that
-    # year. For modern storms with rich IV data, this fallback is a no-op
-    # because the early-return check skips the upstream call.
+    # 1b) Supplement with NWIS Annual Peak Flow when IV coverage is thin
+    # (pre-2008 storms whose landfall predates the NWIS IV modern archive).
+    # The peaks archive covers the early 20th century onward and records
+    # the per-water-year peak gage height with its date; the fetcher
+    # filters those to the storm window so we attribute the actual event.
+    # We trigger when:
+    #   - landfall year < 2008 (definitely pre-IV-archive), OR
+    #   - IV returned fewer than 5 records (suspiciously sparse for a
+    #     major landfall; usually means most sites' IV coverage didn't
+    #     extend back this far).
+    # Modern storms with rich IV data skip this branch entirely.
     sources = ["usgs_nwis_iv_historical"]
-    if not site_peaks:
+    needs_peak_supplement = (
+        landfall_dt.year < 2008 or len(site_peaks) < 5
+    )
+    if needs_peak_supplement:
         peak_records, peak_fetch_ok = _fetch_nwis_peak_period(
             lon_min=landfall_lon - effective_radius,
             lat_min=landfall_lat - effective_radius,
@@ -218,12 +225,19 @@ def fetch_historical_gauges(
             start=start_dt,
             end=end_dt,
         )
-        logger.info("USGS Peak fallback: %d site-peaks for %s (fetch_ok=%s)",
+        logger.info("USGS Peak supplement: %d site-peaks for %s (fetch_ok=%s)",
                     len(peak_records), storm_id, peak_fetch_ok)
         if peak_records:
-            site_peaks = peak_records
-            nwis_fetch_ok = peak_fetch_ok
+            # Merge — prefer IV record when both archives report the same
+            # site (IV gives sub-daily resolution + cleaner names). Peak
+            # supplies the rest.
+            iv_sites = {sp.site_no for sp in site_peaks if sp.site_no}
+            for pr in peak_records:
+                if pr.site_no and pr.site_no not in iv_sites:
+                    site_peaks.append(pr)
             sources.append("usgs_nwis_peak_ogc")
+            if not nwis_fetch_ok:
+                nwis_fetch_ok = peak_fetch_ok  # Peak rescued an IV failure
 
     # 2) For each site, look up NWS flood thresholds (shared cache on volume)
     thresholds_cache = _load_thresholds_cache(persistent_dir)
