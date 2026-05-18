@@ -38,3 +38,4 @@ Thumbs.db
 *.xlsx
 *.docx
 .cache/
+smoke_failed.txt
