@@ -725,6 +725,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
               target="_blank"
               rel="noopener noreferrer"
               className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
+              title="Open StormDPS.com in a new tab — the parent index of storm forecasts and damage tools"
             >
               ← StormDPS
             </a>
@@ -761,9 +762,18 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
             <h2 className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider">Active Storms</h2>
           </div>
           {activeNHC.length === 0 ? (
-            <p className="text-xs text-slate-500 leading-relaxed" title="During hurricane season (Jun–Nov Atlantic, May–Nov East Pacific), active storms appear here automatically.">
-              No active tropical cyclones.
-            </p>
+            <div
+              className="text-xs text-slate-500 leading-relaxed space-y-1"
+              title="During hurricane season (Jun–Nov Atlantic, May–Nov East Pacific), active storms appear here automatically."
+            >
+              <p>
+                <span aria-hidden className="mr-1">🌤️</span>
+                No active Atlantic or East Pacific cyclones.
+              </p>
+              <p className="text-[11px] text-slate-600">
+                Pick a historic storm below to explore — Katrina, Ida, Harvey, Sandy, and 11 more are pre-cached.
+              </p>
+            </div>
           ) : (
             <div className="space-y-1">
               {[...activeNHC].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)}
@@ -771,37 +781,36 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
           )}
         </div>
 
-        {/* ── STORM LOOKUP ── */}
-        <div className="px-4 pt-4 pb-3 border-b border-slate-700/50">
-          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-3">Storm Lookup</h2>
-          <div className="mb-2">
+        {/* ── STORM BROWSER (with embedded search) ──
+            Storm Lookup was previously its own section above the browser,
+            but it just duplicated the affordance of browsing the same
+            catalog. Folding the search input into the browser header
+            collapses the two into one tool: filter by name OR open the
+            curated/by-season lists. */}
+        <div className="px-4 pt-4 pb-3">
+          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Storm Browser</h2>
+          <p className="text-[10px] text-slate-600 mb-2">Sorted by Damage Potential Score (DPS) — higher = more destructive surge</p>
+          <div className="mb-3">
             <input
               type="text"
               placeholder="Search by name, e.g. Katrina, Harvey…"
               value={searchQuery}
               onChange={e => handleSearch(e.target.value)}
               className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+              title="Search the full historical catalog by storm name"
             />
+            {searchResults !== null && (
+              <div className="bg-slate-800 rounded-lg border border-slate-600 max-h-48 overflow-y-auto mt-2">
+                {searchLoading ? (
+                  <p className="text-xs text-slate-500 p-3 text-center">Searching...</p>
+                ) : searchResults.length === 0 ? (
+                  <p className="text-xs text-slate-500 p-3 text-center">No storms found</p>
+                ) : (
+                  [...searchResults].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)
+                )}
+              </div>
+            )}
           </div>
-
-          {/* Search results dropdown */}
-          {searchResults !== null && (
-            <div className="bg-slate-800 rounded-lg border border-slate-600 max-h-48 overflow-y-auto mt-2">
-              {searchLoading ? (
-                <p className="text-xs text-slate-500 p-3 text-center">Searching...</p>
-              ) : searchResults.length === 0 ? (
-                <p className="text-xs text-slate-500 p-3 text-center">No storms found</p>
-              ) : (
-                [...searchResults].sort(byDPS).map(s => <StormRow key={s.storm_id} s={s} activeStormId={activeStormId} activating={activating} onSelect={selectAndClose} />)
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* ── STORM BROWSER ── */}
-        <div className="px-4 pt-4 pb-3">
-          <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Storm Browser</h2>
-          <p className="text-[10px] text-slate-600 mb-3">Sorted by Damage Potential Score (DPS) — higher = more destructive surge</p>
 
           {/* Historic Storms (curated) */}
           <div className="mb-1">
@@ -2490,6 +2499,11 @@ function App() {
   const [floodZonesGeoJSON, setFloodZonesGeoJSON] = useState<any>(null);
   const [floodZonesLoading, setFloodZonesLoading] = useState(false);
   const [floodZonesError, setFloodZonesError] = useState<string | null>(null);
+  // Tile-level coverage tracker — Phase 3 of the warm-cache seeds FEMA NFHL
+  // tiles on a 0.25° grid out-of-band (Railway egress can't reach hazards.fema.gov).
+  // Until the seed completes we serve partial coverage; this state surfaces that
+  // status to the user via a "Coverage XX%" badge on the FEMA Zones toggle.
+  const [floodZonesCoverage, setFloodZonesCoverage] = useState<{ seeded: number; total: number } | null>(null);
   const floodZonesFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // ── Rainfall hazard view (Option A: fold rainfall into the hazard control) ──
   // 'surge'    → existing surge-driven polygons/bubbles (default)
@@ -2668,7 +2682,10 @@ function App() {
       const ac = new AbortController();
       const timeout = setTimeout(() => ac.abort(), 60_000);
 
-      const tilePromises: Promise<any>[] = [];
+      // Each tile resolves to { ok, json } so we can distinguish "tile is
+      // seeded but contains no zones" (200 OK, features=[]) from "tile not
+      // seeded yet" (404 / non-2xx). The latter feeds the coverage badge.
+      const tilePromises: Promise<{ ok: boolean; features: any[] }>[] = [];
       for (let ix = 0; ix < nx; ix++) {
         for (let iy = 0; iy < ny; iy++) {
           const tw = Math.round((w0 + ix * FZ_GRID) * 100) / 100;
@@ -2680,8 +2697,12 @@ function App() {
           });
           tilePromises.push(
             fetch(`/surgedps/api/flood_zones?${params}`, { signal: ac.signal })
-              .then(r => r.ok ? r.json() : { type: 'FeatureCollection', features: [] })
-              .catch(() => ({ type: 'FeatureCollection', features: [] }))
+              .then(async r => {
+                if (!r.ok) return { ok: false, features: [] };
+                const j = await r.json().catch(() => null);
+                return { ok: true, features: Array.isArray(j?.features) ? j.features : [] };
+              })
+              .catch(() => ({ ok: false, features: [] }))
           );
         }
       }
@@ -2690,10 +2711,13 @@ function App() {
         const results = await Promise.all(tilePromises);
         clearTimeout(timeout);
         const merged: any[] = [];
+        let seeded = 0;
         for (const r of results) {
-          if (r && Array.isArray(r.features)) merged.push(...r.features);
+          if (r.ok) seeded += 1;
+          merged.push(...r.features);
         }
         setFloodZonesGeoJSON({ type: 'FeatureCollection', features: merged });
+        setFloodZonesCoverage({ seeded, total: results.length });
       } catch (err: any) {
         clearTimeout(timeout);
         console.warn('[flood-zones] fetch failed:', err?.message || err);
@@ -4879,19 +4903,32 @@ ${fieldFlag ? `
                   : ['has', 'key']}
                 layout={mapView === 'damage' ? {
                   'text-field': ['get', 'label'],
-                  'text-size': 10,
+                  // Slightly larger for higher-loss cities so a glance ranks them.
+                  'text-size': ['interpolate', ['linear'], ['get', 'loss'],
+                    0, 9, 1_000_000, 10, 100_000_000, 12, 1_000_000_000, 13],
                   'text-offset': [0, 1.6],
                   'text-anchor': 'top',
                   'text-allow-overlap': false,
+                  'text-ignore-placement': false,
+                  // Negative loss → bigger cities sort first → preferred placement.
+                  // Without this MapLibre drops labels in feature order (effectively random)
+                  // and Pointe a la Hache could clobber Belle Chasse on Katrina view.
+                  'symbol-sort-key': ['-', 0, ['get', 'loss']],
+                  // Pads the collision box so adjacent labels don't kiss.
+                  'text-padding': 3,
                 } : {
                   'text-field': ['concat', ['get', 'name'], '  ',
                     ['case', ['>=', ['get', 'estDisplaced'], 1000],
                       ['concat', ['to-string', ['round', ['/', ['get', 'estDisplaced'], 1000]]], 'k displ.'],
                       ['concat', ['to-string', ['get', 'estDisplaced']], ' displ.']]],
-                  'text-size': 10,
+                  'text-size': ['interpolate', ['linear'], ['get', 'estDisplaced'],
+                    0, 9, 100, 10, 5000, 12, 50000, 13],
                   'text-offset': [0, 1.6],
                   'text-anchor': 'top',
                   'text-allow-overlap': false,
+                  'text-ignore-placement': false,
+                  'symbol-sort-key': ['-', 0, ['get', 'estDisplaced']],
+                  'text-padding': 3,
                 }}
                 paint={{
                   'text-color': '#fff',
@@ -5339,12 +5376,12 @@ ${fieldFlag ? `
             <>
               <button
                 onClick={handleExportCSV}
-                className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
+                className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors whitespace-nowrap"
                 title="Download all loaded buildings as CSV"
               >Export CSV</button>
               <button
                 onClick={() => setBatchOpen(true)}
-                className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors"
+                className="bg-white/95 backdrop-blur shadow-lg rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:text-indigo-600 hover:bg-white border border-gray-200 transition-colors whitespace-nowrap"
                 title="Look up multiple addresses at once"
               >Batch Lookup</button>
               {/* Flag count indicator */}
@@ -6190,19 +6227,38 @@ ${fieldFlag ? `
                   {countiesLoading && <span className="w-2.5 h-2.5 rounded-full border-2 border-white border-t-transparent animate-spin" />}
                   {countiesError && !countiesLoading && <span className="text-[10px]">⚠</span>}
                 </button>
-                <button
-                  onClick={() => setShowFloodZones(f => !f)}
-                  title={floodZonesError ?? (floodZonesLoading ? 'Loading FEMA flood zones…' : showFloodZones ? `${floodZonesGeoJSON?.features?.length ?? 0} zones in view — click to hide` : 'Show FEMA National Flood Hazard Layer')}
-                  className={`rounded-lg shadow-lg border px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
-                    floodZonesError ? 'bg-red-600 text-white border-red-700'
-                    : showFloodZones ? 'bg-blue-600 text-white border-gray-200'
-                    : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100 border-gray-200'
-                  }`}
-                >
-                  <span>FEMA Zones</span>
-                  {floodZonesLoading && <span className="w-2.5 h-2.5 rounded-full border-2 border-white border-t-transparent animate-spin" />}
-                  {floodZonesError && !floodZonesLoading && <span className="text-[10px]">⚠</span>}
-                </button>
+                {(() => {
+                  // Coverage badge — Phase 3 seed is still in progress; this
+                  // tells the user "no zones here" might mean "not seeded yet"
+                  // rather than "no flood hazard in this area." Hidden when
+                  // we have full coverage or no fetch has happened yet.
+                  const cov = floodZonesCoverage;
+                  const showCov = !!cov && cov.total > 0 && cov.seeded < cov.total;
+                  const pct = cov ? Math.round((cov.seeded / cov.total) * 100) : 100;
+                  return (
+                    <button
+                      onClick={() => setShowFloodZones(f => !f)}
+                      title={floodZonesError ?? (floodZonesLoading ? 'Loading FEMA flood zones…' : showFloodZones
+                        ? `${floodZonesGeoJSON?.features?.length ?? 0} zones in view${showCov ? ` · ${pct}% coverage — ${cov!.total - cov!.seeded}/${cov!.total} tiles still seeding from FEMA. "No zone" in unseeded areas means "not yet loaded," not "no flood hazard."` : ''} — click to hide`
+                        : 'Show FEMA National Flood Hazard Layer')}
+                      className={`rounded-lg shadow-lg border px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                        floodZonesError ? 'bg-red-600 text-white border-red-700'
+                        : showFloodZones ? 'bg-blue-600 text-white border-gray-200'
+                        : 'bg-white/90 backdrop-blur text-gray-600 hover:bg-gray-100 border-gray-200'
+                      }`}
+                    >
+                      <span>FEMA Zones</span>
+                      {floodZonesLoading && <span className="w-2.5 h-2.5 rounded-full border-2 border-white border-t-transparent animate-spin" />}
+                      {showFloodZones && showCov && !floodZonesLoading && (
+                        <span
+                          className="text-[10px] bg-amber-400 text-amber-900 rounded px-1 font-bold tabular-nums"
+                          title={`Partial coverage — ${pct}% of tiles in view have been seeded from FEMA NFHL. Unseeded tiles return no zones; not the same as "no flood hazard here."`}
+                        >{pct}%</span>
+                      )}
+                      {floodZonesError && !floodZonesLoading && <span className="text-[10px]">⚠</span>}
+                    </button>
+                  );
+                })()}
                 <button
                   onClick={() => setShowGauges(g => !g)}
                   title={gaugesError ?? (gaugesLoading ? 'Loading AHPS stream gauges…' : showGauges

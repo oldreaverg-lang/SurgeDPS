@@ -107,7 +107,8 @@ export function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen,
           <h1 className="text-base font-bold text-white tracking-tight">SurgeDPS</h1>
           <div className="flex items-center gap-2">
             <a href="https://stormdps.com" target="_blank" rel="noopener noreferrer"
-              className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5">
+              className="text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors border border-cyan-700 hover:border-cyan-500 rounded px-2 py-0.5"
+              title="Open StormDPS.com in a new tab — the parent index of storm forecasts and damage tools">
               ← StormDPS
             </a>
             <button onClick={onClose} className="lg:hidden text-slate-400 hover:text-white transition-colors p-1 rounded" aria-label="Close sidebar">✕</button>

@@ -58,19 +58,26 @@ function Label({ children }: { children: React.ReactNode }) {
 // 1 m ≈ 3.28 ft, so showing imperial endpoints helps EMs reading the map.
 
 function SurgeRow() {
+  // Gradient stops mirror layers/flood.ts (metres). Imperial endpoints in
+  // the caption since adjusters and EMs both think in ft.
   return (
-    <div className="flex items-center gap-2 py-0.5" title="Surge inundation depth — yellow ≈ shallow, dark red ≈ 10+ ft">
-      <div
-        className="h-2 w-20 rounded-sm shrink-0 border border-slate-200"
-        style={{
-          background:
-            'linear-gradient(to right, #ffffb2 0%, #fecc5c 18%, #fd8d3c 40%, #f03b20 65%, #bd0026 100%)',
-        }}
-      />
-      <Label>
-        <span className="font-semibold">Surge</span>
-        <span className="text-slate-400 ml-1 tabular-nums">0.5 → 10+ ft</span>
-      </Label>
+    <div className="py-0.5" title="Surge inundation depth in ft — extended at the high end to preserve nuance in 15-30 ft catastrophic zones.">
+      <div className="flex items-center gap-2 mb-0.5">
+        <div
+          className="h-2 w-24 rounded-sm shrink-0 border border-slate-200"
+          style={{
+            background:
+              'linear-gradient(to right, #ffeda0 0%, #feb24c 10%, #fd8d3c 28%, #f03b20 55%, #bd0026 70%, #800026 80%, #4a0026 88%, #1a0011 100%)',
+          }}
+        />
+        <Label><span className="font-semibold">Surge</span></Label>
+      </div>
+      <div className="flex justify-between text-[9px] text-slate-400 tabular-nums px-0.5">
+        <span>1 ft</span>
+        <span>6 ft</span>
+        <span>15 ft</span>
+        <span>30 ft</span>
+      </div>
     </div>
   );
 }
