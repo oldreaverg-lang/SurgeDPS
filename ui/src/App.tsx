@@ -1651,6 +1651,8 @@ interface Hotspot {
   // can ignore these.
   surgePct: number;
   rainPct: number;
+  /** Display label for the area — modal assigned_city_key resolved via cityRollup. */
+  areaName: string;
   severity: { severe: number; major: number; moderate: number; minor: number; none: number };
   recommend: AdjusterRecommendation;
   routing: RoutingTag;
