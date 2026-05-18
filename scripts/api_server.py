@@ -3011,26 +3011,15 @@ class CellHandler(BaseHTTPRequestHandler):
                     )
                     # If not cached, build inline (may take ~30s on first
                     # hit for a given storm; cached permanently thereafter).
-                    if refresh or not cache_exists(
-                        _active_storm.storm_id, PERSISTENT_DIR,
-                    ):
-                        resp = fetch_historical_gauges(
-                            storm_id=_active_storm.storm_id,
-                            landfall_lat=_active_storm.landfall_lat,
-                            landfall_lon=_active_storm.landfall_lon,
-                            landfall_date=landfall_date,
-                            radius_deg=radius,
-                            persistent_dir=PERSISTENT_DIR,
-                        )
-                    else:
-                        resp = fetch_historical_gauges(
-                            storm_id=_active_storm.storm_id,
-                            landfall_lat=_active_storm.landfall_lat,
-                            landfall_lon=_active_storm.landfall_lon,
-                            landfall_date=landfall_date,
-                            radius_deg=radius,
-                            persistent_dir=PERSISTENT_DIR,
-                        )
+                    resp = fetch_historical_gauges(
+                        storm_id=_active_storm.storm_id,
+                        landfall_lat=_active_storm.landfall_lat,
+                        landfall_lon=_active_storm.landfall_lon,
+                        landfall_date=landfall_date,
+                        radius_deg=radius,
+                        persistent_dir=PERSISTENT_DIR,
+                        refresh=refresh,
+                    )
 
                     # Apply client-side category filter on the cached set
                     if min_cat not in ('none', 'all', '0'):

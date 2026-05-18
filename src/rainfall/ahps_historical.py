@@ -113,6 +113,7 @@ def fetch_historical_gauges(
     landfall_date: str,     # "YYYY-MM-DD"
     radius_deg: float = 4.0,
     persistent_dir: str = "",
+    refresh: bool = False,
 ) -> dict:
     """
     Fetch and cache historical peak-stage gauges for one storm.
@@ -139,6 +140,16 @@ def fetch_historical_gauges(
     cache_dir = os.path.join(persistent_dir, "cache", "gauges_historical")
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{storm_id}.json")
+
+    # Explicit refresh — delete the cache before the existence check so we
+    # always re-run the full IV + Peak-supplement pipeline. Used by
+    # /api/gauges?refresh=1 to invalidate caches that pre-date a bug fix.
+    if refresh and os.path.exists(cache_path):
+        try:
+            os.remove(cache_path)
+            logger.info("historical gauges %s: cache cleared (refresh=True)", storm_id)
+        except OSError as e:
+            logger.warning("could not clear cache %s: %s", cache_path, e)
 
     # Serve cached copy if present — but skip caches that represent a failed
     # or incomplete fetch.  Two cases require a retry:
