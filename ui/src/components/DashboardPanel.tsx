@@ -373,18 +373,37 @@ export function DashboardPanel({
             </div>
           )}
 
-          {/* Damage Severity Breakdown */}
-          {totals.buildings > 0 && (
+          {/* Damage Severity Breakdown — stacked bar + precise list */}
+          {totals.buildings > 0 && (() => {
+            const rows = [
+              { key: 'severe',   color: '#7f1d1d', label: 'Severe' },
+              { key: 'major',    color: '#ef4444', label: 'Major' },
+              { key: 'moderate', color: '#fb923c', label: 'Moderate' },
+              { key: 'minor',    color: '#facc15', label: 'Minor' },
+              { key: 'none',     color: '#4ade80', label: 'No Damage' },
+            ];
+            return (
             <div className="bg-gray-50 rounded-lg p-2.5 mb-3 border border-gray-200">
               <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1.5">Damage Breakdown</div>
+              <div className="flex h-2 rounded-sm overflow-hidden bg-gray-200 mb-2"
+                title={rows.map(r => `${r.label}: ${severityCounts[r.key] || 0}`).join(' · ')}
+              >
+                {rows.map(({ key, color, label }) => {
+                  const count = severityCounts[key] || 0;
+                  const rawPct = totals.buildings > 0 ? (count / totals.buildings * 100) : 0;
+                  const renderPct = count > 0 ? Math.max(1.5, rawPct) : 0;
+                  if (renderPct === 0) return null;
+                  return (
+                    <div
+                      key={key}
+                      style={{ width: `${renderPct}%`, backgroundColor: color }}
+                      title={`${label}: ${count.toLocaleString()} (${rawPct < 1 ? '<1' : rawPct.toFixed(0)}%)`}
+                    />
+                  );
+                })}
+              </div>
               <div className="space-y-1">
-                {[
-                  { key: 'severe',   color: '#7f1d1d', label: 'Severe' },
-                  { key: 'major',    color: '#ef4444', label: 'Major' },
-                  { key: 'moderate', color: '#fb923c', label: 'Moderate' },
-                  { key: 'minor',    color: '#facc15', label: 'Minor' },
-                  { key: 'none',     color: '#4ade80', label: 'No Damage' },
-                ].map(({ key, color, label }) => {
+                {rows.map(({ key, color, label }) => {
                   const count = severityCounts[key] || 0;
                   const pct = totals.buildings > 0 ? (count / totals.buildings * 100) : 0;
                   return (
@@ -413,7 +432,8 @@ export function DashboardPanel({
                 );
               })()}
             </div>
-          )}
+            );
+          })()}
 
           {/* Nuisance Flood Flag */}
           {totals.buildings > 2000 && totals.totalDepth > 0 && (totals.totalDepth / totals.buildings) < 1.5 && (

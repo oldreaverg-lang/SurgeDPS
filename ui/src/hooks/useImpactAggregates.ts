@@ -74,8 +74,8 @@ export function useImpactAggregates(
 
   const cityRollup = useMemo(() => {
     if (!displayBuildings?.features || !citiesData?.length) return [];
-    return rollupByCity(displayBuildings.features, citiesData, countyNameMap);
-  }, [displayBuildings, citiesData, countyNameMap]);
+    return rollupByCity(displayBuildings.features, citiesData, countyNameMap, countyRollup);
+  }, [displayBuildings, citiesData, countyNameMap, countyRollup]);
 
   const cityAggregatePoints = useMemo(() =>
     cityRollupToCentroidGeoJSON(cityRollup),

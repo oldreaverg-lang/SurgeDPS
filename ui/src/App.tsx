@@ -607,13 +607,18 @@ function findComparables(
   for (const v of comps) { sum += v; if (v < lo) lo = v; if (v > hi) hi = v; }
   return { count: comps.length, avgLoss: Math.round(sum / comps.length), minLoss: lo, maxLoss: hi };
 }
+// DPS uses an indigo→sky gradient so it stays visually distinct from the
+// red/orange damage-severity palette. Pure red on the "93 DPS" badge used
+// to read as a per-storm alert that competed with the actual severe-damage
+// markers; the indigo family preserves the magnitude signal (saturation
+// scales with DPS) without inheriting damage-category semantics.
 const dpsColor = (score: number): string => {
-  if (score >= 80) return '#ef4444';
-  if (score >= 60) return '#f97316';
-  if (score >= 40) return '#fbbf24';
-  if (score >= 20) return '#34d399';
-  if (score >= 10) return '#60a5fa';
-  return '#94a3b8';
+  if (score >= 80) return '#4f46e5'; // indigo-600 — heavy DPS
+  if (score >= 60) return '#6366f1'; // indigo-500
+  if (score >= 40) return '#818cf8'; // indigo-400
+  if (score >= 20) return '#7dd3fc'; // sky-300
+  if (score >= 10) return '#bae6fd'; // sky-200
+  return '#94a3b8';                  // slate-400 — minimal
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2222,18 +2227,42 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
         </div>
       )}
 
-      {/* Damage Severity Breakdown */}
-      {totals.buildings > 0 && (
+      {/* Damage Severity Breakdown — stacked bar above the precise list
+          gives at-a-glance ranking (which category dominates?) without
+          forcing the reader to scan five rows of numbers. */}
+      {totals.buildings > 0 && (() => {
+        const rows = [
+          { key: 'severe',   color: '#7f1d1d', label: 'Severe' },
+          { key: 'major',    color: '#ef4444', label: 'Major' },
+          { key: 'moderate', color: '#fb923c', label: 'Moderate' },
+          { key: 'minor',    color: '#facc15', label: 'Minor' },
+          { key: 'none',     color: '#4ade80', label: 'No Damage' },
+        ];
+        return (
         <div className="bg-gray-50 rounded-lg p-2.5 mb-3 border border-gray-200">
           <div className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1.5">Damage Breakdown</div>
+          {/* Stacked-bar visualization. Segments narrower than 1.5% are
+              padded to 1.5% so the worst categories don't visually vanish
+              when "No Damage" overwhelms the total. */}
+          <div className="flex h-2 rounded-sm overflow-hidden bg-gray-200 mb-2"
+            title={rows.map(r => `${r.label}: ${severityCounts[r.key] || 0}`).join(' · ')}
+          >
+            {rows.map(({ key, color, label }) => {
+              const count = severityCounts[key] || 0;
+              const rawPct = totals.buildings > 0 ? (count / totals.buildings * 100) : 0;
+              const renderPct = count > 0 ? Math.max(1.5, rawPct) : 0;
+              if (renderPct === 0) return null;
+              return (
+                <div
+                  key={key}
+                  style={{ width: `${renderPct}%`, backgroundColor: color }}
+                  title={`${label}: ${count.toLocaleString()} (${rawPct < 1 ? '<1' : rawPct.toFixed(0)}%)`}
+                />
+              );
+            })}
+          </div>
           <div className="space-y-1">
-            {[
-              { key: 'severe', color: '#7f1d1d', label: 'Severe' },
-              { key: 'major', color: '#ef4444', label: 'Major' },
-              { key: 'moderate', color: '#fb923c', label: 'Moderate' },
-              { key: 'minor', color: '#facc15', label: 'Minor' },
-              { key: 'none', color: '#4ade80', label: 'No Damage' },
-            ].map(({ key, color, label }) => {
+            {rows.map(({ key, color, label }) => {
               const count = severityCounts[key] || 0;
               const pct = totals.buildings > 0 ? (count / totals.buildings * 100) : 0;
               return (
@@ -2265,7 +2294,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
             );
           })()}
         </div>
-      )}
+        );
+      })()}
 
       {/* R9: Nuisance Flood Flag */}
       {totals.buildings > 2000 && totals.totalDepth > 0 && (totals.totalDepth / totals.buildings) < 1.5 && (
@@ -2399,6 +2429,31 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeStorm, setActiveStorm] = useState<StormInfo | null>(null);
   const [activating, setActivating] = useState(false);
+  // Lightweight cache of the historic-storm catalog so the welcome card's
+  // notable-storms chips can render the same Saffir-Simpson category the
+  // dashboard ends up showing once a storm is loaded. Previously the
+  // chips hardcoded e.g. Katrina=C3 (LA landfall) while the dashboard
+  // showed CAT 4 (catalog value), and the same storm had two categories
+  // depending on where you looked. Empty array until the fetch resolves.
+  const [historicStormsCatalog, setHistoricStormsCatalog] = useState<StormInfo[]>([]);
+  useEffect(() => {
+    fetchJsonArray<StormInfo>('/surgedps/api/storms/historic').then(setHistoricStormsCatalog);
+  }, []);
+
+  // Tracks whether the user has activated at least one storm at any point
+  // in this browser. Used to swap the full welcome card (first-timer) for
+  // a slim "Pick another storm" hint (returning user closes a storm).
+  // localStorage so the hint stays slim across page reloads, not just
+  // within a single session.
+  const [hasUsedWelcome, setHasUsedWelcome] = useState<boolean>(() => {
+    try { return localStorage.getItem('surgedps:welcomed') === '1'; }
+    catch { return false; }
+  });
+  const markWelcomed = useCallback(() => {
+    setHasUsedWelcome(true);
+    try { localStorage.setItem('surgedps:welcomed', '1'); }
+    catch { /* private-mode etc. — fine to silently ignore */ }
+  }, []);
   const [hoverInfo, setHoverInfo] = useState<any>(null);
   const [pinnedInfo, setPinnedInfo] = useState<any>(null);
   // Per-city filter — set when the user clicks a city-aggregate bubble.
@@ -3773,6 +3828,7 @@ ${fieldFlag ? `
     if (activatingRef.current) return;
     activatingRef.current = true;
     setActivating(true);
+    markWelcomed();
     setAllBuildings(null); setAllFlood(null);
     setLoadedCells(new Set()); setLoadingCells(new Set());
     setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
@@ -4036,11 +4092,14 @@ ${fieldFlag ? `
   }, [countiesGeoJSON]);
 
   // City-level rollup — groups buildings into Census Places (pop ≥ 2500)
-  // with an "Unincorporated" bucket per county for buildings outside any place.
+  // with an "Unincorporated" bucket per county for buildings outside any
+  // place. countyRollup is passed in so unincorporated buckets can label
+  // themselves with their parent county ("Unincorp. Plaquemines") instead
+  // of all reading identically as "Unincorporated".
   const cityRollup = useMemo(() => {
     if (!citiesData || !allBuildings) return null;
-    return rollupByCity(allBuildings, citiesData, countyNameMap);
-  }, [citiesData, allBuildings, countyNameMap]);
+    return rollupByCity(allBuildings, citiesData, countyNameMap, countyRollup || []);
+  }, [citiesData, allBuildings, countyNameMap, countyRollup]);
 
   const cityAggregatePoints = useMemo(() => {
     if (!cityRollup || cityRollup.length === 0) return null;
@@ -5583,32 +5642,71 @@ ${fieldFlag ? `
           </div>
         )}
 
-        {/* Empty-state overlay — shown when no storm is active */}
-        {!activeStorm && !activating && (
+        {/* Empty-state — full welcome card for first-time visitors, slim
+            pill for returning users (already activated a storm at least
+            once on this device). Returning users still see the notable-
+            storms quick-launch, but it no longer covers the map. */}
+        {!activeStorm && !activating && hasUsedWelcome && (
+          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-10 bg-slate-900/95 backdrop-blur shadow-lg rounded-lg border border-slate-700 px-3 py-2 inline-flex items-center gap-2 max-w-[90vw]">
+            <span aria-hidden className="text-xs">👋</span>
+            <span className="text-[12px] text-slate-200 font-medium">Pick a storm from the sidebar to begin —</span>
+            <div className="inline-flex items-center gap-1">
+              {([
+                { id: 'harvey_2017',  label: 'Harvey', fallbackCat: 4 },
+                { id: 'katrina_2005', label: 'Katrina', fallbackCat: 4 },
+                { id: 'ian_2022',     label: 'Ian', fallbackCat: 4 },
+                { id: 'michael_2018', label: 'Michael', fallbackCat: 5 },
+              ]).map(({ id, label, fallbackCat }) => {
+                const cat = historicStormsCatalog.find(s => s.storm_id === id)?.category ?? fallbackCat;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => activateStorm(id)}
+                    className="text-[11px] font-semibold text-indigo-300 hover:text-indigo-100 underline-offset-2 hover:underline transition-colors"
+                    title={`Load Hurricane ${label} (CAT ${cat})`}
+                  >{label}</button>
+                );
+              }).reduce((acc: React.ReactNode[], el, i, arr) => {
+                acc.push(el);
+                if (i < arr.length - 1) acc.push(<span key={`sep-${i}`} className="text-slate-600">·</span>);
+                return acc;
+              }, [])}
+            </div>
+          </div>
+        )}
+        {!activeStorm && !activating && !hasUsedWelcome && (
           <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
             <div className="bg-slate-900/95 backdrop-blur-sm rounded-2xl px-8 py-6 text-center shadow-2xl border border-slate-700 max-w-sm w-full mx-4 pointer-events-auto">
               <img src="/surgedps/logo-180.png" alt="SurgeDPS" className="w-16 h-16 mx-auto mb-3 rounded-2xl" style={{ boxShadow: '0 4px 20px rgba(99,102,241,0.4)', filter: 'brightness(1.15)' }} />
               <p className="text-white font-bold text-lg">Select a storm to begin</p>
               <p className="text-slate-400 text-sm mt-1 mb-4">Choose a hurricane from the list on the left to see surge depths and damage estimates across the impact zone.</p>
-              {/* Quick-launch notable storms */}
+              {/* Quick-launch notable storms — category comes from the
+                  historic-storm catalog so the chip and the dashboard
+                  always agree. Fallback values cover the brief window
+                  before the catalog fetch resolves. */}
               <div className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mb-2">Notable Storms</div>
               <div className="grid grid-cols-2 gap-2">
                 {([
-                  { id: 'harvey_2017',  label: 'Harvey 2017',  cat: 4, color: CAT_COLORS[4] },
-                  { id: 'katrina_2005', label: 'Katrina 2005', cat: 3, color: CAT_COLORS[3] },
-                  { id: 'ian_2022',     label: 'Ian 2022',     cat: 4, color: CAT_COLORS[4] },
-                  { id: 'michael_2018', label: 'Michael 2018', cat: 5, color: CAT_COLORS[5] },
-                ] as { id: string; label: string; cat: number; color: string }[]).map(({ id, label, cat, color }) => (
-                  <button
-                    key={id}
-                    onClick={() => activateStorm(id)}
-                    className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-slate-500 text-slate-200 text-xs font-semibold px-3 py-2.5 rounded-lg transition-colors text-left"
-                  >
-                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
-                    <span className="flex-1 truncate">{label}</span>
-                    <span className="text-[10px] font-bold text-white px-1 py-0.5 rounded shrink-0" style={{ backgroundColor: color }}>C{cat}</span>
-                  </button>
-                ))}
+                  { id: 'harvey_2017',  label: 'Harvey 2017',  fallbackCat: 4 },
+                  { id: 'katrina_2005', label: 'Katrina 2005', fallbackCat: 4 },
+                  { id: 'ian_2022',     label: 'Ian 2022',     fallbackCat: 4 },
+                  { id: 'michael_2018', label: 'Michael 2018', fallbackCat: 5 },
+                ]).map(({ id, label, fallbackCat }) => {
+                  const catalogEntry = historicStormsCatalog.find(s => s.storm_id === id);
+                  const cat   = catalogEntry?.category ?? fallbackCat;
+                  const color = CAT_COLORS[cat] ?? CAT_COLORS[4];
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => activateStorm(id)}
+                      className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-slate-500 text-slate-200 text-xs font-semibold px-3 py-2.5 rounded-lg transition-colors text-left"
+                    >
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                      <span className="flex-1 truncate">{label}</span>
+                      <span className="text-[10px] font-bold text-white px-1 py-0.5 rounded shrink-0" style={{ backgroundColor: color }}>C{cat}</span>
+                    </button>
+                  );
+                })}
               </div>
               <button
                 onClick={() => setSidebarOpen(true)}

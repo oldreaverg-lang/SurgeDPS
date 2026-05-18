@@ -323,6 +323,13 @@ export function rollupByCity(
   buildings: any,
   cities: CityEntry[],
   countyNameMap: Record<string, string>,  // geoid → county name
+  // Used to back-fill the parent county on Unincorporated buckets so the
+  // labels read "Unincorp. Plaquemines" instead of a dozen identical
+  // "Unincorporated" pins. Each entry needs centerLon/centerLat + name +
+  // geoid (CountyRollup already has all three). Pass [] if the county
+  // rollup hasn't been computed yet — labels degrade to plain
+  // "Unincorporated", same as before this argument existed.
+  countyCentroids: Array<{ geoid: string; name: string; centerLon: number; centerLat: number }> = [],
 ): CityRollup[] {
   if (!buildings?.features?.length || !cities?.length) return [];
 
@@ -335,6 +342,22 @@ export function rollupByCity(
     if (!grid[k]) grid[k] = [];
     grid[k].push(city);
   }
+
+  // Nearest-county lookup for unincorporated buckets. Counties are large
+  // (avg ~50 km radius) so a centroid Voronoi is a fine approximation —
+  // sufficient to attach a parent-county label without doing a second
+  // point-in-polygon pass.
+  const nearestCountyByLatLon = (lat: number, lon: number): { geoid: string; name: string } | null => {
+    let best: { geoid: string; name: string } | null = null;
+    let bestDSq = Infinity;
+    for (const c of countyCentroids) {
+      const dlon = lon - c.centerLon;
+      const dlat = lat - c.centerLat;
+      const dsq  = dlon * dlon + dlat * dlat;
+      if (dsq < bestDSq) { bestDSq = dsq; best = { geoid: c.geoid, name: c.name }; }
+    }
+    return best;
+  };
 
   // ── Accumulate per-bucket rollup ──────────────────────────────────
   const buckets: Record<string, {
@@ -382,13 +405,17 @@ export function rollupByCity(
     } else if (placeGeoid === '') {
       // Stamped sentinel — definitively unincorporated. Bucket at 0.2°
       // resolution so adjacent rural areas don't all collapse into one.
+      // Back-fill the parent county so adjacent unincorp clusters are
+      // distinguishable on the map ("Unincorp. Plaquemines" vs
+      // "Unincorp. St. Bernard") instead of all reading "Unincorporated".
       const gLon = Math.round(lon * 5) / 5;
       const gLat = Math.round(lat * 5) / 5;
+      const nc = nearestCountyByLatLon(lat, lon);
       key         = `unincorp|${gLat}|${gLon}`;
       name        = 'Unincorporated';
       state       = '';
-      countyGeoid = '';
-      countyName  = '';
+      countyGeoid = nc?.geoid || '';
+      countyName  = nc?.name  || '';
     } else {
       // Legacy / unstamped — fall through to nearest-centroid Voronoi.
       const gx = Math.floor(lon / GRID_SIZE);
@@ -413,13 +440,16 @@ export function rollupByCity(
         countyGeoid = bestCity.county_geoid;
         countyName  = countyNameMap[bestCity.county_geoid] || '';
       } else {
+        // Same nearest-county back-fill as the stamped-sentinel branch so
+        // the Voronoi fallback path matches the server-stamped path.
         const gLon = Math.round(lon * 5) / 5;
         const gLat = Math.round(lat * 5) / 5;
+        const nc = nearestCountyByLatLon(lat, lon);
         key         = `unincorp|${gLat}|${gLon}`;
         name        = 'Unincorporated';
         state       = '';
-        countyGeoid = '';
-        countyName  = '';
+        countyGeoid = nc?.geoid || '';
+        countyName  = nc?.name  || '';
       }
     }
 

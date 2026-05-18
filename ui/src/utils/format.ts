@@ -67,11 +67,13 @@ export function formatDepthOps(ft: number | null | undefined, mode: DisplayMode)
 
 // ── DPS color scale ───────────────────────────────────────────────────────────
 
+// Indigo→sky gradient (not red) so DPS magnitude reads as a separate
+// dimension from damage-severity category. See note at App.tsx:dpsColor.
 export const dpsColor = (score: number): string => {
-  if (score >= 80) return '#ef4444';
-  if (score >= 60) return '#f97316';
-  if (score >= 40) return '#fbbf24';
-  if (score >= 20) return '#34d399';
-  if (score >= 10) return '#60a5fa';
+  if (score >= 80) return '#4f46e5';
+  if (score >= 60) return '#6366f1';
+  if (score >= 40) return '#818cf8';
+  if (score >= 20) return '#7dd3fc';
+  if (score >= 10) return '#bae6fd';
   return '#94a3b8';
 };
