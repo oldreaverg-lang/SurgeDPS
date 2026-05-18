@@ -528,9 +528,13 @@ def cell_bbox(col: int, row: int):
 # Cell Loading
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def load_cell(col: int, row: int) -> dict:
+def load_cell(col: int, row: int, refresh: bool = False) -> dict:
     """
     Generate damage + flood data for a grid cell under the active storm.
+
+    When refresh=True, delete any existing cached artifacts for this cell
+    before regenerating. Used to invalidate cells produced under stale
+    model parameters (e.g. the pre-2026-05-17 rmax fallback bug).
     """
     storm = _active_storm
     if storm is None:
@@ -539,6 +543,13 @@ def load_cell(col: int, row: int) -> dict:
     sdir = _storm_cache_dir(storm)
     damage_path = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
     flood_path = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
+    raster_path = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
+
+    if refresh:
+        for p in (damage_path, flood_path, raster_path):
+            try: os.remove(p)
+            except OSError: pass
+        print(f"  [refresh] cleared cell ({col},{row}) for {storm.storm_id}")
 
     # Check cache. Ticks bundle is generated lazily by /api/cell_ticks on
     # demand, so we only require damage + flood here.
@@ -1545,9 +1556,11 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(400, 'No storm active')
                 return
 
+            refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+
             try:
-                print(f"\n--- Loading cell ({col}, {row}) for {_active_storm.name} ---")
-                data = load_cell(col, row)
+                print(f"\n--- Loading cell ({col}, {row}) for {_active_storm.name} (refresh={refresh}) ---")
+                data = load_cell(col, row, refresh=refresh)
                 # R5: Include updated confidence after cell load
                 conf = _compute_confidence(_active_storm.storm_id)
                 data['confidence'] = conf['confidence']
