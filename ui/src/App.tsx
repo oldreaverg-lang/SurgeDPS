@@ -1882,9 +1882,11 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           aria-label="Open storm browser"
         >☰</button>
 
-        {/* Storm name + category */}
+        {/* Storm name + category. shortName() strips the "Hurricane /
+            Tropical Storm" prefix so the actual storm name fits without
+            getting truncated to "Hurrican..." in the compact header. */}
         <div className="flex items-center gap-1.5 flex-1 min-w-0">
-          <span className="font-bold text-gray-800 text-sm truncate">{storm.name}</span>
+          <span className="font-bold text-gray-800 text-sm truncate" title={storm.name}>{shortName(storm.name)}</span>
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full text-white shrink-0"
             style={{ backgroundColor: CAT_COLORS[storm.category] }}>CAT {storm.category}</span>
         </div>
@@ -4750,7 +4752,18 @@ ${fieldFlag ? `
               <Layer id="damage-cluster-count" type="symbol" filter={['has', 'point_count']}
                 minzoom={11}
                 layout={{
-                  'text-field': ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1000]]], 'K'],
+                  // Auto-scale the cluster total ($XXk / $XXM / $XXB) instead
+                  // of always rendering in K, which produced unreadable
+                  // 5-digit "$47877K" labels on cities with millions in loss.
+                  'text-field': ['case',
+                    ['>=', ['get', 'total_loss'], 1e9],
+                      ['concat', '$', ['to-string', ['/', ['round', ['/', ['get', 'total_loss'], 1e8]], 10]], 'B'],
+                    ['>=', ['get', 'total_loss'], 1e6],
+                      ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1e6]]], 'M'],
+                    ['>=', ['get', 'total_loss'], 1e3],
+                      ['concat', '$', ['to-string', ['round', ['/', ['get', 'total_loss'], 1e3]]], 'k'],
+                    ['concat', '$', ['to-string', ['round', ['get', 'total_loss']]]]
+                  ],
                   'text-size': 11,
                 }}
                 paint={{ 'text-color': '#fff', 'text-halo-color': 'rgba(0,0,0,0.8)', 'text-halo-width': 1.5 }} />
@@ -5808,16 +5821,24 @@ ${fieldFlag ? `
           </div>
         )}
 
-        {/* Grid onboarding hint */}
-        {showGrid && activeStorm && !gridHintDismissed && loadedCells.size > 0 && (
-          <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 bg-slate-900/95 backdrop-blur shadow-lg rounded-lg px-4 py-3 border border-slate-700 max-w-xs text-center"
+        {/* Grid onboarding hint — auto-dismisses once the user has loaded a
+            second cell (proof they understand the mechanic). Previously sat
+            at bottom-center as a tall modal-style card; now a slim pill
+            anchored next to the Layers toggle so it stops covering the map. */}
+        {showGrid && activeStorm && !gridHintDismissed && loadedCells.size > 0 && loadedCells.size < 2 && (
+          <div className="absolute bottom-[72px] left-4 z-20 bg-slate-900/90 backdrop-blur shadow-lg rounded-lg px-2.5 py-1.5 border border-slate-700 inline-flex items-center gap-2 max-w-[300px]"
             style={{ animation: 'fadeInUp 0.4s ease-out' }}
           >
-            <p className="text-sm text-slate-200 font-medium">Click the dashed borders around the loaded area to expand coverage</p>
+            <span aria-hidden className="text-xs">💡</span>
+            <p className="text-[11px] text-slate-200 leading-snug flex-1">
+              Click the dashed borders on the map to load adjacent areas.
+            </p>
             <button
               onClick={() => setGridHintDismissed(true)}
-              className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors"
-            >Got it ✓</button>
+              className="text-slate-400 hover:text-slate-100 transition-colors text-[10px] leading-none shrink-0"
+              aria-label="Dismiss"
+              title="Dismiss"
+            >✕</button>
           </div>
         )}
 
