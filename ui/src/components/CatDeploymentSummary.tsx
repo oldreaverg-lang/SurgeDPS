@@ -101,7 +101,7 @@ export function CatDeploymentSummary({
           <span className="font-bold">{storm.name}</span> — CAT {storm.category}
           {storm.year ? `, ${storm.year}` : ''}
           {estimatedPop > 0 && (
-            <> · ~{formatCountOps(estimatedPop, mode)} residents in surge zone</>
+            <> · {formatCountOps(estimatedPop, mode)} residents in surge zone</>
           )}
         </div>
         <div className="text-slate-500">{perilHeadline(stormMix)}</div>
@@ -134,9 +134,9 @@ export function CatDeploymentSummary({
       {/* Workload translation */}
       {wl.inspections_needed > 0 && (
         <div className="text-[11px] text-slate-700 leading-snug mb-2">
-          <span className="font-bold">~{formatCountOps(wl.inspections_needed, mode)}</span> inspections needed
+          <span className="font-bold">{formatCountOps(wl.inspections_needed, mode)}</span> inspections needed
           {wl.uninhabitable > 0 && (
-            <> · <span className="font-bold text-red-700">~{formatCountOps(wl.uninhabitable, mode)}</span> likely uninhabitable</>
+            <> · <span className="font-bold text-red-700">{formatCountOps(wl.uninhabitable, mode)}</span> likely uninhabitable</>
           )}
         </div>
       )}

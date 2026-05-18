@@ -93,6 +93,8 @@ export interface Hotspot {
   waterPct: number;
   surgePct: number;
   rainPct: number;
+  /** Display label for the area — modal assigned_city_key resolved via cityRollup. */
+  areaName: string;
   severity: { severe: number; major: number; moderate: number; minor: number; none: number };
   /** Populated by recommendAdjusters() from catTeam.ts */
   recommend: { adjuster_days: number; adjusters: number; days: number; label: string };

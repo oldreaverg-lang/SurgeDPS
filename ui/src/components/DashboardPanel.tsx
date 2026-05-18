@@ -134,7 +134,7 @@ export function DashboardPanel({
   if (!storm) return null;
 
   return (
-    <div className="absolute top-4 right-14 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
+    <div className="absolute top-16 xl:top-4 right-14 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
 
       {/* ── Always-visible compact header ── */}
       <div className="flex items-center gap-2 px-3 py-2.5">
@@ -354,8 +354,8 @@ export function DashboardPanel({
               {(estimatedPop > 0 || storm.population?.population) && (
                 <div className="text-[10px] text-gray-400 mt-0.5">
                   {storm.population?.population
-                    ? `${storm.population.county_name} county pop: ${formatCountOps(storm.population.population, mode)} · ~${formatCountOps(estimatedPop, mode)} in surge zone`
-                    : `~${formatCountOps(estimatedPop, mode)} estimated residents in surge zone`}
+                    ? `${storm.population.county_name} county pop: ${formatCountOps(storm.population.population, mode)} · ${formatCountOps(estimatedPop, mode)} in surge zone`
+                    : `${formatCountOps(estimatedPop, mode)} estimated residents in surge zone`}
                 </div>
               )}
               {mode === 'ops' && (
@@ -437,7 +437,14 @@ export function DashboardPanel({
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
                         <div className="flex-1 min-w-0">
-                          <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
+                          <div className="flex items-baseline gap-1.5">
+                            {h.areaName && (
+                              <span className="text-xs font-semibold text-red-900 truncate" title={h.areaName}>
+                                {h.areaName}
+                              </span>
+                            )}
+                            <span className="text-xs font-bold text-red-700 shrink-0">{formatLossOps(h.loss, mode)}</span>
+                          </div>
                           <div className="text-[10px] text-red-400">
                             {mode === 'ops'
                               ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`

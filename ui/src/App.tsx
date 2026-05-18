@@ -963,7 +963,7 @@ function CatDeploymentSummary({
           <span className="font-bold">{storm.name}</span> — CAT {storm.category}
           {storm.year ? `, ${storm.year}` : ''}
           {estimatedPop > 0 && (
-            <> · ~{formatCountOps(estimatedPop, mode)} residents in surge zone</>
+            <> · {formatCountOps(estimatedPop, mode)} residents in surge zone</>
           )}
         </div>
         <div className="text-slate-500">{perilHeadline(stormMix)}</div>
@@ -999,9 +999,9 @@ function CatDeploymentSummary({
       {/* Workload translation */}
       {wl.inspections_needed > 0 && (
         <div className="text-[11px] text-slate-700 leading-snug mb-2">
-          <span className="font-bold">~{formatCountOps(wl.inspections_needed, mode)}</span> inspections needed
+          <span className="font-bold">{formatCountOps(wl.inspections_needed, mode)}</span> inspections needed
           {wl.uninhabitable > 0 && (
-            <> · <span className="font-bold text-red-700">~{formatCountOps(wl.uninhabitable, mode)}</span> likely uninhabitable</>
+            <> · <span className="font-bold text-red-700">{formatCountOps(wl.uninhabitable, mode)}</span> likely uninhabitable</>
           )}
         </div>
       )}
@@ -1842,7 +1842,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
   if (!storm) return null;
 
   return (
-    <div className="absolute top-4 right-14 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
+    <div className="absolute top-16 xl:top-4 right-14 bg-white/95 backdrop-blur shadow-2xl rounded-lg w-72 max-w-[calc(100vw-2rem)] border border-gray-100 z-10">
 
       {/* ── Always-visible compact header ── */}
       <div className="flex items-center gap-2 px-3 py-2.5">
@@ -2139,7 +2139,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           </div>
           {selectedCity.estDisplaced > 0 && (
             <div className="text-[10px] text-gray-500 mt-0.5">
-              ~{formatCountOps(selectedCity.estDisplaced, mode)} potentially displaced
+              {formatCountOps(selectedCity.estDisplaced, mode)} potentially displaced
             </div>
           )}
           <div className="mt-1 text-[9px] text-gray-400 italic">
@@ -2172,8 +2172,8 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
           {(estimatedPop > 0 || storm.population?.population) && (
             <div className="text-[10px] text-gray-400 mt-0.5">
               {storm.population?.population
-                ? `${storm.population.county_name} county pop: ${formatCountOps(storm.population.population, mode)} · ~${formatCountOps(estimatedPop, mode)} in surge zone`
-                : `~${formatCountOps(estimatedPop, mode)} estimated residents in surge zone`}
+                ? `${storm.population.county_name} county pop: ${formatCountOps(storm.population.population, mode)} · ${formatCountOps(estimatedPop, mode)} in surge zone`
+                : `${formatCountOps(estimatedPop, mode)} estimated residents in surge zone`}
             </div>
           )}
           {mode === 'ops' && (
@@ -2253,11 +2253,18 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
                   onClick={() => onFlyTo?.(h.lon, h.lat)}
                   className="w-full text-left hover:bg-red-100/50 rounded px-1 py-1 transition-colors"
                 >
-                  {/* Top line: rank, loss, routing tag (CAT) or shelter posture (EM) */}
+                  {/* Top line: rank, area name + loss, routing tag (CAT) or shelter posture (EM) */}
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-black text-red-400 w-4">#{h.rank}</span>
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs font-bold text-red-700">{formatLossOps(h.loss, mode)}</div>
+                      <div className="flex items-baseline gap-1.5">
+                        {h.areaName && (
+                          <span className="text-xs font-semibold text-red-900 truncate" title={h.areaName}>
+                            {h.areaName}
+                          </span>
+                        )}
+                        <span className="text-xs font-bold text-red-700 shrink-0">{formatLossOps(h.loss, mode)}</span>
+                      </div>
                       <div className="text-[10px] text-red-400">
                         {mode === 'ops'
                           ? `${formatCountOps(h.count, mode)} bldgs · avg ${formatLossOps(h.avgLoss, mode)}`
@@ -4038,8 +4045,25 @@ ${fieldFlag ? `
       rainWeight: number;   // counts only buildings with a non-null rainfall_depth_ft
       maxDepthFt: number;
       severity: { severe: number; major: number; moderate: number; minor: number; none: number };
+      // Frequency map of assigned_city_key seen in this bin. The modal key
+      // is resolved to a display name via the cityRollup lookup below so the
+      // Hardest-Hit row can show "Belle Chasse" instead of just rank + loss.
+      cityKeyCounts: Record<string, number>;
     };
     const bins: Record<string, Bin> = {};
+
+    // Build a key → displayName lookup from cityRollup so we can stamp each
+    // hotspot with its modal area name. cityRollup is computed earlier in
+    // this component and ranges over the same buildings that feed bins, so
+    // every assigned_city_key encountered below will have a matching entry.
+    const cityNameByKey: Record<string, string> = {};
+    if (cityRollup) {
+      for (const r of cityRollup) {
+        cityNameByKey[r.key] = r.name === 'Unincorporated' && r.countyName
+          ? `Unincorp. ${r.countyName}`
+          : r.name;
+      }
+    }
 
     const hasLandfall = activeStorm?.landfall_lat != null && activeStorm?.landfall_lon != null;
 
@@ -4055,11 +4079,14 @@ ${fieldFlag ? `
           windSum: 0, waterSum: 0, surgeSum: 0, rainSum: 0,
           windWeight: 0, rainWeight: 0, maxDepthFt: 0,
           severity: { severe: 0, major: 0, moderate: 0, minor: 0, none: 0 },
+          cityKeyCounts: {},
         };
       }
       const b = bins[key];
       b.loss += p.estimated_loss_usd || 0;
       b.count += 1;
+      const ck: string | undefined = p.assigned_city_key;
+      if (ck) b.cityKeyCounts[ck] = (b.cityKeyCounts[ck] || 0) + 1;
 
       // Severity tally
       const cat = (p.damage_category as string | undefined) || 'none';
@@ -4115,6 +4142,16 @@ ${fieldFlag ? `
         }
         const recommend = recommendAdjusters(b.severity);
         const routing   = routingHint(windPct, waterPct);
+        // Modal city key wins — ties broken by insertion order, which is
+        // deterministic enough since the bin is ~500 m wide and a single
+        // place's buildings dominate. Unknown → empty string, treated as
+        // "no city name available" by the JSX (which then hides the line).
+        let modalKey = '';
+        let modalCount = 0;
+        for (const [ck, c] of Object.entries(b.cityKeyCounts)) {
+          if (c > modalCount) { modalCount = c; modalKey = ck; }
+        }
+        const areaName = modalKey ? (cityNameByKey[modalKey] || '') : '';
         return {
           rank: i + 1,
           loss: b.loss,
@@ -4127,12 +4164,13 @@ ${fieldFlag ? `
           waterPct,
           surgePct,
           rainPct,
+          areaName,
           severity: b.severity,
           recommend,
           routing,
         };
       });
-  }, [allBuildings, activeStorm]);
+  }, [allBuildings, activeStorm, cityRollup]);
 
   // Callback to fly to hotspot
   const handleFlyToHotspot = useCallback((lon: number, lat: number) => {
