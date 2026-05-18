@@ -528,6 +528,76 @@ def cell_bbox(col: int, row: int):
 # Cell Loading
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
+def _stamp_places_if_needed(damage_data: dict, damage_path: str) -> int:
+    """
+    Stamp each building's properties with its TIGER/Line Place membership:
+    place_geoid, place_name, place_state, place_classfp.
+
+    Idempotent: returns immediately if buildings already carry place_geoid
+    (one-time per cell across the cell's lifetime). When new stamps are
+    added, writes the updated FeatureCollection back to disk so subsequent
+    requests get the stamped copy without re-running point-in-polygon.
+
+    Buildings outside every Place polygon (open ocean, fully unincorporated
+    rural areas not covered by a CDP) get a sentinel place_geoid='' so the
+    rollup can distinguish "we checked, not in a Place" from "never checked,
+    fall through to legacy Voronoi".
+
+    Returns the number of features stamped. 0 means cache hit (or empty).
+    """
+    feats = damage_data.get("features") if isinstance(damage_data, dict) else None
+    if not feats:
+        return 0
+    # Sentinel check on the first feature with a geometry — if it already
+    # carries place_geoid (even empty string ''), this cell has been stamped.
+    for f in feats:
+        if (f.get("properties") or {}).get("place_geoid") is not None:
+            return 0
+        if f.get("geometry"):
+            break  # first geom we hit is unstamped → proceed
+
+    try:
+        from data_ingest.place_lookup import lookup_place
+    except Exception as e:
+        print(f"  [place_lookup] import failed (non-fatal): {e}")
+        return 0
+
+    stamped = 0
+    for f in feats:
+        coords = (f.get("geometry") or {}).get("coordinates")
+        if not coords or len(coords) < 2:
+            continue
+        lon, lat = coords[0], coords[1]
+        hit = lookup_place(lat, lon)
+        props = f.setdefault("properties", {})
+        if hit:
+            props["place_geoid"]   = hit["geoid"]
+            props["place_name"]    = hit["name"]
+            props["place_state"]   = hit["state"]
+            props["place_classfp"] = hit["classfp"]
+        else:
+            # Sentinel — point-in-polygon was run and found nothing.
+            props["place_geoid"]   = ""
+            props["place_name"]    = ""
+            props["place_state"]   = ""
+            props["place_classfp"] = ""
+        stamped += 1
+
+    # Persist back to disk so next request skips the work. Atomic write
+    # mirrors the pattern used elsewhere in this module.
+    if stamped and damage_path:
+        try:
+            import threading as _th
+            tmp = f"{damage_path}.tmp.{os.getpid()}.{_th.get_ident()}"
+            with open(tmp, "w") as f:
+                json.dump(damage_data, f)
+            os.replace(tmp, damage_path)
+        except OSError as e:
+            print(f"  [place_lookup] write-back failed (non-fatal): {e}")
+    return stamped
+
+
 def load_cell(col: int, row: int, refresh: bool = False) -> dict:
     """
     Generate damage + flood data for a grid cell under the active storm.
@@ -569,6 +639,12 @@ def load_cell(col: int, row: int, refresh: bool = False) -> dict:
             damage_data = json.load(f)
         with open(flood_path) as f:
             flood_data = json.load(f)
+        # Auto-upgrade pre-stamp cached cells (one-time per cell). Subsequent
+        # requests get the stamped copy from disk — point-in-polygon doesn't
+        # re-run after the first hit.
+        _n_stamped = _stamp_places_if_needed(damage_data, damage_path)
+        if _n_stamped:
+            print(f"  [place_lookup] stamped {_n_stamped} buildings in cached cell ({col},{row})")
         print(f"  [cache hit] cell ({col},{row}) for {storm.storm_id}")
         _progress.update(step='Complete', step_num=4, storm_id=storm.storm_id)
         return {"buildings": damage_data, "flood": flood_data}
@@ -900,6 +976,12 @@ def load_cell(col: int, row: int, refresh: bool = False) -> dict:
                 damage_data = json.load(f)
         except Exception as _dj_err:
             print(f"  [damage] JSON load failed (non-fatal): {_dj_err}")
+
+    # Stamp TIGER/Line Place membership on every building. Persists back to
+    # damage.geojson so future cache hits skip the work.
+    _n_stamped = _stamp_places_if_needed(damage_data, damage_path)
+    if _n_stamped:
+        print(f"  [place_lookup] stamped {_n_stamped} buildings in fresh cell ({col},{row})")
 
     # Inject cell-level metadata into the FeatureCollection root so CAT reports
     # can display rainfall return period, impervious fraction, etc.

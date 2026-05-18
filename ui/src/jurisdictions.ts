@@ -351,36 +351,37 @@ export function rollupByCity(
     const [lon, lat] = coords;
     const p = b.properties || {};
 
-    // Find nearest city using grid index
-    const gx = Math.floor(lon / GRID_SIZE);
-    const gy = Math.floor(lat / GRID_SIZE);
-    let bestCity: CityEntry | null = null;
-    let bestDSq = MAX_DIST_SQ;
+    let key: string, name: string, state: string, countyGeoid: string, countyName: string;
 
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        const candidates = grid[`${gx + dx},${gy + dy}`];
-        if (!candidates) continue;
-        for (const city of candidates) {
-          const dlon = lon - city.lon;
-          const dlat = lat - city.lat;
-          const dsq  = dlon * dlon + dlat * dlat;
-          if (dsq < bestDSq) { bestDSq = dsq; bestCity = city; }
+    // ── Preferred: server-stamped TIGER/Line Place membership ──
+    // place_geoid is set by api_server.py via shapely point-in-polygon
+    // against the actual Census Place polygon. '' (empty string) is a
+    // sentinel meaning "checked, not in any Place" — falls through to
+    // the unincorporated bucket without re-running Voronoi.
+    // undefined means "not yet stamped" (legacy cell), fall through to
+    // Voronoi so the UI keeps working until the cell gets auto-upgraded
+    // by the next /api/cell request.
+    const placeGeoid: string | undefined = p.place_geoid;
+    let bestCity: CityEntry | null = null;
+
+    if (placeGeoid && placeGeoid !== '') {
+      // Stamped + inside a Place — use it. Look up the matching CityEntry
+      // (if any) for centroid + pop metadata; otherwise rely on the
+      // stamped name + the building's own coords.
+      key   = `${p.place_name}|${p.place_state}`;
+      name  = p.place_name;
+      state = p.place_state;
+      // Find the CityEntry that matches this geoid/name+state, for centroid lookup
+      for (const city of cities) {
+        if (city.name === p.place_name && city.state === p.place_state) {
+          bestCity = city; break;
         }
       }
-    }
-
-    // Derive bucket key + metadata
-    let key: string, name: string, state: string, countyGeoid: string, countyName: string;
-    if (bestCity) {
-      key         = `${bestCity.name}|${bestCity.state}`;
-      name        = bestCity.name;
-      state       = bestCity.state;
-      countyGeoid = bestCity.county_geoid;
-      countyName  = countyNameMap[bestCity.county_geoid] || '';
-    } else {
-      // Unincorporated: bucket at 0.2° resolution so adjacent rural areas
-      // don't all collapse into one giant "Unincorporated" cluster.
+      countyGeoid = bestCity?.county_geoid || '';
+      countyName  = countyNameMap[countyGeoid] || '';
+    } else if (placeGeoid === '') {
+      // Stamped sentinel — definitively unincorporated. Bucket at 0.2°
+      // resolution so adjacent rural areas don't all collapse into one.
       const gLon = Math.round(lon * 5) / 5;
       const gLat = Math.round(lat * 5) / 5;
       key         = `unincorp|${gLat}|${gLon}`;
@@ -388,6 +389,38 @@ export function rollupByCity(
       state       = '';
       countyGeoid = '';
       countyName  = '';
+    } else {
+      // Legacy / unstamped — fall through to nearest-centroid Voronoi.
+      const gx = Math.floor(lon / GRID_SIZE);
+      const gy = Math.floor(lat / GRID_SIZE);
+      let bestDSq = MAX_DIST_SQ;
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const candidates = grid[`${gx + dx},${gy + dy}`];
+          if (!candidates) continue;
+          for (const city of candidates) {
+            const dlon = lon - city.lon;
+            const dlat = lat - city.lat;
+            const dsq  = dlon * dlon + dlat * dlat;
+            if (dsq < bestDSq) { bestDSq = dsq; bestCity = city; }
+          }
+        }
+      }
+      if (bestCity) {
+        key         = `${bestCity.name}|${bestCity.state}`;
+        name        = bestCity.name;
+        state       = bestCity.state;
+        countyGeoid = bestCity.county_geoid;
+        countyName  = countyNameMap[bestCity.county_geoid] || '';
+      } else {
+        const gLon = Math.round(lon * 5) / 5;
+        const gLat = Math.round(lat * 5) / 5;
+        key         = `unincorp|${gLat}|${gLon}`;
+        name        = 'Unincorporated';
+        state       = '';
+        countyGeoid = '';
+        countyName  = '';
+      }
     }
 
     // Stamp the assignment onto the building feature so the map-side filter
