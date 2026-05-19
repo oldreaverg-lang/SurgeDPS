@@ -3961,7 +3961,7 @@ ${fieldFlag ? `
     setSimResult(null);
     try {
       const data = await fetchJson<any>(
-        `/surgedps/api/simulate?lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`
+        `/surgedps/api/simulate?storm_id=${encodeURIComponent(activeStorm.storm_id)}&lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`
       );
       setSimResult(data);
     } catch (err) {

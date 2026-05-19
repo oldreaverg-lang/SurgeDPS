@@ -307,8 +307,14 @@ def _inject_dps(storm_dict: dict) -> dict:
 
 import threading as _threading
 _active_storm_lock = _threading.Lock()
-_active_storm: StormEntry | None = None
-_active_exposure_region: str = ''  # R11: cached for cell-load lookups
+_active_storm: StormEntry | None = None  # last-activated; used only by /api/status and as a legacy fallback for clients that don't pass storm_id
+
+# Per-storm exposure region (R11). Replaces the single _active_exposure_region
+# global so concurrent users on different storms don't trample each other's
+# state. Populated by the activate handler; read by load_cell for validated-
+# DPS computation. Bounded with a soft cap — activation is rare relative to
+# the handlers that read this, so a simple dict is fine.
+_exposure_region_by_storm: dict[str, str] = {}
 
 # ── Rainfall tile server state ──
 # Keyed by storm_id, value is the absolute path to the MRMS-clipped GeoTIFF
@@ -513,12 +519,10 @@ def _update_building_index(storm_id: str, col: int, row: int, count: int):
         json.dump(index, f)
 
 
-def cell_bbox(col: int, row: int):
-    """Convert grid (col, row) to bbox using the active storm's grid origin."""
-    if _active_storm is None:
-        raise RuntimeError("No storm active")
-    origin_lon = _active_storm.grid_origin_lon
-    origin_lat = _active_storm.grid_origin_lat
+def cell_bbox(col: int, row: int, storm: StormEntry):
+    """Convert grid (col, row) to bbox using the given storm's grid origin."""
+    origin_lon = storm.grid_origin_lon
+    origin_lat = storm.grid_origin_lat
     lon_min = origin_lon + col * CELL_WIDTH
     lat_min = origin_lat + row * CELL_HEIGHT
     return lon_min, lat_min, lon_min + CELL_WIDTH, lat_min + CELL_HEIGHT
@@ -598,15 +602,14 @@ def _stamp_places_if_needed(damage_data: dict, damage_path: str) -> int:
     return stamped
 
 
-def load_cell(col: int, row: int, refresh: bool = False) -> dict:
+def load_cell(col: int, row: int, storm: StormEntry, refresh: bool = False) -> dict:
     """
-    Generate damage + flood data for a grid cell under the active storm.
+    Generate damage + flood data for a grid cell under the given storm.
 
     When refresh=True, delete any existing cached artifacts for this cell
     before regenerating. Used to invalidate cells produced under stale
     model parameters (e.g. the pre-2026-05-17 rmax fallback bug).
     """
-    storm = _active_storm
     if storm is None:
         return {"buildings": _empty_fc(), "flood": _empty_fc()}
 
@@ -649,7 +652,7 @@ def load_cell(col: int, row: int, refresh: bool = False) -> dict:
         _progress.update(step='Complete', step_num=4, storm_id=storm.storm_id)
         return {"buildings": damage_data, "flood": flood_data}
 
-    lon_min, lat_min, lon_max, lat_max = cell_bbox(col, row)
+    lon_min, lat_min, lon_max, lat_max = cell_bbox(col, row, storm)
     print(f"[{storm.storm_id} cell {col},{row}] "
           f"bbox=({lon_min:.2f},{lat_min:.2f})->({lon_max:.2f},{lat_max:.2f})")
 
@@ -1514,7 +1517,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(404, f"Storm '{storm_id}' not found")
                 return
 
-            global _active_storm, _active_exposure_region
+            global _active_storm
             with _active_storm_lock:
                 _active_storm = storm
             print(f"\n{'='*60}")
@@ -1538,7 +1541,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 _progress.update(step=f'Loading cell ({c},{r})', step_num=idx * 4)
                 print(f"  Loading cell ({c},{r})...")
                 try:
-                    grid_cells[f'{c},{r}'] = load_cell(c, r)
+                    grid_cells[f'{c},{r}'] = load_cell(c, r, storm)
                 except Exception as _cell_err:
                     import traceback as _tb
                     print(f"  [ERROR] load_cell({c},{r}) raised: {_cell_err}")
@@ -1557,9 +1560,12 @@ class CellHandler(BaseHTTPRequestHandler):
             eli = _compute_eli(storm_data.get('dps_score', 0), conf['building_count'])
             storm_data['eli'] = eli['eli']
             storm_data['eli_tier'] = eli['eli_tier']
-            # R11: Dynamic exposure reclassification
-            _active_exposure_region = storm_data.get('exposure_region', '')
-            vdps = _compute_validated_dps(storm_data.get('dps_score', 0), conf['building_count'], _active_exposure_region)
+            # R11: Dynamic exposure reclassification — stored per-storm so a
+            # second user activating a different storm doesn't overwrite the
+            # region this storm computed against.
+            exposure_region = storm_data.get('exposure_region', '')
+            _exposure_region_by_storm[storm.storm_id] = exposure_region
+            vdps = _compute_validated_dps(storm_data.get('dps_score', 0), conf['building_count'], exposure_region)
             storm_data['validated_dps'] = vdps['validated_dps']
             storm_data['dps_adjustment'] = vdps['dps_adjustment']
             storm_data['dps_adj_reason'] = vdps['dps_adj_reason']
@@ -1645,26 +1651,29 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(400, 'Missing or invalid col/row')
                 return
 
-            if _active_storm is None:
-                self._send_error(400, 'No storm active')
+            storm = self._resolve_storm(params, action_name='/api/cell')
+            if storm is None:
                 return
 
             refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
             try:
-                print(f"\n--- Loading cell ({col}, {row}) for {_active_storm.name} (refresh={refresh}) ---")
-                data = load_cell(col, row, refresh=refresh)
+                print(f"\n--- Loading cell ({col}, {row}) for {storm.name} (refresh={refresh}) ---")
+                data = load_cell(col, row, storm, refresh=refresh)
                 # R5: Include updated confidence after cell load
-                conf = _compute_confidence(_active_storm.storm_id)
+                conf = _compute_confidence(storm.storm_id)
                 data['confidence'] = conf['confidence']
                 data['building_count'] = conf['building_count']
                 # R8: Updated ELI with new building count
-                dps_val = _DPS_SCORES.get(_active_storm.storm_id, 0) or _DPS_SCORES.get(_active_storm.storm_id.lower(), 0)
+                dps_val = _DPS_SCORES.get(storm.storm_id, 0) or _DPS_SCORES.get(storm.storm_id.lower(), 0)
                 eli = _compute_eli(dps_val, conf['building_count'])
                 data['eli'] = eli['eli']
                 data['eli_tier'] = eli['eli_tier']
-                # R11: Updated validated DPS
-                vdps = _compute_validated_dps(dps_val, conf['building_count'], _active_exposure_region)
+                # R11: Updated validated DPS — read this storm's exposure
+                # region (populated at activation), not whatever the last
+                # activated storm's region happened to be.
+                exposure_region = _exposure_region_by_storm.get(storm.storm_id, '')
+                vdps = _compute_validated_dps(dps_val, conf['building_count'], exposure_region)
                 data['validated_dps'] = vdps['validated_dps']
                 data['dps_adjustment'] = vdps['dps_adjustment']
                 data['dps_adj_reason'] = vdps['dps_adj_reason']
@@ -1686,8 +1695,9 @@ class CellHandler(BaseHTTPRequestHandler):
         # (kept from cell load; see cleanup section in load_cell). Returns 404
         # for pre-pipeline legacy cells that never wrote those files.
         if path == '/api/cell_ticks':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active'); return
+            storm = self._resolve_storm(params, action_name='/api/cell_ticks')
+            if storm is None:
+                return
             try:
                 col = int((params.get('col') or [''])[0])
                 row = int((params.get('row') or [''])[0])
@@ -1695,12 +1705,8 @@ class CellHandler(BaseHTTPRequestHandler):
                     self._send_error(400, 'col/row out of range'); return
             except (ValueError, TypeError):
                 self._send_error(400, 'col and row must be integers'); return
-            # storm_id param is optional; if supplied it must match active storm
-            sid_param = (params.get('storm_id') or [''])[0]
-            if sid_param and sid_param != _active_storm.storm_id:
-                self._send_error(404, f"Storm '{sid_param}' not active"); return
             try:
-                sdir = _storm_cache_dir(_active_storm)
+                sdir = _storm_cache_dir(storm)
                 ticks_path  = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
                 depth_path  = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
                 bldgs_path  = os.path.join(sdir, f'cell_{col}_{row}_buildings.json')
@@ -1748,7 +1754,7 @@ class CellHandler(BaseHTTPRequestHandler):
 
                 # Per-cell lock: if two requests race for the same bundle,
                 # only one runs HAZUS; the other waits then reads the result.
-                _cell_lock = _get_cell_ticks_lock(_active_storm.storm_id, col, row)
+                _cell_lock = _get_cell_ticks_lock(storm.storm_id, col, row)
                 with _cell_lock:
                     # Re-check after acquiring the lock — the winner may have
                     # already written the bundle while we waited.
@@ -1779,12 +1785,12 @@ class CellHandler(BaseHTTPRequestHandler):
                         buildings_geojson_path=bldgs_path,
                         ticks_output_path=_ticks_tmp,
                         final_geojson_path=damage_path,  # keeps _damage.geojson current
-                        storm_id=_active_storm.storm_id,
-                        landfall_lat=_active_storm.landfall_lat,
-                        landfall_lon=_active_storm.landfall_lon,
-                        max_wind_kt=_active_storm.max_wind_kt,
-                        storm_speed_kt=_active_storm.speed_kt,
-                        storm_heading_deg=_active_storm.heading_deg,
+                        storm_id=storm.storm_id,
+                        landfall_lat=storm.landfall_lat,
+                        landfall_lon=storm.landfall_lon,
+                        max_wind_kt=storm.max_wind_kt,
+                        storm_speed_kt=storm.speed_kt,
+                        storm_heading_deg=storm.heading_deg,
                     )
                     if not os.path.exists(_ticks_tmp):
                         self._send_error(500, 'Ticks generation produced no output'); return
@@ -1854,31 +1860,31 @@ class CellHandler(BaseHTTPRequestHandler):
 
         # ── GET /api/simulate?lat=N&lon=N&wind=N&pressure=N ── what-if scenario
         if path == '/api/simulate':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active — activate a storm first')
+            base_storm = self._resolve_storm(params, action_name='/api/simulate')
+            if base_storm is None:
                 return
             try:
-                sim_lat = float(params.get('lat', [str(_active_storm.landfall_lat)])[0])
-                sim_lon = float(params.get('lon', [str(_active_storm.landfall_lon)])[0])
-                sim_wind = int(params.get('wind', [str(_active_storm.max_wind_kt)])[0])
-                sim_pressure = int(params.get('pressure', [str(_active_storm.min_pressure_mb)])[0])
-                sim_heading = float(params.get('heading', [str(_active_storm.heading_deg)])[0])
-                sim_speed = float(params.get('speed', [str(_active_storm.speed_kt)])[0])
+                sim_lat = float(params.get('lat', [str(base_storm.landfall_lat)])[0])
+                sim_lon = float(params.get('lon', [str(base_storm.landfall_lon)])[0])
+                sim_wind = int(params.get('wind', [str(base_storm.max_wind_kt)])[0])
+                sim_pressure = int(params.get('pressure', [str(base_storm.min_pressure_mb)])[0])
+                sim_heading = float(params.get('heading', [str(base_storm.heading_deg)])[0])
+                sim_speed = float(params.get('speed', [str(base_storm.speed_kt)])[0])
             except (ValueError, TypeError):
                 self._send_error(400, 'Invalid simulation parameters')
                 return
 
             print(f"\n{'='*60}")
-            print(f"SIMULATION: {_active_storm.name} — What-if at ({sim_lon:.2f}, {sim_lat:.2f})")
+            print(f"SIMULATION: {base_storm.name} — What-if at ({sim_lon:.2f}, {sim_lat:.2f})")
             print(f"  Wind: {sim_wind} kt  Pressure: {sim_pressure} mb")
             print(f"{'='*60}")
 
             # Build a temporary StormEntry with the user's parameters
             sim_storm = StormEntry(
-                storm_id=f"{_active_storm.storm_id}_sim",
-                name=_active_storm.name,
-                year=_active_storm.year,
-                category=_active_storm.category,
+                storm_id=f"{base_storm.storm_id}_sim",
+                name=base_storm.name,
+                year=base_storm.year,
+                category=base_storm.category,
                 status="simulation",
                 landfall_lon=sim_lon,
                 landfall_lat=sim_lat,
@@ -1886,7 +1892,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 min_pressure_mb=sim_pressure,
                 heading_deg=sim_heading,
                 speed_kt=sim_speed,
-                basin=_active_storm.basin,
+                basin=base_storm.basin,
                 advisory="simulation",
             )
 
@@ -2094,8 +2100,8 @@ class CellHandler(BaseHTTPRequestHandler):
         # Frontend polls every 5 s; once status=="ready" the full result is
         # returned.  Stale parametric TIFs are purged so IEM gets a clean shot.
         if path == '/api/rainfall':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active')
+            storm = self._resolve_storm(params, action_name='/api/rainfall')
+            if storm is None:
                 return
             try:
                 sys.path.insert(0, os.path.join(BASE_DIR, 'src'))
@@ -2103,7 +2109,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 duration_hr = int(params.get('duration', ['72'])[0])
                 pass_level  = int(params.get('pass',     ['2'])[0])
                 realtime    = params.get('realtime', ['0'])[0] == '1'
-                sid = _active_storm.storm_id
+                sid = storm.storm_id
                 mrms_cache = os.path.join(PERSISTENT_DIR, 'mrms')
                 os.makedirs(mrms_cache, exist_ok=True)
 
@@ -2134,17 +2140,17 @@ class CellHandler(BaseHTTPRequestHandler):
 
                 # ── Check on-disk IEM TIF cache (server restart case) ─────
                 bbox = storm_bbox_from_catalog_entry(
-                    _active_storm.landfall_lat, _active_storm.landfall_lon, buffer_deg=4.0
+                    storm.landfall_lat, storm.landfall_lon, buffer_deg=4.0
                 )
                 fetcher = MRMSFetcher(cache_dir=mrms_cache, keep_raw_grib=True)
                 # If an IEM TIF already exists on disk, return it immediately
                 import hashlib as _hl
                 from datetime import datetime, timezone as _tz, timedelta as _td
                 valid_time = None
-                if not realtime and getattr(_active_storm, 'landfall_date', None):
+                if not realtime and getattr(storm, 'landfall_date', None):
                     try:
                         valid_time = datetime.strptime(
-                            _active_storm.landfall_date, '%Y-%m-%d'
+                            storm.landfall_date, '%Y-%m-%d'
                         ).replace(hour=18, tzinfo=_tz.utc) + _td(hours=48)
                     except (ValueError, AttributeError):
                         pass
@@ -2185,7 +2191,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 t = _threading.Thread(
                     target=_mrms_background_fetch,
                     args=(sid, fetcher, bbox, duration_hr, pass_level,
-                          realtime, valid_time, mrms_cache, _active_storm),
+                          realtime, valid_time, mrms_cache, storm),
                     daemon=True,
                 )
                 t.start()
@@ -2315,7 +2321,14 @@ class CellHandler(BaseHTTPRequestHandler):
                 from datetime import datetime as _dt_lf
                 from datetime import timedelta as _td_lf
                 from datetime import timezone as _tz_lf
-                landfall_date = getattr(_active_storm, 'landfall_date', None)
+                # Look up landfall_date directly by storm_id — the global
+                # _active_storm is irrelevant here and would be wrong for any
+                # request hitting this endpoint without first hitting activate.
+                _frames_storm = (
+                    get_storm_by_id(storm_id)
+                    or next((hs for hs in HISTORICAL_STORMS if hs.storm_id == storm_id), None)
+                )
+                landfall_date = getattr(_frames_storm, 'landfall_date', None) if _frames_storm else None
                 landfall_iso = None
                 window_start_iso = None
                 landfall_hour_in_window = None
@@ -2438,8 +2451,9 @@ class CellHandler(BaseHTTPRequestHandler):
         # each Feature: id, name, capacity, occupancy (nullable),
         # operator, accessible (bool), pet_friendly (bool), last_updated.
         if path == '/api/shelters':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active'); return
+            storm = self._resolve_storm(params, action_name='/api/shelters')
+            if storm is None:
+                return
             try:
                 shelters_dir = os.path.join(PERSISTENT_DIR, 'shelters')
                 sfile = os.path.join(shelters_dir, 'shelters.geojson')
@@ -2460,7 +2474,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 with open(sfile) as _sf:
                     gj = json.load(_sf)
                 feats = gj.get('features', []) if isinstance(gj, dict) else []
-                clat = _active_storm.landfall_lat; clon = _active_storm.landfall_lon
+                clat = storm.landfall_lat; clon = storm.landfall_lon
                 out = []; total_cap = 0; any_unknown = False; total_occ = 0
                 # Track features dropped silently so operators know their
                 # manifest has gaps. Otherwise "5 shelters found" on a 50%-
@@ -2541,8 +2555,9 @@ class CellHandler(BaseHTTPRequestHandler):
         # landfall when no cells have been processed yet (so vendor bars
         # aren't empty on a cold-start storm).
         if path == '/api/vendor_coverage':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active'); return
+            storm = self._resolve_storm(params, action_name='/api/vendor_coverage')
+            if storm is None:
+                return
             try:
                 vdir = os.path.join(PERSISTENT_DIR, 'vendors')
                 vfile = os.path.join(vdir, 'vendors.json')
@@ -2566,8 +2581,8 @@ class CellHandler(BaseHTTPRequestHandler):
                 # Build storm footprint from the union of processed
                 # cells' flood polygons. This is the real "affected
                 # area" the CAT lead cares about — not a bbox.
-                clat = _active_storm.landfall_lat; clon = _active_storm.landfall_lon
-                sdir = os.path.join(CACHE_DIR, _active_storm.storm_id)
+                clat = storm.landfall_lat; clon = storm.landfall_lon
+                sdir = os.path.join(CACHE_DIR, storm.storm_id)
                 flood_polys = []
                 if os.path.isdir(sdir):
                     for fn in os.listdir(sdir):
@@ -2634,8 +2649,9 @@ class CellHandler(BaseHTTPRequestHandler):
         # Falls back to a rank × max-surge heuristic when the road
         # graph can't be built (no coords, Overpass down, etc.).
         if path == '/api/time_to_access':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active'); return
+            storm = self._resolve_storm(params, action_name='/api/time_to_access')
+            if storm is None:
+                return
             try:
                 import datetime as _dt
                 raw_ranks = (params.get('ranks') or [''])[0]
@@ -2682,15 +2698,15 @@ class CellHandler(BaseHTTPRequestHandler):
                 if coords and len(coords) == len(ranks):
                     try:
                         from road_reachability import access_estimates as _rr
-                        storm_cache = _storm_cache_dir(_active_storm)
+                        storm_cache = _storm_cache_dir(storm)
                         mosaic_path = _compound_mosaic_by_storm.get(
-                            _active_storm.storm_id,
+                            storm.storm_id,
                             os.path.join(storm_cache, 'storm_compound.tif'),
                         )
                         if not os.path.exists(mosaic_path):
                             mosaic_path = None
                         hotspot_pairs = list(zip(ranks, coords))
-                        landfall = (_active_storm.landfall_lon, _active_storm.landfall_lat)
+                        landfall = (storm.landfall_lon, storm.landfall_lat)
                         estimates = _rr(
                             landfall=landfall,
                             hotspots=hotspot_pairs,
@@ -2711,7 +2727,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 if estimates is None:
                     # Heuristic fallback (shape-compatible).
                     try:
-                        max_surge = float(getattr(_active_storm, 'max_surge_ft', 0) or 0)
+                        max_surge = float(getattr(storm, 'max_surge_ft', 0) or 0)
                     except Exception:
                         max_surge = 0.0
                     base_hr = 6.0 + max_surge * 2.0
@@ -2744,18 +2760,18 @@ class CellHandler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/compound':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active')
+            storm = self._resolve_storm(params, action_name='/api/compound')
+            if storm is None:
                 return
             try:
                 with _compound_lock:
-                    mosaic_path, stats = _build_storm_compound_mosaic(_active_storm.storm_id)
+                    mosaic_path, stats = _build_storm_compound_mosaic(storm.storm_id)
                     if mosaic_path:
-                        _lru_set(_compound_mosaic_by_storm, _active_storm.storm_id, mosaic_path)
+                        _lru_set(_compound_mosaic_by_storm, storm.storm_id, mosaic_path)
                 if mosaic_path is None:
                     self._send_json(200, {
                         'available': False,
-                        'storm_id': _active_storm.storm_id,
+                        'storm_id': storm.storm_id,
                         'cell_count': 0,
                         'notes': 'No cells loaded yet — load at least one cell to see compound flooding.',
                     })
@@ -2763,12 +2779,12 @@ class CellHandler(BaseHTTPRequestHandler):
                 cell_count = stats.get('cell_count', 0)
                 self._send_json(200, {
                     'available': True,
-                    'storm_id': _active_storm.storm_id,
+                    'storm_id': storm.storm_id,
                     'cell_count': cell_count,
                     'max_depth_ft': stats.get('max_depth_ft'),
                     'avg_depth_ft': stats.get('avg_depth_ft'),
                     'tile_url_template': (
-                        f'/api/compound_tile/{{z}}/{{x}}/{{y}}.png?storm_id={_active_storm.storm_id}'
+                        f'/api/compound_tile/{{z}}/{{x}}/{{y}}.png?storm_id={storm.storm_id}'
                     ),
                     'notes': f"Compound mosaic of {cell_count} cell(s) — "
                              f"surge + rainfall + fluvial combined.",
@@ -2831,18 +2847,18 @@ class CellHandler(BaseHTTPRequestHandler):
         # The QPF raster is NOT used as a model input — it is served as a
         # read-only planning overlay for the frontend map panel.
         if path == '/api/qpf':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active')
+            storm = self._resolve_storm(params, action_name='/api/qpf')
+            if storm is None:
                 return
             # WPC QPF is the National Weather Service's operational forecast
             # for the next 72 hours — it doesn't apply to storms whose landfall
             # is in the past. Pulling /api/qpf for Florence 2018 returns today's
-            # (May 2026) QPF, which is unrelated to the storm. Refuse the fetch
-            # and tell the frontend to hide the Forecast tab.
-            if getattr(_active_storm, 'status', '') == 'historical':
+            # QPF, which is unrelated to the storm. Refuse the fetch and tell
+            # the frontend to hide the Forecast tab.
+            if getattr(storm, 'status', '') == 'historical':
                 self._send_json(200, {
                     'available': False,
-                    'storm_id': _active_storm.storm_id,
+                    'storm_id': storm.storm_id,
                     'reason': 'historical_storm_no_forecast',
                     'caveat': (
                         "WPC QPF is the NWS operational forecast for the next 72 "
@@ -2862,7 +2878,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 # storm would clobber the first's raster on disk, and the
                 # in-memory _qpf_tif_by_storm entries would both point at the
                 # overwritten file, serving wrong tiles).
-                qpf_cache = os.path.join(PERSISTENT_DIR, 'qpf', _active_storm.storm_id)
+                qpf_cache = os.path.join(PERSISTENT_DIR, 'qpf', storm.storm_id)
                 os.makedirs(qpf_cache, exist_ok=True)
                 cache_meta = os.path.join(qpf_cache, 'latest_meta.json')
 
@@ -2872,13 +2888,13 @@ class CellHandler(BaseHTTPRequestHandler):
                         with open(cache_meta) as _f:
                             _cached = json.load(_f)
                         age_hr = (_time_qpf.time() - _cached.get('fetched_at', 0)) / 3600
-                        if age_hr < 6 and _cached.get('storm_id') == _active_storm.storm_id:
+                        if age_hr < 6 and _cached.get('storm_id') == storm.storm_id:
                             # Re-register the cached tif with the tile server
                             # so /api/qpf_tile works after a restart.
                             _cached_tif = _cached.get('tif_path')
                             if _cached_tif and os.path.exists(_cached_tif):
                                 with _qpf_tif_lock:
-                                    _lru_set(_qpf_tif_by_storm, _active_storm.storm_id, _cached_tif)
+                                    _lru_set(_qpf_tif_by_storm, storm.storm_id, _cached_tif)
                             self._send_json(200, _cached)
                             return
                     except Exception:
@@ -2888,8 +2904,8 @@ class CellHandler(BaseHTTPRequestHandler):
                 fetcher = QPFFetcher(config)
 
                 # Build a simple storm polygon from landfall + 4° buffer
-                _clat = _active_storm.landfall_lat
-                _clon = _active_storm.landfall_lon
+                _clat = storm.landfall_lat
+                _clon = storm.landfall_lon
                 storm_geom = {
                     "type": "Polygon",
                     "coordinates": [[
@@ -2911,7 +2927,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 # NOTE: don't use `or 10.0` — a real 0 kt (stationary) storm
                 # would be coerced to 10 kt "fast-moving" reliability, exactly
                 # the opposite of reality. Only swap in 10 for missing (None).
-                _spd_raw = getattr(_active_storm, 'speed_kt', None)
+                _spd_raw = getattr(storm, 'speed_kt', None)
                 _spd = 10.0 if _spd_raw is None else float(_spd_raw)
                 if _spd < 5:
                     caveat = ("WPC QPF unreliable for nearly-stationary storms — "
@@ -2927,7 +2943,7 @@ class CellHandler(BaseHTTPRequestHandler):
 
                 _meta = {
                     'available': qpf_result is not None,
-                    'storm_id': _active_storm.storm_id,
+                    'storm_id': storm.storm_id,
                     'storm_speed_kt': round(_spd, 1),
                     'reliability': reliability,
                     'caveat': caveat,
@@ -2936,12 +2952,12 @@ class CellHandler(BaseHTTPRequestHandler):
                 if qpf_result is not None:
                     _qpf_tif = getattr(qpf_result, 'path', None)
                     _qpf_tile_tmpl = None
-                    if _qpf_tif and os.path.exists(_qpf_tif) and _active_storm is not None:
+                    if _qpf_tif and os.path.exists(_qpf_tif):
                         with _qpf_tif_lock:
-                            _lru_set(_qpf_tif_by_storm, _active_storm.storm_id, _qpf_tif)
+                            _lru_set(_qpf_tif_by_storm, storm.storm_id, _qpf_tif)
                         _qpf_tile_tmpl = (
                             f"/api/qpf_tile/{{z}}/{{x}}/{{y}}.png"
-                            f"?storm_id={_active_storm.storm_id}"
+                            f"?storm_id={storm.storm_id}"
                         )
                     # Honour the provenance flag set by the fetcher — don't
                     # hard-label synthetic fallbacks as 'wpc_qpf_72hr' to the UI.
@@ -2991,8 +3007,8 @@ class CellHandler(BaseHTTPRequestHandler):
         #   • Live / active storm: hits NWPS real-time feed and caches
         #     the response for 1 day.
         if path == '/api/gauges':
-            if _active_storm is None:
-                self._send_error(400, 'No storm active')
+            storm = self._resolve_storm(params, action_name='/api/gauges')
+            if storm is None:
                 return
             try:
                 radius  = float(params.get('radius', ['4.0'])[0])
@@ -3000,9 +3016,9 @@ class CellHandler(BaseHTTPRequestHandler):
                 refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
                 # Historical path ─────────────────────────────────────────
-                landfall_date = getattr(_active_storm, 'landfall_date', None)
+                landfall_date = getattr(storm, 'landfall_date', None)
                 is_historical = (
-                    getattr(_active_storm, 'status', '') == 'historical'
+                    getattr(storm, 'status', '') == 'historical'
                     and landfall_date
                 )
                 if is_historical:
@@ -3012,9 +3028,9 @@ class CellHandler(BaseHTTPRequestHandler):
                     # If not cached, build inline (may take ~30s on first
                     # hit for a given storm; cached permanently thereafter).
                     resp = fetch_historical_gauges(
-                        storm_id=_active_storm.storm_id,
-                        landfall_lat=_active_storm.landfall_lat,
-                        landfall_lon=_active_storm.landfall_lon,
+                        storm_id=storm.storm_id,
+                        landfall_lat=storm.landfall_lat,
+                        landfall_lon=storm.landfall_lon,
                         landfall_date=landfall_date,
                         radius_deg=radius,
                         persistent_dir=PERSISTENT_DIR,
@@ -3048,7 +3064,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 # Live path ───────────────────────────────────────────────
                 gauges_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'gauges')
                 os.makedirs(gauges_cache_dir, exist_ok=True)
-                cache_key = f"{_active_storm.storm_id}_{radius:.2f}_{min_cat}.json"
+                cache_key = f"{storm.storm_id}_{radius:.2f}_{min_cat}.json"
                 cache_path = os.path.join(gauges_cache_dir, cache_key)
 
                 if os.path.exists(cache_path) and not refresh:
@@ -3060,14 +3076,14 @@ class CellHandler(BaseHTTPRequestHandler):
                 from rainfall.ahps_gauges import AHPSClient
                 client = AHPSClient(cache_ttl_seconds=300)
                 gauges = client.get_gauges_for_storm(
-                    landfall_lat=_active_storm.landfall_lat,
-                    landfall_lon=_active_storm.landfall_lon,
+                    landfall_lat=storm.landfall_lat,
+                    landfall_lon=storm.landfall_lon,
                     radius_deg=radius,
                     min_flood_category=min_cat,
                 )
                 geojson = client.to_geojson(gauges)
                 body = json.dumps({
-                    'storm_id': _active_storm.storm_id,
+                    'storm_id': storm.storm_id,
                     'gauge_count': len(gauges),
                     'at_or_above_major': sum(1 for g in gauges if g.flood_category == 'major'),
                     'at_or_above_moderate': sum(1 for g in gauges if g.flood_category in ('moderate', 'major')),
@@ -3274,6 +3290,50 @@ class CellHandler(BaseHTTPRequestHandler):
 
     def _send_error(self, code, message):
         self._send_json(code, {'error': message})
+
+    def _resolve_storm(self, params: dict, *, action_name: str = 'this endpoint'):
+        """Resolve a StormEntry from ?storm_id= for the current request.
+
+        Per-request resolution removes the multi-user race that the
+        process-global _active_storm used to cause: with two browsers viewing
+        different storms, every /api/rainfall, /api/qpf, /api/gauges, etc.
+        used to read whichever storm was activated most recently. Now each
+        request carries its own storm_id and handlers look that up fresh.
+
+        Falls back to _active_storm only when the client doesn't send
+        storm_id (legacy compatibility for any caller that hasn't updated).
+        Returns the storm or sends a 4xx response and returns None.
+        """
+        sid = (params.get('storm_id') or [''])[0].strip()
+        if sid:
+            storm = get_storm_by_id(sid)
+            if storm is None:
+                # Curated historic storms use a different id format
+                for hs in HISTORICAL_STORMS:
+                    if hs.storm_id == sid:
+                        storm = hs
+                        break
+            if storm is None:
+                # Live NHC systems — exact ATCF id from /api/storms/active
+                try:
+                    for act in fetch_active_storms() or []:
+                        if act.storm_id == sid:
+                            storm = act
+                            break
+                except Exception:
+                    pass
+            if storm is None:
+                self._send_error(404, f"Storm '{sid}' not found")
+                return None
+            return storm
+
+        # Legacy fallback: read the most-recently-activated storm. This is
+        # the path that breaks under concurrent users; logging it lets us
+        # confirm every caller has been updated before removing the fallback.
+        if _active_storm is None:
+            self._send_error(400, f'No storm active (pass ?storm_id= to {action_name})')
+            return None
+        return _active_storm
 
     def log_message(self, format, *args):
         pass

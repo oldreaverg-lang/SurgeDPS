@@ -73,14 +73,16 @@ export type RainfallOverlay = {
  * @param passLevel   MRMS pass level (1=radar-only, 2=gauge-corrected). Default 2.
  */
 export async function fetchRainfallOverlay(
-  _stormId: string,
+  stormId: string,
   durationHr = 72,
   passLevel = 2,
 ): Promise<RainfallOverlay> {
   // Backend now uses a background-job pattern: first response may be
   // {status:"pending"} while IEM downloads 72 GRIB2 files (~90-120 s cold).
   // We poll every 5 s for up to 3 minutes before giving up.
-  const url = `/surgedps/api/rainfall?duration=${durationHr}&pass=${passLevel}&realtime=0`;
+  // storm_id is passed on every request so the server resolves the storm
+  // per-request rather than reading whichever storm was last activated.
+  const url = `/surgedps/api/rainfall?storm_id=${encodeURIComponent(stormId)}&duration=${durationHr}&pass=${passLevel}&realtime=0`;
   const POLL_INTERVAL_MS = 5_000;
   const MAX_POLLS = 36; // 3 minutes total
 
@@ -155,9 +157,10 @@ export type QPFOverlay = {
   notes: string;
 };
 
-export async function fetchQPFOverlay(_stormId: string): Promise<QPFOverlay> {
+export async function fetchQPFOverlay(stormId: string): Promise<QPFOverlay> {
   try {
-    const resp = await fetch('/surgedps/api/qpf', { signal: AbortSignal.timeout(30_000) });
+    const url = `/surgedps/api/qpf?storm_id=${encodeURIComponent(stormId)}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!resp.ok) {
       const text = await resp.text().catch(() => resp.statusText);
       return {
@@ -202,10 +205,11 @@ export type CompoundOverlay = {
 };
 
 export async function fetchCompoundOverlay(
-  _stormId: string,
+  stormId: string,
 ): Promise<CompoundOverlay> {
   try {
-    const resp = await fetch('/surgedps/api/compound', {
+    const url = `/surgedps/api/compound?storm_id=${encodeURIComponent(stormId)}`;
+    const resp = await fetch(url, {
       signal: AbortSignal.timeout(20_000),
     });
     if (!resp.ok) {
@@ -265,12 +269,12 @@ declare namespace GeoJSON {
  * @param minCategory Minimum flood category: "action"|"minor"|"moderate"|"major".
  */
 export async function fetchGaugeOverlay(
-  _stormId: string,
+  stormId: string,
   radiusDeg = 4.0,
   minCategory: 'action' | 'minor' | 'moderate' | 'major' = 'action',
 ): Promise<GaugeSummary> {
   try {
-    const url = `/surgedps/api/gauges?radius=${radiusDeg}&category=${minCategory}`;
+    const url = `/surgedps/api/gauges?storm_id=${encodeURIComponent(stormId)}&radius=${radiusDeg}&category=${minCategory}`;
     // 60s timeout — first hit for a storm makes a slow AHPS call, but the
     // response is then cached permanently on the Railway volume, so every
     // subsequent request for that storm returns in <100ms.
