@@ -239,7 +239,11 @@ def _inspect_compound(cells_dir: Path, storm_id: str) -> Dict[str, Any]:
     sdir = cells_dir / storm_id
     if not sdir.is_dir():
         return {"cached": False}
-    mosaic_files = list(sdir.glob("compound_mosaic*"))
+    # _build_storm_compound_mosaic writes to storm_compound.tif (not
+    # compound_mosaic*); the earlier glob never matched and every storm
+    # reported cached=False even after the mosaic was built. List both
+    # patterns so a future filename change doesn't silently regress.
+    mosaic_files = list(sdir.glob("storm_compound.tif")) + list(sdir.glob("compound_mosaic*"))
     cell_compound = list(sdir.glob("cell_*_*_compound.tif"))
     return {
         "cached": len(mosaic_files) > 0,
