@@ -323,15 +323,29 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
         n_buildings = len(buildings_data.get('features', []))
         _update_building_index(storm.storm_id, col, row, n_buildings)
 
-        # 6. Clean up intermediate files to save volume space.
-        #    The API only needs damage.geojson + flood.geojson for cache hits.
-        #    depth.tif and buildings.json can be regenerated on-demand if needed.
-        for tmp in (raster_path, buildings_path):
+        # 6. Compound fallback. The api_server's interactive load_cell path
+        #    generates a real surge+rainfall merge in cell_*_compound.tif;
+        #    warm_cell doesn't produce a rainfall raster (Phase 5 handles
+        #    storm-wide rainfall separately) so the best we can do here is
+        #    write the surge raster as the compound stand-in. /api/compound
+        #    and /api/compound_tile read whichever cell_*_compound.tif files
+        #    exist on disk, so without this every warmed storm has the
+        #    Compound layer toggle render empty.
+        compound_path = os.path.join(sdir, f'cell_{col}_{row}_compound.tif')
+        if not os.path.exists(compound_path) and os.path.exists(raster_path):
             try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
+                import shutil as _sh_cmp
+                _sh_cmp.copy2(raster_path, compound_path)
+            except OSError as _cmp_err:
+                print(f"    [compound] warm-cell fallback copy failed: {_cmp_err}")
+
+        # 7. Keep depth.tif + buildings.json post-warm.  /api/cell_ticks
+        #    needs both files to lazily compute the peril timeseries on
+        #    first interactive request; without them it 404s on every
+        #    warmed cell.  Per-cell overhead is ~1-2 MB which is fine
+        #    against the 140 GB volume.  Previously warm_cell deleted
+        #    them to "save space" — saved nothing meaningful and broke
+        #    the ticks endpoint for every storm warmed cold.
 
         return True
 

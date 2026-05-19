@@ -659,14 +659,38 @@ def load_cell(col: int, row: int, storm: StormEntry, refresh: bool = False) -> d
         # but copying depth.tif → compound.tif gives a surge-only fallback
         # so the layer renders. Real merge rebuilds on interactive refresh.
         _cmp_cached = os.path.join(sdir, f'cell_{col}_{row}_compound.tif')
-        if not os.path.exists(_cmp_cached) and os.path.exists(raster_path):
-            try:
-                import shutil as _sh_cmp
-                _sh_cmp.copy2(raster_path, _cmp_cached)
-                print(f"  [compound] surge-only fallback for cached cell "
-                      f"({col},{row}) of {storm.storm_id}")
-            except OSError as _cmp_err:
-                print(f"  [compound] fallback copy failed (non-fatal): {_cmp_err}")
+        if not os.path.exists(_cmp_cached):
+            # Legacy warm_cell deleted depth.tif post-warm to "save space",
+            # so most cached cells from before the warm_cell fix don't have
+            # it either. Regenerate depth.tif from the storm's parametric
+            # surge model (~0.5-1s per cell), then copy as compound. This
+            # heals every legacy cell on its first interactive load without
+            # the user needing to ?refresh=1.
+            if not os.path.exists(raster_path):
+                try:
+                    lon_min, lat_min, lon_max, lat_max = cell_bbox(col, row, storm)
+                    generate_surge_raster(
+                        lon_min=lon_min, lat_min=lat_min,
+                        lon_max=lon_max, lat_max=lat_max,
+                        output_path=raster_path,
+                        landfall_lon=storm.landfall_lon,
+                        landfall_lat=storm.landfall_lat,
+                        max_wind_kt=storm.max_wind_kt,
+                        min_pressure_mb=storm.min_pressure_mb,
+                        heading_deg=storm.heading_deg,
+                        speed_kt=storm.speed_kt,
+                        storm_rmax_nm=storm.rmax_nm,
+                    )
+                except Exception as _regen_err:
+                    print(f"  [compound] depth.tif regen failed (non-fatal): {_regen_err}")
+            if os.path.exists(raster_path):
+                try:
+                    import shutil as _sh_cmp
+                    _sh_cmp.copy2(raster_path, _cmp_cached)
+                    print(f"  [compound] surge-only fallback for cached cell "
+                          f"({col},{row}) of {storm.storm_id}")
+                except OSError as _cmp_err:
+                    print(f"  [compound] fallback copy failed (non-fatal): {_cmp_err}")
         print(f"  [cache hit] cell ({col},{row}) for {storm.storm_id}")
         _progress.update(step='Complete', step_num=4, storm_id=storm.storm_id)
         return {"buildings": damage_data, "flood": flood_data}
