@@ -1509,6 +1509,22 @@ class CellHandler(BaseHTTPRequestHandler):
             try:
                 year = int(path.split('/')[3])
                 storms = get_storms_for_year(year)
+                # Drop HURDAT2 entries whose (normalized name, year) already
+                # appears in HISTORICAL_STORMS — without this the season
+                # accordion shows both 'al092017' AND 'harvey_2017' for the
+                # same storm, lets users click either, and they get
+                # divergent damage estimates from independent cell caches.
+                from storm_catalog.catalog import (
+                    HISTORICAL_STORMS, _normalize_storm_name,
+                )
+                curated_name_year = {
+                    (_normalize_storm_name(h.name), h.year)
+                    for h in HISTORICAL_STORMS
+                }
+                storms = [
+                    s for s in storms
+                    if (_normalize_storm_name(s.name), s.year) not in curated_name_year
+                ]
                 self._send_raw(200, json.dumps([_inject_dps(s.to_dict()) for s in storms]).encode())
             except (ValueError, IndexError):
                 self._send_error(400, 'Invalid year')

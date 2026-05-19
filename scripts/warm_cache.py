@@ -476,6 +476,65 @@ def main():
         print(f"  Loss sanity checks passed for all reference storms ✓")
     print("=" * 60)
 
+    # ── Phase 1.5: Heal compound on legacy cells ─────────────────────────
+    # The new warm_cell writes cell_*_compound.tif as a surge-only fallback,
+    # but storms warmed by previous deploys (cells already cached → main
+    # loop "all cells cached, skipping") don't get that code path. Walk
+    # every storm's cached cells and ensure each has a compound.tif on
+    # disk; if missing, regenerate depth.tif from the surge model and copy.
+    # Cheap (~0.5s per cell needing heal); zero work for already-healed
+    # cells. Without this, /api/compound stays empty for every storm the
+    # warm queue didn't touch this deploy.
+    print()
+    print("=" * 60)
+    print("Phase 1.5: Healing compound rasters for legacy cells")
+    print("=" * 60)
+    healed = skipped_healed = 0
+    for storm in storms:
+        sdir = _storm_cache_dir(storm)
+        target = _warm_cells_for(storm)
+        for col, row in target:
+            damage_path  = os.path.join(sdir, f'cell_{col}_{row}_damage.geojson')
+            flood_path   = os.path.join(sdir, f'cell_{col}_{row}_flood.geojson')
+            depth_path   = os.path.join(sdir, f'cell_{col}_{row}_depth.tif')
+            compound_path = os.path.join(sdir, f'cell_{col}_{row}_compound.tif')
+            # Only heal cells that actually have data (damage+flood present).
+            if not (os.path.exists(damage_path) and os.path.exists(flood_path)):
+                continue
+            if os.path.exists(compound_path):
+                skipped_healed += 1
+                continue
+            # Regenerate depth.tif if the old warm_cell post-process deleted it.
+            if not os.path.exists(depth_path):
+                try:
+                    origin_lon = storm.grid_origin_lon
+                    origin_lat = storm.grid_origin_lat
+                    lon_min = origin_lon + col * CELL_WIDTH
+                    lat_min = origin_lat + row * CELL_HEIGHT
+                    generate_surge_raster(
+                        lon_min=lon_min, lat_min=lat_min,
+                        lon_max=lon_min + CELL_WIDTH, lat_max=lat_min + CELL_HEIGHT,
+                        output_path=depth_path,
+                        landfall_lon=storm.landfall_lon,
+                        landfall_lat=storm.landfall_lat,
+                        max_wind_kt=storm.max_wind_kt,
+                        min_pressure_mb=storm.min_pressure_mb,
+                        heading_deg=storm.heading_deg,
+                        speed_kt=storm.speed_kt,
+                        storm_rmax_nm=storm.rmax_nm,
+                    )
+                except Exception as e:
+                    print(f"  [heal] {storm.storm_id} ({col},{row}) regen failed: {e}")
+                    continue
+            try:
+                import shutil as _sh
+                _sh.copy2(depth_path, compound_path)
+                healed += 1
+            except OSError as e:
+                print(f"  [heal] {storm.storm_id} ({col},{row}) copy failed: {e}")
+    print(f"  Compound heal summary: {healed} cells healed, {skipped_healed} already had compound.tif")
+    print("=" * 60)
+
     # ── Phase 2: warm historical AHPS gauge caches ───────────────────────
     # One cache file per storm under PERSISTENT_DIR/cache/gauges_historical/.
     # Each fetch hits USGS NWIS IV + NWPS (~30–60s per storm), so we

@@ -501,6 +501,18 @@ def get_storm(storm_id: str) -> Optional[StormEntry]:
 SEASON_MIN_YEAR = 2015
 
 
+def _normalize_storm_name(name: str) -> str:
+    """Strip the storm-type prefix + lowercase so curated 'Hurricane Harvey'
+    and HURDAT2 'Hurricane HARVEY' (or 'HARVEY') collapse to the same key."""
+    n = (name or "").lower().strip()
+    for prefix in ("hurricane ", "tropical storm ", "tropical depression ",
+                   "subtropical storm ", "subtropical depression "):
+        if n.startswith(prefix):
+            n = n[len(prefix):]
+            break
+    return n.strip()
+
+
 def get_sidebar_storms(min_year: int = SEASON_MIN_YEAR) -> List[StormEntry]:
     """Curated HISTORICAL_STORMS + HURDAT2 season storms Cat 1+ from min_year.
 
@@ -509,19 +521,31 @@ def get_sidebar_storms(min_year: int = SEASON_MIN_YEAR) -> List[StormEntry]:
     iterate this so new season storms automatically get coverage instead of
     silently falling through to on-demand fetches.
 
-    De-duplicated by storm_id, curated entries listed first.
+    De-duplicated by:
+      • storm_id  (exact match — covers the same source twice)
+      • (normalized name, year)  (cross-source match — curated 'harvey_2017'
+        and HURDAT2 'al092017' both have name=Harvey, year=2017, so the ATCF
+        entry is dropped in favor of the curated metadata.)
+
+    The pre-2024 sidebar surfaced both copies of every curated storm. Each
+    pair ran independent warmups (1-1.5 GB combined for Milton/Ian), kept
+    independent gauge caches that sometimes diverged by 50-180 records, and
+    let the user click either entry and get different damage estimates.
     """
     # Late import: hurdat2_parser depends on StormEntry from this module, so
     # importing at top-level would be circular.
     from .hurdat2_parser import get_seasons, get_storms_for_year
 
-    seen: set[str] = set()
+    seen_ids: set[str] = set()
+    seen_name_year: set[tuple[str, int]] = set()
     storms: List[StormEntry] = []
 
     for s in HISTORICAL_STORMS:
-        if s.storm_id not in seen:
-            seen.add(s.storm_id)
-            storms.append(s)
+        if s.storm_id in seen_ids:
+            continue
+        seen_ids.add(s.storm_id)
+        seen_name_year.add((_normalize_storm_name(s.name), s.year))
+        storms.append(s)
 
     try:
         seasons = [s for s in get_seasons() if s["year"] >= min_year]
@@ -531,9 +555,18 @@ def get_sidebar_storms(min_year: int = SEASON_MIN_YEAR) -> List[StormEntry]:
                 # produce minimal surge and bloat the warm queue. Curated TS
                 # entries (Chantal etc.) are exempt because they're already
                 # added above.
-                if s.storm_id not in seen and s.category >= 1:
-                    seen.add(s.storm_id)
-                    storms.append(s)
+                if s.category < 1:
+                    continue
+                if s.storm_id in seen_ids:
+                    continue
+                # Cross-source dedupe: curated entry for the same storm wins.
+                # Drops al092017 when harvey_2017 is in HISTORICAL_STORMS,
+                # al142024 when milton_2024 is, etc.
+                if (_normalize_storm_name(s.name), s.year) in seen_name_year:
+                    continue
+                seen_ids.add(s.storm_id)
+                seen_name_year.add((_normalize_storm_name(s.name), s.year))
+                storms.append(s)
     except Exception as e:
         logger.warning(f"get_sidebar_storms: HURDAT2 season load failed: {e}")
 
