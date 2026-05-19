@@ -4238,9 +4238,64 @@ ${fieldFlag ? `
       }
     }
 
-    return Object.values(bins)
+    // Compute the modal area name for each candidate bin first so we can
+    // dedupe afterwards. Bin size is ~500 m, so a city like Jean Lafitte
+    // spans several bins; without this step "#1 Jean Lafitte / #2 Jean
+    // Lafitte / #3 Jean Lafitte" would dominate the top-5 list.
+    type BinWithMeta = (typeof bins)[string] & { areaName: string };
+    const annotated: BinWithMeta[] = Object.values(bins)
       .filter(b => b.count >= 5 && b.loss > 0)
-      .sort((a, b) => b.loss - a.loss)
+      .map(b => {
+        let modalKey = '';
+        let modalCount = 0;
+        for (const [ck, c] of Object.entries(b.cityKeyCounts)) {
+          if (c > modalCount) { modalCount = c; modalKey = ck; }
+        }
+        const areaName = modalKey ? (cityNameByKey[modalKey] || '') : '';
+        return Object.assign(b, { areaName });
+      })
+      .sort((a, b) => b.loss - a.loss);
+
+    // Merge sibling bins that share an area name into a single row. The
+    // highest-loss member's centroid wins (so flyTo points to the worst
+    // spot inside the city). Unnamed bins (areaName==='') stay distinct —
+    // we can't tell them apart without a label.
+    const merged: BinWithMeta[] = [];
+    // Plain object instead of `new Map(...)` — the module-scoped `Map`
+    // identifier resolves to MapLibre's Map component (imported above),
+    // which TS can't use as a constructor for a key/value structure.
+    const indexByName: Record<string, number> = {};
+    for (const b of annotated) {
+      const dedupeKey = b.areaName || `__unnamed_${b.lat.toFixed(3)}_${b.lon.toFixed(3)}`;
+      const existingIdx = b.areaName ? indexByName[b.areaName] : undefined;
+      if (existingIdx !== undefined) {
+        const dst = merged[existingIdx];
+        dst.loss        += b.loss;
+        dst.count       += b.count;
+        dst.windSum     += b.windSum;
+        dst.waterSum    += b.waterSum;
+        dst.surgeSum    += b.surgeSum;
+        dst.rainSum     += b.rainSum;
+        dst.windWeight  += b.windWeight;
+        dst.rainWeight  += b.rainWeight;
+        if (b.maxDepthFt > dst.maxDepthFt) dst.maxDepthFt = b.maxDepthFt;
+        dst.severity.severe   += b.severity.severe;
+        dst.severity.major    += b.severity.major;
+        dst.severity.moderate += b.severity.moderate;
+        dst.severity.minor    += b.severity.minor;
+        dst.severity.none     += b.severity.none;
+        // lat/lon stays at the highest-loss member (the first one merged),
+        // since `annotated` is sorted by loss descending.
+      } else {
+        if (b.areaName) indexByName[b.areaName] = merged.length;
+        merged.push(b);
+        // dedupeKey unused for named entries — kept for parity if we later
+        // dedupe unnamed bins by coordinate proximity.
+        void dedupeKey;
+      }
+    }
+
+    return merged
       .slice(0, 5)
       .map((b, i) => {
         const windPct  = b.windWeight > 0 ? Math.round(b.windSum  / b.windWeight) : 50;
@@ -4262,16 +4317,6 @@ ${fieldFlag ? `
         }
         const recommend = recommendAdjusters(b.severity);
         const routing   = routingHint(windPct, waterPct);
-        // Modal city key wins — ties broken by insertion order, which is
-        // deterministic enough since the bin is ~500 m wide and a single
-        // place's buildings dominate. Unknown → empty string, treated as
-        // "no city name available" by the JSX (which then hides the line).
-        let modalKey = '';
-        let modalCount = 0;
-        for (const [ck, c] of Object.entries(b.cityKeyCounts)) {
-          if (c > modalCount) { modalCount = c; modalKey = ck; }
-        }
-        const areaName = modalKey ? (cityNameByKey[modalKey] || '') : '';
         return {
           rank: i + 1,
           loss: b.loss,
@@ -4284,7 +4329,7 @@ ${fieldFlag ? `
           waterPct,
           surgePct,
           rainPct,
-          areaName,
+          areaName: b.areaName,
           severity: b.severity,
           recommend,
           routing,
@@ -5431,7 +5476,7 @@ ${fieldFlag ? `
           <div className="flex bg-white/95 backdrop-blur shadow-lg rounded-lg overflow-hidden border border-gray-200">
             <input
               type="text"
-              placeholder={activeStorm ? "Search address, e.g. 412 N Austin St, Rockport TX" : "Load a storm to search addresses"}
+              placeholder={activeStorm ? "Search address or city" : "Load a storm to search"}
               value={addressQuery}
               onChange={e => { setAddressQuery(e.target.value); setAddressError(''); }}
               onKeyDown={e => e.key === 'Enter' && activeStorm && handleAddressSearch()}
@@ -5710,10 +5755,10 @@ ${fieldFlag ? `
                   );
                 })}
               </div>
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className="lg:hidden mt-3 w-full bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-              >☰ Browse All Storms</button>
+              {/* "Browse All Storms" button removed — it duplicated the
+                  hamburger toggle at top-left on mobile, and was hidden
+                  via lg:hidden on desktop where the sidebar is always
+                  visible. The sidebar itself is the storm browser. */}
               <p className="text-slate-600 text-[10px] mt-4">DPS = Damage Potential Score · higher score = more destructive surge</p>
             </div>
           </div>
