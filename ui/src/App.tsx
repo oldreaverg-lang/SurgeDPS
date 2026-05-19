@@ -3972,23 +3972,13 @@ ${fieldFlag ? `
     }
   }, [simMarker, activeStorm]);
 
-  // ── Restore shared-link params on mount ──
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const stormId = params.get('storm');
-    if (stormId) {
-      activateStorm(stormId).then(() => {
-        const lat = parseFloat(params.get('lat') || '');
-        const lng = parseFloat(params.get('lng') || '');
-        const z = parseFloat(params.get('z') || '');
-        if (!isNaN(lat) && !isNaN(lng) && mapRef.current) {
-          setTimeout(() => mapRef.current?.flyTo({ center: [lng, lat], zoom: isNaN(z) ? 12 : z, duration: 1500 }), 3000);
-        }
-        // Clean URL only after successful activation
-        window.history.replaceState({}, '', window.location.pathname);
-      });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // ── Welcome card always wins on first paint ──
+  // Previously ?storm=X auto-activated the storm and bypassed the welcome
+  // card. During a live event that produced a "site loads straight into the
+  // storm" UX with no chance to surface the Active Storms list. Now the
+  // welcome card always shows on mount; live storms are picked from the
+  // sidebar. Shareable deep links can come back later as a "pre-highlight
+  // in sidebar without activating" pattern if needed.
 
   // Grid GeoJSON — includes "ready" status for pre-computed cells from manifest
   const gridGeoJson = useMemo(() => {

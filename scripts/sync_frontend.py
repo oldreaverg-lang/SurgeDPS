@@ -98,7 +98,7 @@ def sync_assets(assets: dict[str, Path], dry_run: bool) -> None:
 
         # Remove old hashed JS/CSS (keep any favicon or static assets)
         for old in DEST_ASSETS.iterdir():
-            if old.suffix in (".js", ".css") and re.search(r"-[A-Za-z0-9_]{8,}\.(js|css)$", old.name):
+            if old.suffix in (".js", ".css") and re.search(r"-[A-Za-z0-9_-]{8,}\.(js|css)$", old.name):
                 print(f"  removing  {old.name}")
                 old.unlink()
 
@@ -128,7 +128,7 @@ def update_index_html(assets: dict[str, Path], dry_run: bool) -> None:
     if js_main:
         # Replace any existing index-HASH.js references (preload + script src)
         html = re.sub(
-            r'index-[A-Za-z0-9_]+\.js',
+            r'index-[A-Za-z0-9_-]+\.js',
             js_main.name,
             html,
         )
@@ -136,7 +136,7 @@ def update_index_html(assets: dict[str, Path], dry_run: bool) -> None:
     if css_main:
         # Replace any existing index-HASH.css references (preload + link href)
         html = re.sub(
-            r'index-[A-Za-z0-9_]+\.css',
+            r'index-[A-Za-z0-9_-]+\.css',
             css_main.name,
             html,
         )
@@ -146,7 +146,7 @@ def update_index_html(assets: dict[str, Path], dry_run: bool) -> None:
         if role.startswith("js_chunk_"):
             old_stem = re.escape(path.stem.rsplit("-", 1)[0])  # strip hash
             html = re.sub(
-                rf'{old_stem}-[A-Za-z0-9_]+\.js',
+                rf'{old_stem}-[A-Za-z0-9_-]+\.js',
                 path.name,
                 html,
             )
