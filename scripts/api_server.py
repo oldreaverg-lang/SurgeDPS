@@ -648,6 +648,25 @@ def load_cell(col: int, row: int, storm: StormEntry, refresh: bool = False) -> d
         _n_stamped = _stamp_places_if_needed(damage_data, damage_path)
         if _n_stamped:
             print(f"  [place_lookup] stamped {_n_stamped} buildings in cached cell ({col},{row})")
+        # Lazy compound fallback. Cells warmed before the surge+rainfall
+        # compound pipeline shipped — or where the merge silently failed
+        # post-warmup — lack cell_*_compound.tif. /api/compound's mosaic
+        # walker then reports cell_count=0 and the Compound layer toggle
+        # does nothing for every storm.
+        #
+        # Rebuilding the true surge+rainfall merge from a cached cell isn't
+        # possible (rainfall.tif is deleted post-warmup to save volume),
+        # but copying depth.tif → compound.tif gives a surge-only fallback
+        # so the layer renders. Real merge rebuilds on interactive refresh.
+        _cmp_cached = os.path.join(sdir, f'cell_{col}_{row}_compound.tif')
+        if not os.path.exists(_cmp_cached) and os.path.exists(raster_path):
+            try:
+                import shutil as _sh_cmp
+                _sh_cmp.copy2(raster_path, _cmp_cached)
+                print(f"  [compound] surge-only fallback for cached cell "
+                      f"({col},{row}) of {storm.storm_id}")
+            except OSError as _cmp_err:
+                print(f"  [compound] fallback copy failed (non-fatal): {_cmp_err}")
         print(f"  [cache hit] cell ({col},{row}) for {storm.storm_id}")
         _progress.update(step='Complete', step_num=4, storm_id=storm.storm_id)
         return {"buildings": damage_data, "flood": flood_data}
@@ -915,7 +934,14 @@ def load_cell(col: int, row: int, storm: StormEntry, refresh: bool = False) -> d
                         except OSError:
                             pass
         except Exception as _comp_err:
-            print(f"  [compound] Merge failed (non-fatal): {_comp_err}")
+            # Full traceback instead of just the message — the prior "Merge
+            # failed (non-fatal): {err}" log obscured the actual cause well
+            # enough that the compound mosaic ended up empty for every
+            # warmed storm. If the merge is going to silently fail we want
+            # to see exactly why.
+            import traceback as _tb_cmp
+            print(f"  [compound] Merge failed (non-fatal): {_comp_err.__class__.__name__}: {_comp_err}")
+            _tb_cmp.print_exc()
 
     # 3. Flood polygons — use compound raster when available, fall back to surge
     _progress.update(step='Building flood map', step_num=3)

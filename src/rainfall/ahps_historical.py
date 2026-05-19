@@ -170,9 +170,18 @@ def fetch_historical_gauges(
             has_error_field = "_fetch_error" in cached
             is_error = cached.get("_fetch_error", False)
             is_legacy_empty = not has_error_field and cached.get("gauge_count", -1) == 0
-            if not is_error and not is_legacy_empty:
+            # Pre-NWPS-v2 caches classified every gauge to 'none' because
+            # the parser missed flood.categories.{level}.stage. Treat
+            # missing or stale schema versions as needing a re-classify.
+            is_pre_v2 = cached.get("_schema_version", 0) < 2
+            if not is_error and not is_legacy_empty and not is_pre_v2:
                 return cached
-            reason = "_fetch_error flag set" if is_error else "legacy 0-gauge cache (pre-siteType=ST fix)"
+            if is_pre_v2:
+                reason = "pre-v2 NWPS threshold schema (every gauge classified 'none')"
+            elif is_error:
+                reason = "_fetch_error flag set"
+            else:
+                reason = "legacy 0-gauge cache (pre-siteType=ST fix)"
             logger.info("historical gauges cache for %s needs refresh (%s) — refetching",
                         storm_id, reason)
         except Exception as e:
@@ -301,6 +310,12 @@ def fetch_historical_gauges(
         "window_days": window_days,
         "_cached_at": datetime.now(timezone.utc).isoformat(),
         "_fetch_error": fetch_error,
+        # Bumped when the NWPS threshold parser changed (May 2026). Old
+        # caches were classified against an empty thresholds dict and have
+        # 'flood_category':'none' on every feature regardless of stage.
+        # The cache-read guard in fetch_historical_gauges treats anything
+        # without this stamp at >=v2 as stale and re-builds.
+        "_schema_version": 2,
     }
 
     # 3) Atomic write to volume
@@ -524,7 +539,7 @@ def _fetch_nwis_peak_period(
 
 def _load_thresholds_cache(persistent_dir: str) -> Dict[str, Dict[str, float]]:
     path = os.path.join(persistent_dir, "cache", "gauges_historical",
-                        "_nwps_thresholds.json")
+                        "_nwps_thresholds_v2.json")
     if not os.path.exists(path):
         return {}
     try:
@@ -536,7 +551,7 @@ def _load_thresholds_cache(persistent_dir: str) -> Dict[str, Dict[str, float]]:
 
 def _save_thresholds_cache(persistent_dir: str, cache: Dict[str, Dict[str, float]]):
     path = os.path.join(persistent_dir, "cache", "gauges_historical",
-                        "_nwps_thresholds.json")
+                        "_nwps_thresholds_v2.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
     try:
@@ -567,13 +582,32 @@ def _get_site_thresholds(
     url = f"{_NWPS_BASE}/gauges/{urllib.parse.quote(site_no)}"
     data = _get_json(url)
     if data and isinstance(data, dict):
-        flood = data.get("flood", data.get("thresholds", {})) or {}
-        for k in ("action", "minor", "moderate", "major", "record", "bankfull"):
-            v = flood.get(k)
-            try:
-                thr[k] = float(v) if v is not None and float(v) > -900 else None
-            except (TypeError, ValueError):
-                thr[k] = None
+        # NWPS v1 schema (as of 2026-05): flood thresholds live under
+        # flood.categories.{level}.stage rather than flood.{level}. The
+        # previous parser looked for the flat shape, hit None for every
+        # field, cached an empty dict per site, and every gauge in the
+        # site classified to 'none' regardless of how high it crested.
+        # Bumping the cache filename to v2 (above) invalidates the
+        # empty-dict-filled v1 cache so all sites get re-resolved.
+        flood = data.get("flood") or data.get("thresholds") or {}
+        categories = flood.get("categories") if isinstance(flood, dict) else None
+        if isinstance(categories, dict):
+            for k in ("action", "minor", "moderate", "major"):
+                cat_obj = categories.get(k)
+                v = cat_obj.get("stage") if isinstance(cat_obj, dict) else None
+                try:
+                    thr[k] = float(v) if v is not None and float(v) > -900 else None
+                except (TypeError, ValueError):
+                    thr[k] = None
+        else:
+            # Legacy flat shape (kept defensively in case NWPS reverts or
+            # any consumer hits a non-current endpoint variant).
+            for k in ("action", "minor", "moderate", "major"):
+                v = flood.get(k) if isinstance(flood, dict) else None
+                try:
+                    thr[k] = float(v) if v is not None and float(v) > -900 else None
+                except (TypeError, ValueError):
+                    thr[k] = None
 
     # Persist under the in-process lock — even a short NWPS outage where this
     # returns {} should be cached as "tried" so we don't re-hit per render.

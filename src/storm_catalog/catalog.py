@@ -275,6 +275,39 @@ HISTORICAL_STORMS: List[StormEntry] = [
         rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
         landfall_date="2024-10-09",
     ),
+    StormEntry(
+        storm_id="francine_2024", name="Hurricane Francine", year=2024,
+        category=2, status="historical",
+        landfall_lon=-91.3, landfall_lat=29.3,
+        max_wind_kt=90, min_pressure_mb=972,
+        heading_deg=20, speed_kt=14,
+        basin="AL", advisory="best-track",
+        dps_score=45.0,   # estimated; pending StormDPS bundle refresh
+        rmax_nm=20.0,    # NHC TCR: moderate Cat 2 at Morgan City, LA
+        landfall_date="2024-09-11",
+    ),
+    StormEntry(
+        storm_id="beryl_2024", name="Hurricane Beryl", year=2024,
+        category=1, status="historical",
+        landfall_lon=-96.0, landfall_lat=28.6,
+        max_wind_kt=70, min_pressure_mb=979,
+        heading_deg=350, speed_kt=12,
+        basin="AL", advisory="best-track",
+        dps_score=55.0,   # estimated; widespread Houston flooding raises DPS above pure Cat-1
+        rmax_nm=30.0,    # NHC TCR: weakened from Cat 5 (Caribbean) to Cat 1 at Matagorda
+        landfall_date="2024-07-08",
+    ),
+    StormEntry(
+        storm_id="debby_2024", name="Hurricane Debby", year=2024,
+        category=1, status="historical",
+        landfall_lon=-83.5, landfall_lat=29.7,
+        max_wind_kt=70, min_pressure_mb=979,
+        heading_deg=355, speed_kt=10,
+        basin="AL", advisory="best-track",
+        dps_score=50.0,   # estimated; freshwater flooding-dominant event
+        rmax_nm=25.0,    # NHC TCR: moderate Cat 1 near Steinhatchee, FL
+        landfall_date="2024-08-05",
+    ),
     # ── Tropical Storm ──────────────────────────────────
     # Curated for rainfall coverage; surge is minimal at TS strength but the
     # rainfall and gauge layers are the primary value-add for these storms.

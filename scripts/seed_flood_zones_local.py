@@ -37,7 +37,7 @@ from typing import Iterable
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 
-from storm_catalog.catalog import HISTORICAL_STORMS  # noqa: E402
+from storm_catalog.catalog import HISTORICAL_STORMS, get_sidebar_storms  # noqa: E402
 
 # Must match scripts/warm_cache.py and src/validation/debug_inventory.py
 # so cache keys + expected-count math align.
@@ -216,7 +216,13 @@ def main() -> int:
         )
         return 2
 
-    storms = [s for s in HISTORICAL_STORMS if (not args.storm or s.storm_id == args.storm)]
+    # Match the warm_cache.py + debug_inventory.py iteration: curated
+    # storms PLUS HURDAT2 season-accordion Cat 1+ from 2015 onward. The old
+    # behaviour iterated HISTORICAL_STORMS only, leaving every season-only
+    # storm (Beryl 2024, Debby 2024, Francine 2024, etc.) with 0 FEMA tiles
+    # while the curated copies were partly seeded.
+    all_storms = get_sidebar_storms()
+    storms = [s for s in all_storms if (not args.storm or s.storm_id == args.storm)]
     if not storms:
         print(f"ERROR: no storm matched --storm={args.storm}")
         return 2
