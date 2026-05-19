@@ -23,6 +23,7 @@ sys.path.append(os.path.join(BASE_DIR, 'src'))
 
 from storm_catalog.catalog import (
     StormEntry, CELL_WIDTH, CELL_HEIGHT, HISTORICAL_STORMS,
+    SEASON_MIN_YEAR, get_sidebar_storms,
 )
 from storm_catalog.hurdat2_parser import (
     get_seasons, get_storms_for_year,
@@ -35,9 +36,6 @@ from damage_model.depth_damage import estimate_damage_from_raster
 
 from persistent_paths import CELLS_DIR, PERSISTENT_DATA_DIR as PERSISTENT_DIR
 CACHE_DIR = str(CELLS_DIR)  # backward compat — some functions use os.path.join
-
-# Season accordion cutoff — must match api_server.py
-SEASON_MIN_YEAR = 2015
 
 # ── Loss sanity reference ──────────────────────────────────────────────────────
 # Reported total economic losses (USD billions) from authoritative post-event
@@ -353,36 +351,8 @@ def warm_cell(storm: StormEntry, col: int, row: int) -> bool:
 
 
 def collect_sidebar_storms() -> list[StormEntry]:
-    """
-    Collect every storm that appears in the sidebar accordion:
-      - Historic Storms (curated)
-      - Season-by-season (2015+)
-    De-duplicates by storm_id.
-    """
-    seen: set[str] = set()
-    storms: list[StormEntry] = []
-
-    # Curated historic storms
-    for s in HISTORICAL_STORMS:
-        if s.storm_id not in seen:
-            seen.add(s.storm_id)
-            storms.append(s)
-
-    # Season accordion (2015+) — only pre-warm Category 1+ hurricanes.
-    # Tropical storms produce minimal surge and aren't worth the volume space.
-    try:
-        seasons = [s for s in get_seasons() if s['year'] >= SEASON_MIN_YEAR]
-        for season in seasons:
-            year = season['year']
-            year_storms = get_storms_for_year(year)
-            for s in year_storms:
-                if s.storm_id not in seen and s.category >= 1:
-                    seen.add(s.storm_id)
-                    storms.append(s)
-    except Exception as e:
-        print(f"WARNING: Could not load HURDAT2 seasons: {e}")
-
-    return storms
+    """Backward-compat shim — delegates to catalog.get_sidebar_storms."""
+    return get_sidebar_storms()
 
 
 def main():
@@ -508,8 +478,15 @@ def main():
     print("=" * 60)
     print("Phase 2: Warming AHPS historical gauge archive")
     print("=" * 60)
+    # Phases 2/3/5 cover every storm that can be picked from the sidebar
+    # (curated HISTORICAL_STORMS + season-accordion Cat 1+ from 2015+).  This
+    # used to be HISTORICAL_STORMS only, which left every season storm with
+    # cells warmed but no gauges/FEMA/rainfall — first user click ate the
+    # full cold-fetch latency.
+    _phase_storms = get_sidebar_storms()
+    print(f"  ({len(_phase_storms)} storms: curated + season Cat 1+ from {SEASON_MIN_YEAR}+)")
     g_ok = g_skip = g_fail = 0
-    for storm in HISTORICAL_STORMS:
+    for storm in _phase_storms:
         if not getattr(storm, 'landfall_date', None):
             continue
         if cache_exists(storm.storm_id, str(PERSISTENT_DIR)):
@@ -605,11 +582,11 @@ def main():
         # Skip the inner loop entirely; preserve the summary line shape.
         print("  FEMA tile summary: 0 newly fetched · 0 already cached · 0 failed (PHASE SKIPPED)")
         print("=" * 60)
-        # Jump past Phase 3's tile loop by replacing HISTORICAL_STORMS local
-        # alias with an empty iterable for the for-loop below.
+        # Jump past Phase 3's tile loop by replacing the iteration target with
+        # an empty list for the for-loop below.
         _phase3_iter = []
     else:
-        _phase3_iter = HISTORICAL_STORMS
+        _phase3_iter = _phase_storms
 
     for storm in _phase3_iter:
         lat0 = storm.landfall_lat
@@ -862,7 +839,7 @@ def main():
         from datetime import date as _date_cmp
         _IEM_EARLIEST_LANDFALL = _date_cmp(2015, 7, 1)
 
-        for storm in HISTORICAL_STORMS:
+        for storm in _phase_storms:
             sid = storm.storm_id
             landfall_date = getattr(storm, 'landfall_date', None)
             if not landfall_date:

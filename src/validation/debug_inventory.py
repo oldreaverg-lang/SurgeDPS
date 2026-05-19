@@ -276,7 +276,7 @@ def build_inventory() -> Dict[str, Any]:
     Result is JSON-serializable; safe to ship over the wire to the dashboard.
     """
     # Local imports so this module is cheap to import (no catalog scan on load)
-    from storm_catalog.catalog import HISTORICAL_STORMS, fetch_active_storms
+    from storm_catalog.catalog import get_sidebar_storms, fetch_active_storms
     from persistent_paths import (
         CELLS_DIR, MRMS_DIR, QPF_DIR, PERSISTENT_DATA_DIR, MONITOR_STATE_FILE,
     )
@@ -286,7 +286,10 @@ def build_inventory() -> Dict[str, Any]:
     storms_out: List[Dict[str, Any]] = []
     counts = {"fully_warmed": 0, "partial": 0, "cold": 0, "parametric_fallback": 0}
 
-    for storm in HISTORICAL_STORMS:
+    # Iterate the same union the warm-cache phases use so season storms aren't
+    # invisible to the inventory dashboard. Previously only HISTORICAL_STORMS
+    # showed up, hiding ~5 GB of season-storm cell data.
+    for storm in get_sidebar_storms():
         artifacts = {
             "cells": _inspect_cells(CELLS_DIR, storm.storm_id),
             "mrms": _inspect_mrms(MRMS_DIR, storm),

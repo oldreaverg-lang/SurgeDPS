@@ -275,6 +275,20 @@ HISTORICAL_STORMS: List[StormEntry] = [
         rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
         landfall_date="2024-10-09",
     ),
+    # ── Tropical Storm ──────────────────────────────────
+    # Curated for rainfall coverage; surge is minimal at TS strength but the
+    # rainfall and gauge layers are the primary value-add for these storms.
+    StormEntry(
+        storm_id="chantal_2025", name="Tropical Storm Chantal", year=2025,
+        category=0, status="historical",
+        landfall_lon=-79.0, landfall_lat=33.6,
+        max_wind_kt=45, min_pressure_mb=1003,
+        heading_deg=343, speed_kt=13,
+        basin="AL", advisory="best-track",
+        dps_score=0.0,   # pending StormDPS bundle refresh for 2025 season
+        rmax_nm=0.0,    # NHC TCR pending; Knaff-Zehr fallback applies
+        landfall_date="2025-07-06",   # L record at 0800Z near Pawleys Island, SC
+    ),
 ]
 
 # Index by storm_id for fast lookup
@@ -445,3 +459,49 @@ def get_storm(storm_id: str) -> Optional[StormEntry]:
             return s
 
     return None
+
+
+# Earliest season-year for the season accordion + warm-cache season pass.
+# MRMS QPE archive coverage starts mid-2015, so 2015 is the floor for any
+# rainfall-aware warming. Curated pre-2015 storms (Katrina/Ike/Sandy) still
+# work because they're hard-coded in HISTORICAL_STORMS regardless of this.
+SEASON_MIN_YEAR = 2015
+
+
+def get_sidebar_storms(min_year: int = SEASON_MIN_YEAR) -> List[StormEntry]:
+    """Curated HISTORICAL_STORMS + HURDAT2 season storms Cat 1+ from min_year.
+
+    This is the canonical "every storm the user can pick" set. Pre-warm phases
+    (NWIS gauges, FEMA NFHL, MRMS rainfall) and the inventory dashboard all
+    iterate this so new season storms automatically get coverage instead of
+    silently falling through to on-demand fetches.
+
+    De-duplicated by storm_id, curated entries listed first.
+    """
+    # Late import: hurdat2_parser depends on StormEntry from this module, so
+    # importing at top-level would be circular.
+    from .hurdat2_parser import get_seasons, get_storms_for_year
+
+    seen: set[str] = set()
+    storms: List[StormEntry] = []
+
+    for s in HISTORICAL_STORMS:
+        if s.storm_id not in seen:
+            seen.add(s.storm_id)
+            storms.append(s)
+
+    try:
+        seasons = [s for s in get_seasons() if s["year"] >= min_year]
+        for season in seasons:
+            for s in get_storms_for_year(season["year"]):
+                # Tropical-storm-strength season entries are skipped — they
+                # produce minimal surge and bloat the warm queue. Curated TS
+                # entries (Chantal etc.) are exempt because they're already
+                # added above.
+                if s.storm_id not in seen and s.category >= 1:
+                    seen.add(s.storm_id)
+                    storms.append(s)
+    except Exception as e:
+        logger.warning(f"get_sidebar_storms: HURDAT2 season load failed: {e}")
+
+    return storms

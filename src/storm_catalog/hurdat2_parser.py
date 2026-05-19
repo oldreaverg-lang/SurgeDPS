@@ -37,6 +37,29 @@ def _parse_latlon(s: str) -> float:
 from common.saffir_simpson import wind_to_category as _saffir_simpson  # noqa: E402
 
 
+def _is_us_mainland_landfall(lat: float, lon: float) -> bool:
+    """Return True if (lat, lon) plausibly sits on the US mainland coast.
+
+    The old rule was a rectangular CONUS bbox of 24-50N, -100 to -65W.  That
+    box reaches across the entire Bahamas chain (lat 22-27, lon -80 to -72.5),
+    which caused storms like Imelda 2025 (Abaco) and Melissa 2025 (central
+    Bahamas) to be tagged as US landfalls and surfaced in the season accordion
+    with no useful damage data.
+
+    At latitudes south of 31N the US east coast doesn't extend east of -80W,
+    so any 'landfall' fix east of that line is offshore or in the Bahamas.
+    North of 31N (Outer Banks, NJ, etc.) the coastline does swing east, so
+    the original eastward bbox edge is kept.
+    """
+    if not (24.0 <= lat <= 50.0):
+        return False
+    if not (-100.0 <= lon <= -65.0):
+        return False
+    if lat < 31.0 and lon > -80.0:
+        return False
+    return True
+
+
 def parse_hurdat2(filepath: str) -> List[StormEntry]:
     """
     Parse the full HURDAT2 file into a list of StormEntry objects.
@@ -131,10 +154,10 @@ def parse_hurdat2(filepath: str) -> List[StormEntry]:
         # ── Determine the key point: prefer US landfall, then any landfall, then peak ──
         peak_point = max(track_points, key=lambda p: p['wind'])
 
-        # Filter for US-mainland landfalls (rough CONUS bbox)
+        # Filter for US-mainland landfalls (excludes Bahamas; see helper)
         us_landfalls = [
             p for p in landfall_points
-            if 24.0 <= p['lat'] <= 50.0 and -100.0 <= p['lon'] <= -65.0
+            if _is_us_mainland_landfall(p['lat'], p['lon'])
         ]
 
         if us_landfalls:
