@@ -515,7 +515,7 @@ export function DashboardPanel({
                       ) : (
                         h.recommend.adjusters > 0 && (
                           <div className="mt-0.5 ml-6 text-[10px] text-slate-600">
-                            <span className="font-semibold">🚗 {h.recommend.label}</span>
+                            <span className="font-semibold">📋 {h.recommend.label}</span>
                             {(h.severity.severe + h.severity.major) > 0 && (
                               <span className="text-slate-400"> · {h.severity.severe + h.severity.major} uninhabitable</span>
                             )}

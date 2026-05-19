@@ -182,7 +182,7 @@ export function CatDeploymentSummary({
             })()
           ) : (
             <div className="text-[10px] text-slate-700 mt-0.5">
-              🚗 <span className="font-semibold">{top.recommend.label}</span>
+              📋 <span className="font-semibold">{top.recommend.label}</span>
               <span className={`ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${top.routing.classes}`}
                 title={top.routing.description}>
                 {top.routing.short}

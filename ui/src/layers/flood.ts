@@ -30,8 +30,16 @@ export const floodLayerStyle = {
     ],
     'fill-opacity': [
       'interpolate', ['linear'], ['zoom'],
+      // At state-wide zoom (6-8) the impact polygon previously blanketed
+      // the entire visible map in saturated red, hiding the geography
+      // behind it. Fading the raster down to 0.18 at zoom 6 lets users
+      // see coastline and parish lines while the storm footprint still
+      // reads clearly. Mid zooms (10-13) stay the same — that's where
+      // analysts spend most of their time.
+      6,  0.18,
+      8,  0.28,
       10, 0.35,
-      13, 0.3,
+      13, 0.30,
       15, 0.15,
       17, 0.08,
     ],

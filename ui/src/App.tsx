@@ -1063,7 +1063,7 @@ function CatDeploymentSummary({
             })()
           ) : (
             <div className="text-[10px] text-slate-700 mt-0.5">
-              🚗 <span className="font-semibold">{top.recommend.label}</span>
+              📋 <span className="font-semibold">{top.recommend.label}</span>
               <span className={`ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-sm ${top.routing.classes}`}
                 title={top.routing.description}>
                 {top.routing.short}
@@ -2381,7 +2381,7 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
                   ) : (
                     h.recommend.adjusters > 0 && (
                       <div className="mt-0.5 ml-6 text-[10px] text-slate-600">
-                        <span className="font-semibold">🚗 {h.recommend.label}</span>
+                        <span className="font-semibold">📋 {h.recommend.label}</span>
                         {(h.severity.severe + h.severity.major) > 0 && (
                           <span className="text-slate-400"> · {h.severity.severe + h.severity.major} uninhabitable</span>
                         )}
@@ -4872,7 +4872,7 @@ ${fieldFlag ? `
                   ],
                   'text-size': 11,
                 }}
-                paint={{ 'text-color': '#fff', 'text-halo-color': 'rgba(0,0,0,0.8)', 'text-halo-width': 1.5 }} />
+                paint={{ 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 2 }} />
             </Source>
           )}
 
@@ -4952,6 +4952,9 @@ ${fieldFlag ? `
                 }} />
               <Layer id="county-aggregate-label" type="symbol"
                 maxzoom={8}
+                /* Used to render with thin halos that lost to CARTO place
+                   labels at the same zoom; paint below uses a thick black
+                   halo to dominate. */
                 layout={mapView === 'damage' ? {
                   'text-field': ['get', 'label'],
                   'text-size': 11,
@@ -4970,8 +4973,8 @@ ${fieldFlag ? `
                 }}
                 paint={{
                   'text-color': '#fff',
-                  'text-halo-color': 'rgba(0,0,0,0.85)',
-                  'text-halo-width': 1.5,
+                  'text-halo-color': '#000',
+                  'text-halo-width': 2.5,
                 }} />
             </Source>
           )}
@@ -5051,8 +5054,12 @@ ${fieldFlag ? `
                 }}
                 paint={{
                   'text-color': '#fff',
-                  'text-halo-color': 'rgba(0,0,0,0.85)',
-                  'text-halo-width': 1.5,
+                  // Thick fully-opaque halo so the bubble label wins visually
+                  // against the underlying CARTO place labels ("Empire",
+                  // "Buras", etc.) — those previously bled through next to
+                  // our bubble at zooms 10-12.
+                  'text-halo-color': '#000',
+                  'text-halo-width': 2.5,
                 }} />
             </Source>
           )}
@@ -6374,7 +6381,13 @@ ${fieldFlag ? `
                   <button
                     key={key}
                     onClick={() => setBasemap(key)}
-                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${basemap === key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+                    // Active state uses saturated indigo + bold + inset shadow so
+                    // the selection is unambiguous even when the translucent
+                    // panel sits over a busy / red surge raster.
+                    className={`px-3 py-1.5 text-xs transition-colors ${basemap === key
+                      ? 'bg-indigo-600 text-white font-bold shadow-inner ring-1 ring-indigo-700'
+                      : 'text-gray-600 hover:bg-gray-100 font-medium'}`}
+                    aria-pressed={basemap === key}
                   >{label}</button>
                 ))}
               </div>
