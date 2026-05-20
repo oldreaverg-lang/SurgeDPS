@@ -628,6 +628,31 @@ def _lru_set(cache: "_OrderedDict[str, str]", key: str, value: str,
 import time as _time
 _progress: dict = {'step': '', 'step_num': 0, 'total_steps': 4, 'started_at': 0.0, 'storm_id': ''}
 
+# Process start time. Captured at module load so /api/health can report
+# uptime — useful for distinguishing "fresh restart" from "long-running"
+# when diagnosing memory creep or stale in-memory state.
+_PROCESS_START_TIME = _time.time()
+
+# Best-effort build SHA. Railway injects RAILWAY_GIT_COMMIT_SHA on every
+# deploy. Fallback to a local git read at module load if we're running
+# outside Railway (dev). Truncate to 7 chars to match `git log --oneline`.
+def _resolve_build_sha() -> str:
+    sha = (os.environ.get('RAILWAY_GIT_COMMIT_SHA')
+           or os.environ.get('BUILD_SHA')
+           or '')
+    if not sha:
+        try:
+            import subprocess as _sp
+            sha = _sp.check_output(
+                ['git', 'rev-parse', '--short=12', 'HEAD'],
+                cwd=BASE_DIR, stderr=_sp.DEVNULL, timeout=5,
+            ).decode().strip()
+        except Exception:
+            sha = ''
+    return sha[:12] or 'unknown'
+
+_BUILD_SHA = _resolve_build_sha()
+
 
 def _storm_cache_dir(storm: StormEntry) -> str:
     d = os.path.join(CACHE_DIR, storm.storm_id)
@@ -3469,8 +3494,71 @@ class CellHandler(BaseHTTPRequestHandler):
             return
 
         # ── GET /api/health ──
+        # Expanded so external uptime monitors (UptimeRobot, Better Stack,
+        # Cronitor) have something useful to alert on beyond TCP reachability.
+        # Backward compat: 'status' and 'active_storm' fields preserved.
         if path == '/api/health':
-            self._send_json(200, {'status': 'ok', 'active_storm': _active_storm.storm_id if _active_storm else None})
+            from persistent_paths import (
+                PERSISTENT_DATA_DIR as _phd,
+                MONITOR_STATE_FILE as _msf,
+            )
+            uptime_s = int(_time.time() - _PROCESS_START_TIME)
+            # Warm-cache writes a sentinel file when Phase 1-5 finish.
+            warm_marker = os.path.join(str(_phd), '.warm_complete')
+            warm_complete = os.path.exists(warm_marker)
+            warm_completed_at = None
+            if warm_complete:
+                try:
+                    with open(warm_marker) as _wf:
+                        warm_completed_at = _wf.read().strip() or None
+                except OSError:
+                    pass
+            # Persistent volume usage — same numbers as /__val/inventory's
+            # storage section, but exposed without a token so monitors can
+            # alert on "approaching the volume quota."
+            volume_used_pct = None
+            try:
+                import shutil as _shu
+                usage = _shu.disk_usage(str(_phd))
+                volume_used_pct = round((usage.used / usage.total) * 100, 1)
+            except OSError:
+                pass
+            # Last NHC poll from the monitor process (separate from api_server).
+            last_monitor_poll_at = None
+            try:
+                if _msf.exists():
+                    with open(_msf) as _mf:
+                        ms = json.load(_mf)
+                    lp = ms.get('last_poll')
+                    if isinstance(lp, (int, float)):
+                        from datetime import datetime as _dt_h, timezone as _tz_h
+                        last_monitor_poll_at = _dt_h.fromtimestamp(
+                            lp, tz=_tz_h.utc,
+                        ).isoformat()
+            except Exception:
+                pass
+            # MRMS background-fetch queue depth — non-zero during long
+            # /api/rainfall runs; healthy state is 0.
+            mrms_jobs_pending = 0
+            try:
+                with _mrms_jobs_lock:
+                    mrms_jobs_pending = sum(
+                        1 for j in _mrms_jobs.values()
+                        if j.get('status') == 'pending'
+                    )
+            except Exception:
+                pass
+            self._send_json(200, {
+                'status': 'ok',
+                'build_sha': _BUILD_SHA,
+                'uptime_s': uptime_s,
+                'warm_phase_complete': warm_complete,
+                'warm_completed_at': warm_completed_at,
+                'volume_used_pct': volume_used_pct,
+                'last_monitor_poll_at': last_monitor_poll_at,
+                'mrms_jobs_pending': mrms_jobs_pending,
+                'active_storm': _active_storm.storm_id if _active_storm else None,
+            })
             return
 
         # ── GET /api/health/storage ──

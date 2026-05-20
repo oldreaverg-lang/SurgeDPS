@@ -1058,6 +1058,21 @@ def main():
         print(f"  MRMS prewarm summary: {mrms_ok} fetched · {mrms_skip} skipped · {mrms_fail} failed")
     print("=" * 60)
 
+    # Sentinel for the /api/health endpoint. External uptime monitors can
+    # tell "the warm sweep finished" vs "still warming" without hitting the
+    # token-gated inventory. Atomic write so a partial file never confuses
+    # the reader.
+    try:
+        from datetime import datetime as _dt_w, timezone as _tz_w
+        marker = os.path.join(str(PERSISTENT_DIR), '.warm_complete')
+        tmp = f'{marker}.tmp.{os.getpid()}'
+        with open(tmp, 'w') as _mf:
+            _mf.write(_dt_w.now(_tz_w.utc).isoformat())
+        os.replace(tmp, marker)
+        print(f"\nWrote warm-complete sentinel: {marker}")
+    except OSError as _werr:
+        print(f"\n[warn] warm-complete sentinel write failed: {_werr}")
+
 
 if __name__ == '__main__':
     main()
