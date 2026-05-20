@@ -316,6 +316,142 @@ _active_storm: StormEntry | None = None  # last-activated; used only by /api/sta
 # the handlers that read this, so a simple dict is fine.
 _exposure_region_by_storm: dict[str, str] = {}
 
+
+# ── Structured request logging ────────────────────────────────────────────────
+# Every HTTP request gets a short request_id stamped into a thread-local so
+# any code in the handler tree can correlate its log lines to the request
+# that produced them. The wrapping do_GET/do_POST methods emit one terminal
+# log line per request with method, path, duration, and (when known) storm_id.
+#
+# Goal of the format: greppable from Railway logs without a JSON parser.
+# Example line:
+#   [req] rid=a1b2c3d4e5f6 method=GET path=/api/rainfall storm=chantal_2025 ms=187
+#
+# When the next outage hits we want to be able to grep `rid=<id>` across
+# warm_cache, storm_monitor, and api_server logs and see the full chain.
+import uuid as _request_uuid
+_request_context = _threading.local()
+
+
+def _new_request_id() -> str:
+    return _request_uuid.uuid4().hex[:12]
+
+
+def _set_request_storm(storm_id: str | None) -> None:
+    """Update the current request's storm correlation key, if a request is
+    active. Handlers call this after resolving a storm so the terminal log
+    line can attach it. Silent no-op outside an HTTP request (e.g., warm-
+    cache calls that touch shared helpers)."""
+    try:
+        _request_context.storm_id = storm_id or '-'
+    except Exception:
+        pass
+
+
+def _emit_request_log(method: str, path: str, status: int, dt_ms: int) -> None:
+    """Single greppable log line per request. Truncates path so a malicious
+    huge URL can't blow up log lines."""
+    rid = getattr(_request_context, 'request_id', '-')
+    storm_id = getattr(_request_context, 'storm_id', '-')
+    safe_path = (path or '')[:200]
+    print(
+        f'[req] rid={rid} method={method} path={safe_path} '
+        f'storm={storm_id} status={status} ms={dt_ms}',
+        flush=True,
+    )
+
+
+# ── Per-IP rate limiting ─────────────────────────────────────────────────────
+# Simple in-process sliding-window limiter. Applied to the expensive endpoints
+# only (cell, simulate, rainfall, qpf, compound, gauges, storm activate); the
+# lightweight catalog endpoints are exempt so a slow burst from a UI mount
+# doesn't trip the limit.
+#
+# Today's container has no horizontal replicas, so a per-process counter is
+# globally correct. If we add a second replica behind a load balancer we'll
+# need Redis or sticky sessions — but until then this is enough to prevent
+# the "anyone can hammer /api/cell on Milton until OOM" failure mode.
+class _RateLimiter:
+    def __init__(self, max_per_min: int):
+        self.max = max(1, int(max_per_min))
+        self.window_s = 60
+        self._hits: dict[str, list[float]] = {}
+        self._lock = _threading.Lock()
+
+    def check(self, ip: str) -> tuple[bool, float]:
+        """Return (allowed, retry_after_s)."""
+        now = _time.time()
+        cutoff = now - self.window_s
+        with self._lock:
+            hits = self._hits.setdefault(ip, [])
+            # Drop expired entries
+            while hits and hits[0] < cutoff:
+                hits.pop(0)
+            if len(hits) >= self.max:
+                retry_after = max((hits[0] + self.window_s) - now, 1.0)
+                return False, retry_after
+            hits.append(now)
+            return True, 0.0
+
+    def evict_idle(self) -> None:
+        """Drop IPs with no hit in the last 5 windows. Cheap; safe to call
+        from a background tick or opportunistically."""
+        cutoff = _time.time() - self.window_s * 5
+        with self._lock:
+            stale = [
+                ip for ip, hits in self._hits.items()
+                if not hits or hits[-1] < cutoff
+            ]
+            for ip in stale:
+                del self._hits[ip]
+
+
+_RATE_LIMIT_RPM = int(os.environ.get('SURGEDPS_RATE_LIMIT_RPM', '30'))
+_rate_limiter = _RateLimiter(_RATE_LIMIT_RPM)
+
+# Paths that count against the per-IP limit. Static catalog and health are
+# exempt so the SPA's mount sequence (/api/storms/historic + /api/seasons +
+# /api/storms/active = 3 calls in <50 ms) doesn't burn the budget.
+_RATE_LIMITED_PREFIXES = (
+    '/api/cell',
+    '/api/cell_ticks',
+    '/api/simulate',
+    '/api/rainfall',
+    '/api/rainfall_tile',
+    '/api/rainfall_frames',
+    '/api/qpf',
+    '/api/qpf_tile',
+    '/api/compound',
+    '/api/compound_tile',
+    '/api/gauges',
+    '/api/flood_zones',
+    '/api/shelters',
+    '/api/vendor_coverage',
+    '/api/time_to_access',
+    '/api/storm/',  # activate endpoint
+)
+
+
+def _path_is_rate_limited(path: str) -> bool:
+    p = (path or '').split('?', 1)[0]
+    if p.startswith('/surgedps'):
+        p = p[len('/surgedps'):]
+    return any(p.startswith(prefix) for prefix in _RATE_LIMITED_PREFIXES)
+
+
+def _client_ip_from_handler(handler) -> str:
+    """Best-effort client IP. Honors X-Forwarded-For when running behind
+    Railway / Cloudflare. Falls back to the socket peer."""
+    fwd = handler.headers.get('X-Forwarded-For') or ''
+    if fwd:
+        # XFF is a comma-separated chain; the LEFTMOST entry is the original
+        # client, the rest are proxy hops. Trust the leftmost since the only
+        # thing in front of this server is the trusted Railway/Cloudflare
+        # edge — a forged XFF from a real client would still appear after
+        # the edge's stamped entry.
+        return fwd.split(',')[0].strip() or handler.client_address[0]
+    return handler.client_address[0]
+
 # ── Rainfall tile server state ──
 # Keyed by storm_id, value is the absolute path to the MRMS-clipped GeoTIFF
 # that /api/rainfall_tile serves via rio-tiler. Populated on the first
@@ -1450,6 +1586,17 @@ def _render_rainfall_tile(tif_path: str, z: int, x: int, y: int) -> bytes:
 
 class CellHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        _request_context.request_id = _new_request_id()
+        _request_context.storm_id = '-'
+        _request_context.start_time = _time.time()
+        _request_context.last_status = 0
+        try:
+            self._do_POST_dispatch()
+        finally:
+            dt_ms = int((_time.time() - _request_context.start_time) * 1000)
+            _emit_request_log('POST', self.path, _request_context.last_status, dt_ms)
+
+    def _do_POST_dispatch(self):
         """Restricted POST handler: only the token-gated /__val seed
         endpoints accept POSTs. Everything else returns 404 to match the
         public face of the API.
@@ -1471,6 +1618,57 @@ class CellHandler(BaseHTTPRequestHandler):
         self._send_error(404, 'Not Found')
 
     def do_GET(self):
+        _request_context.request_id = _new_request_id()
+        _request_context.storm_id = '-'
+        _request_context.start_time = _time.time()
+        _request_context.last_status = 0
+        try:
+            if _path_is_rate_limited(self.path):
+                allowed, retry_after = _rate_limiter.check(
+                    _client_ip_from_handler(self)
+                )
+                if not allowed:
+                    self._send_429(retry_after)
+                    return
+            self._do_GET_dispatch()
+        finally:
+            dt_ms = int((_time.time() - _request_context.start_time) * 1000)
+            _emit_request_log('GET', self.path, _request_context.last_status, dt_ms)
+
+    def _send_429(self, retry_after_s: float) -> None:
+        """Return a 429 with a Retry-After header and a JSON body the SPA
+        can parse. Written by hand (not via _send_raw) so we can include
+        the Retry-After header that _send_raw's signature doesn't expose."""
+        retry_int = int(retry_after_s) + 1
+        body = json.dumps({
+            'error': 'rate_limited',
+            'message': (
+                f'Per-IP rate limit reached '
+                f'({_RATE_LIMIT_RPM} requests/min on heavy endpoints). '
+                f'Retry in {retry_int}s.'
+            ),
+            'retry_after_s': retry_int,
+        }).encode()
+        try:
+            _request_context.last_status = 429
+        except Exception:
+            pass
+        try:
+            self.send_response(429)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Retry-After', str(retry_int))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            rid = getattr(_request_context, 'request_id', None)
+            if rid:
+                self.send_header('X-Request-ID', rid)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
+    def _do_GET_dispatch(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip('/')
         # Strip the /surgedps mount prefix when the server is deployed behind a
@@ -1586,6 +1784,7 @@ class CellHandler(BaseHTTPRequestHandler):
             global _active_storm
             with _active_storm_lock:
                 _active_storm = storm
+            _set_request_storm(storm.storm_id)
             print(f"\n{'='*60}")
             print(f"ACTIVATED: {storm.name} ({storm.year}) — Cat {storm.category}")
             print(f"  Landfall: ({storm.landfall_lon}, {storm.landfall_lat})")
@@ -3326,6 +3525,13 @@ class CellHandler(BaseHTTPRequestHandler):
         # are ALREADY encoded (e.g. a .json.gz file read from disk). We pass
         # them through unchanged and just stamp the header. Otherwise we may
         # opportunistically gzip large TEXT responses if the client supports it.
+        # Stash the status code into the per-request context so the terminal
+        # request-log line picks it up. Done outside the try/except so we
+        # never miss a status assignment even if the write half-fails.
+        try:
+            _request_context.last_status = code
+        except Exception:
+            pass
         try:
             self.send_response(code)
             if content_encoding:
@@ -3339,6 +3545,12 @@ class CellHandler(BaseHTTPRequestHandler):
                     self.send_header('Content-Encoding', 'gzip')
             self.send_header('Content-Type', content_type)
             self.send_header('Access-Control-Allow-Origin', '*')
+            # Echo the request_id back so clients (curl, browser DevTools)
+            # can correlate to server-side logs without needing to read
+            # the full transcript.
+            rid = getattr(_request_context, 'request_id', None)
+            if rid:
+                self.send_header('X-Request-ID', rid)
             if cache_control:
                 self.send_header('Cache-Control', cache_control)
             self.send_header('Content-Length', str(len(body)))
@@ -3391,6 +3603,7 @@ class CellHandler(BaseHTTPRequestHandler):
             if storm is None:
                 self._send_error(404, f"Storm '{sid}' not found")
                 return None
+            _set_request_storm(storm.storm_id)
             return storm
 
         # Legacy fallback: read the most-recently-activated storm. This is
@@ -3399,6 +3612,7 @@ class CellHandler(BaseHTTPRequestHandler):
         if _active_storm is None:
             self._send_error(400, f'No storm active (pass ?storm_id= to {action_name})')
             return None
+        _set_request_storm(_active_storm.storm_id)
         return _active_storm
 
     def log_message(self, format, *args):
