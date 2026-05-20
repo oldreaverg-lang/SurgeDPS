@@ -362,6 +362,82 @@ def _escape(s) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _send_volume_backup(handler, segment: str) -> None:
+    """Stream a tar.gz of one persistent-volume segment as an attachment.
+
+    Streaming (not in-memory) because flood_zones runs ~4 GB on disk and
+    the whole point is to be able to download the snapshot without
+    OOMing the container. tarfile's |gzip mode writes blocks straight
+    through to the wfile as files are walked.
+
+    Segment whitelist enforces no arbitrary directory traversal — only
+    the named cache subtrees are exposed.
+    """
+    # Resolve persistent dir the same way debug_inventory does, so the
+    # path lines up with whatever Railway env vars are set (or the
+    # /app/tmp_integration fallback).
+    try:
+        from persistent_paths import PERSISTENT_DATA_DIR as _phd
+        persistent = str(_phd)
+    except Exception:
+        persistent = os.environ.get('PERSISTENT_DATA_DIR', '/app/tmp_integration')
+
+    # Whitelist + label. Whitelisted dirs ONLY — never accept user input
+    # as a path component. Empty paths return 404.
+    paths = {
+        'flood_zones': os.path.join(persistent, 'cache', 'flood_zones'),
+        'gauges_historical': os.path.join(persistent, 'cache', 'gauges_historical'),
+        'mrms': os.path.join(persistent, 'mrms'),
+    }
+    src = paths.get(segment)
+    if not src or not os.path.isdir(src):
+        _not_found(handler)
+        return
+
+    import tarfile
+    import gzip
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%SZ')
+    fname = f'surgedps_backup_{segment}_{ts}.tar.gz'
+
+    try:
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'application/gzip')
+        handler.send_header(
+            'Content-Disposition',
+            f'attachment; filename="{fname}"',
+        )
+        handler.send_header('X-Robots-Tag', 'noindex, nofollow')
+        handler.send_header('Cache-Control', 'no-store')
+        # Don't send Content-Length — we're streaming and the compressed
+        # size isn't known up front.
+        handler.end_headers()
+    except Exception:
+        return
+
+    # Wrap wfile in a streaming gzip writer, then tarfile in streaming mode.
+    # On any client disconnect, BrokenPipeError surfaces and we abort —
+    # safe because the source files aren't modified.
+    try:
+        gz = gzip.GzipFile(fileobj=handler.wfile, mode='wb', compresslevel=6)
+        with tarfile.open(fileobj=gz, mode='w|', format=tarfile.PAX_FORMAT) as tar:
+            for root, _dirs, files in os.walk(src):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    rel = os.path.relpath(full, src)
+                    arc = os.path.join(segment, rel.replace(os.sep, '/'))
+                    try:
+                        tar.add(full, arcname=arc, recursive=False)
+                    except (OSError, FileNotFoundError):
+                        # File raced with concurrent writer — skip it.
+                        continue
+        gz.close()
+    except (BrokenPipeError, ConnectionResetError):
+        # Client cancelled mid-download; nothing to clean up.
+        pass
+
+
 def _fema_probe() -> dict:
     """Run a battery of transport tests against hazards.fema.gov to
     identify why warm_cache Phase 3 fails with SSL EOF on Railway.
@@ -824,6 +900,34 @@ def handle_validation_request(handler, path: str, params: Dict[str, List[str]]) 
     # GET /__val/fema_probe — diagnose why Phase 3 SSL EOFs from Railway IP
     if segments[0] == "fema_probe":
         _send_json(handler, _fema_probe())
+        return
+
+    # GET /__val/backup/<segment> — token-gated tar.gz of a volume segment
+    #
+    # Only flood_zones is genuinely irreplaceable (FEMA WAF blocks the
+    # Railway egress IP, so re-fetching from Railway is impossible — a
+    # lost cache means re-running seed_flood_zones_local.py from the
+    # dev machine, which is hours of work). The other segments are
+    # offered for convenience; cells/ is deliberately excluded because
+    # it's huge (7 GB) and trivially regenerable by warm_cache Phase 1.
+    if segments[0] == "backup":
+        if len(segments) < 2:
+            _send_json(handler, {
+                "available_segments": [
+                    "flood_zones",
+                    "gauges_historical",
+                    "mrms",
+                ],
+                "usage": "GET /__val/backup/<segment>?t=<token>",
+                "notes": (
+                    "Streams a tar.gz of the requested volume segment. "
+                    "flood_zones is the only irreplaceable segment — "
+                    "Railway can't re-fetch from FEMA. Others are offered "
+                    "for faster restore than re-running warm_cache phases."
+                ),
+            })
+            return
+        _send_volume_backup(handler, segments[1])
         return
 
     # GET /__val/inventory.json | /__val/inventory.html — cache inventory
