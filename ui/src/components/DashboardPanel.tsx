@@ -121,8 +121,14 @@ export function DashboardPanel({
     const mq = window.matchMedia('(min-width: 1024px)');
     setExpanded(mq.matches);
     const handler = (e: MediaQueryListEvent) => setExpanded(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
+    // Safari <14 only has the legacy addListener API (see App.tsx mirror).
+    if (mq.addEventListener) {
+      mq.addEventListener('change', handler);
+      return () => mq.removeEventListener('change', handler);
+    } else if ((mq as any).addListener) {
+      (mq as any).addListener(handler);
+      return () => (mq as any).removeListener(handler);
+    }
   }, []);
 
   // Authoritative displaced count from county rollup, falls back to

@@ -1878,8 +1878,17 @@ function DashboardPanel({ storm, totals, loadedCells, loadingCells, confidence, 
     const mq = window.matchMedia('(min-width: 1024px)');
     setExpanded(mq.matches);
     const handler = (e: MediaQueryListEvent) => setExpanded(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
+    // Safari <14 + IE never shipped MediaQueryList.addEventListener;
+    // they only had the legacy addListener/removeListener API. Without
+    // this guard the listener fails to register and the layout stays
+    // stuck at its initial value across resize/rotate. (Audit pass 2, #10.)
+    if (mq.addEventListener) {
+      mq.addEventListener('change', handler);
+      return () => mq.removeEventListener('change', handler);
+    } else if ((mq as any).addListener) {
+      (mq as any).addListener(handler);
+      return () => (mq as any).removeListener(handler);
+    }
   }, []);
 
   // Authoritative displaced count from the jurisdictions rollup (if present),
@@ -3263,9 +3272,15 @@ function App() {
   useEffect(() => {
     if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; }
   }, [activeStorm?.storm_id]);
+  // Ref-based reentry guard: button + Enter both call this, and React
+  // doesn't flip addressSearching=true until the next render, so two quick
+  // Enter presses fired two parallel geocode fetches. (Audit pass 2, Mod #6.)
+  const addressSearchingRef = useRef(false);
   const handleAddressSearch = useCallback(() => {
+    if (addressSearchingRef.current) return;
     const q = addressQuery.trim();
     if (!q || !mapRef.current) return;
+    addressSearchingRef.current = true;
     setAddressSearching(true);
     setAddressError('');
     if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; }
@@ -3291,7 +3306,10 @@ function App() {
         }
       })
       .catch(() => setAddressError('Search failed — try again'))
-      .finally(() => setAddressSearching(false));
+      .finally(() => {
+        addressSearchingRef.current = false;
+        setAddressSearching(false);
+      });
   }, [addressQuery, allBuildings]);
 
   // ── Batch address lookup ──
@@ -3299,9 +3317,17 @@ function App() {
   const [batchInput, setBatchInput] = useState('');
   const [batchResults, setBatchResults] = useState<any[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
+  // Ref-based reentry guard: while batchLoading=true the button is disabled,
+  // but the callback itself has no in-function guard. A keyboard-driven
+  // double-fire (Enter held, screen reader autofire) could re-enter and
+  // share batchAbortRef across two runs — Cancel on the second would also
+  // kill the first. (Audit pass 2, Moderate #5.)
+  const batchRunningRef = useRef(false);
   const handleBatchLookup = useCallback(async () => {
+    if (batchRunningRef.current) return;
     const lines = batchInput.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0 || !allBuildings?.features?.length) return;
+    batchRunningRef.current = true;
     setBatchLoading(true);
     setBatchResults([]);
     batchAbortRef.current = false;
@@ -3333,6 +3359,7 @@ function App() {
     }
     setBatchResults(results);
     setBatchLoading(false);
+    batchRunningRef.current = false;
   }, [batchInput, allBuildings]);
 
   const handleBatchExport = useCallback(() => {
@@ -4094,7 +4121,7 @@ ${fieldFlag ? `
       await Promise.allSettled(workers);
     } catch (err: any) {
       if (err?.name === 'AbortError' && !timedOut) {
-        console.log('Storm activation cancelled by user');
+        // Expected on storm switch / explicit cancel — no log needed
       } else if (err?.name === 'AbortError' && timedOut) {
         console.warn('Storm activation timed out after 2 minutes');
         setRetryStormId(stormId);
@@ -4155,19 +4182,31 @@ ${fieldFlag ? `
   }, [activeStorm]);
 
   // ── Run simulation at custom landfall point ──
+  // Ref-based concurrency guard: rapid double-click on "Run Simulation"
+  // used to queue parallel fetches because setSimRunning(true) is async —
+  // React doesn't flip simRunning before the next click's closure reads it.
+  // (Audit pass 2, Moderate #4.)
+  const simRunningRef = useRef(false);
   const runSimulation = useCallback(async () => {
     if (!simMarker || !activeStorm) return;
+    if (simRunningRef.current) return;
+    simRunningRef.current = true;
+    const sid = activeStorm.storm_id;
     setSimRunning(true);
     setSimResult(null);
     try {
       const data = await fetchJson<any>(
-        `/surgedps/api/simulate?storm_id=${encodeURIComponent(activeStorm.storm_id)}&lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`
+        `/surgedps/api/simulate?storm_id=${encodeURIComponent(sid)}&lat=${simMarker.lat}&lon=${simMarker.lng}&wind=${activeStorm.max_wind_kt}&pressure=${activeStorm.min_pressure_mb}`
       );
+      // Discard if the user switched storms while the sim was running.
+      if (activeStormRef.current?.storm_id !== sid) return;
       setSimResult(data);
     } catch (err) {
+      if (activeStormRef.current?.storm_id !== sid) return;
       console.error('Simulation error:', err);
       setCellError('Simulation failed — try adjusting the landfall point.');
     } finally {
+      simRunningRef.current = false;
       setSimRunning(false);
     }
   }, [simMarker, activeStorm]);
@@ -4567,7 +4606,9 @@ ${fieldFlag ? `
     // content out. Too-early calls print a blank page in Safari.
     const fireprint = () => { try { w.focus(); w.print(); } catch { /* ignore */ } };
     if (w.document.readyState === 'complete') setTimeout(fireprint, 350);
-    else w.addEventListener('load', () => setTimeout(fireprint, 200));
+    // { once: true } prevents the listener from leaking if the user closes
+    // the popup before 'load' fires (audit pass 2, High #3).
+    else w.addEventListener('load', () => setTimeout(fireprint, 200), { once: true });
     return true;
   }, []);
 
@@ -4727,6 +4768,10 @@ ${fieldFlag ? `
     }
     setHoverAddress(null);
     const controller = new AbortController();
+    // Capture the storm_id at fetch time so a late response can't land
+    // on the wrong storm if the user pinned, switched storms, and the
+    // new popup overlaps the same lat/lng. (Audit pass 2, Mod #8.)
+    const sidAtFetch = activeStormRef.current?.storm_id || null;
     const timer = setTimeout(() => {
       // Pre-populate so we don't fire duplicate requests
       geocodeCache.current[cacheKey] = '';
@@ -4735,6 +4780,8 @@ ${fieldFlag ? `
         { signal: controller.signal }
       )
         .then(data => {
+          if (controller.signal.aborted) return;
+          if (activeStormRef.current?.storm_id !== sidAtFetch) return;
           const label = data?.label || null;
           geocodeCache.current[cacheKey] = label || '';
           setHoverAddress(label);
