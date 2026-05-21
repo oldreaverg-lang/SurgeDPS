@@ -729,6 +729,25 @@ def _fema_probe() -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+# Concurrency cap on /__val/seed_flood_zone uploads. A single seed request
+# allocates the compressed body + the gzip-decoded JSON in memory; under a
+# leaked token an attacker could fan-out many concurrent uploads and OOM the
+# Railway container. Two-at-a-time is plenty for the legitimate use case
+# (seed_flood_zones_local.py paces tile uploads sequentially).
+import threading as _seed_threading
+_SEED_CONCURRENCY = _seed_threading.BoundedSemaphore(2)
+
+# Compressed body ceiling. Real FEMA NFHL tiles are 2-5 MB gzipped at the
+# densest coastal areas. 10 MB is a generous-but-defensible upper bound;
+# anything bigger is either a non-FEMA payload or a probe.
+_SEED_MAX_COMPRESSED_BYTES = 10 * 1024 * 1024
+
+# Decoded ceiling. With gzip ratios up to ~10x for repetitive JSON, the
+# previous 60 MB compressed cap could explode to ~600 MB in memory. Bound
+# the decoded JSON at 50 MB — still triple any real FEMA tile.
+_SEED_MAX_DECODED_BYTES = 50 * 1024 * 1024
+
+
 def handle_validation_post(handler, path: str, params: Dict[str, List[str]]) -> None:
     """POST handler for the /__val namespace. Currently only supports
     /__val/seed_flood_zone — used to seed the FEMA NFHL cache from a
@@ -764,82 +783,125 @@ def handle_validation_post(handler, path: str, params: Dict[str, List[str]]) -> 
         except ValueError:
             _send_json(handler, {"error": "missing Content-Length"})
             return
-        # Compressed body limit: 60 MB gzip ≈ 300 MB JSON, more than any
-        # single FEMA NFHL tile we've seen (~35 MB raw on the densest
-        # coastal tiles).
-        if content_length <= 0 or content_length > 60 * 1024 * 1024:
+        # Compressed body ceiling. Was 60 MB which a malicious gzip bomb
+        # could explode to multi-GB on decompress. Real FEMA tiles top
+        # out around 5 MB compressed at the densest coastal areas; 10 MB
+        # is a generous bound that still rejects gzip bombs.
+        if content_length <= 0 or content_length > _SEED_MAX_COMPRESSED_BYTES:
             _send_json(handler, {"error": f"bad Content-Length {content_length}"})
             return
-        body = handler.rfile.read(content_length)
 
-        # Bodies arrive gzip-compressed (Content-Encoding: gzip) to fit
-        # within Railway's volume. Decompress for validation, but write
-        # the original gzip bytes — api_server serves them with
-        # Content-Encoding: gzip so the browser decompresses transparently.
-        encoding = (handler.headers.get("Content-Encoding") or "").lower()
-        if encoding == "gzip":
+        # Concurrency gate — caps the number of in-flight seed uploads so
+        # one attacker can't fan-out N parallel near-max-size requests and
+        # tip the container into OOM. Non-blocking acquire: if the limit's
+        # reached, return 503 instead of queuing.
+        if not _SEED_CONCURRENCY.acquire(blocking=False):
+            handler.send_response(503)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Retry-After", "5")
+            handler.send_header("Cache-Control", "no-store")
+            body_503 = json.dumps({"error": "seed concurrency limit reached"}).encode()
+            handler.send_header("Content-Length", str(len(body_503)))
+            handler.end_headers()
+            handler.wfile.write(body_503)
+            return
+
+        # try/finally so every early-return path below releases the
+        # semaphore. Without this, a single validation failure (bad JSON
+        # shape, write OSError, …) would leak a permit and the limit
+        # would degrade to zero after a handful of bad uploads.
+        try:
+            body = handler.rfile.read(content_length)
+
+            # Bodies arrive gzip-compressed (Content-Encoding: gzip) to fit
+            # within Railway's volume. Decompress for validation, but write
+            # the original gzip bytes — api_server serves them with
+            # Content-Encoding: gzip so the browser decompresses transparently.
+            encoding = (handler.headers.get("Content-Encoding") or "").lower()
+            if encoding == "gzip":
+                try:
+                    import gzip as _gz
+                    import io as _io
+                    # Stream-decompress with a hard byte ceiling so a
+                    # malicious 10 MB gzip bomb can't balloon to multi-GB.
+                    # Reading one byte past the ceiling triggers the
+                    # abort path.
+                    gzf = _gz.GzipFile(fileobj=_io.BytesIO(body))
+                    raw_json = gzf.read(_SEED_MAX_DECODED_BYTES + 1)
+                    if len(raw_json) > _SEED_MAX_DECODED_BYTES:
+                        _send_json(handler, {
+                            "error": (
+                                f"decoded body exceeds "
+                                f"{_SEED_MAX_DECODED_BYTES} bytes"
+                            ),
+                        })
+                        return
+                except Exception as e:
+                    _send_json(handler, {"error": f"gzip decompress failed: {e}"})
+                    return
+                disk_bytes = body          # write the compressed bytes
+                suffix = ".gz"
+            else:
+                if len(body) > _SEED_MAX_DECODED_BYTES:
+                    _send_json(handler, {
+                        "error": f"body exceeds {_SEED_MAX_DECODED_BYTES} bytes",
+                    })
+                    return
+                raw_json = body
+                disk_bytes = body
+                suffix = ""
+
+            # Validate JSON shape — refuse to cache FEMA error responses or
+            # corrupt bodies that would poison the cache.
             try:
-                import gzip as _gz
-                raw_json = _gz.decompress(body)
+                parsed = json.loads(raw_json)
             except Exception as e:
-                _send_json(handler, {"error": f"gzip decompress failed: {e}"})
+                _send_json(handler, {"error": f"invalid JSON: {e}"})
                 return
-            disk_bytes = body          # write the compressed bytes
-            suffix = ".gz"
-        else:
-            raw_json = body
-            disk_bytes = body
-            suffix = ""
+            if not isinstance(parsed, dict):
+                _send_json(handler, {"error": "top-level JSON must be an object"})
+                return
+            if "error" in parsed:
+                _send_json(handler, {"error": f"refusing to cache upstream error: {parsed['error']}"})
+                return
+            if parsed.get("type") != "FeatureCollection":
+                _send_json(handler, {"error": f"expected FeatureCollection, got type={parsed.get('type')!r}"})
+                return
 
-        # Validate JSON shape — refuse to cache FEMA error responses or
-        # corrupt bodies that would poison the cache.
-        try:
-            parsed = json.loads(raw_json)
-        except Exception as e:
-            _send_json(handler, {"error": f"invalid JSON: {e}"})
-            return
-        if not isinstance(parsed, dict):
-            _send_json(handler, {"error": "top-level JSON must be an object"})
-            return
-        if "error" in parsed:
-            _send_json(handler, {"error": f"refusing to cache upstream error: {parsed['error']}"})
-            return
-        if parsed.get("type") != "FeatureCollection":
-            _send_json(handler, {"error": f"expected FeatureCollection, got type={parsed.get('type')!r}"})
-            return
+            # Use the same module-level constant the rest of the app reads
+            # from (persistent_paths.py). This avoids a path-mismatch bug where
+            # /app/persistent was written but /app/tmp_integration was read.
+            from persistent_paths import PERSISTENT_DATA_DIR as _PERSIST
+            cache_dir = os.path.join(str(_PERSIST), "cache", "flood_zones")
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, tile_key + suffix)
 
-        # Use the same module-level constant the rest of the app reads
-        # from (persistent_paths.py). This avoids a path-mismatch bug where
-        # /app/persistent was written but /app/tmp_integration was read.
-        from persistent_paths import PERSISTENT_DATA_DIR as _PERSIST
-        cache_dir = os.path.join(str(_PERSIST), "cache", "flood_zones")
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_path = os.path.join(cache_dir, tile_key + suffix)
-
-        tmp = f"{cache_path}.tmp.{os.getpid()}"
-        try:
-            with open(tmp, "wb") as f:
-                f.write(disk_bytes)
-            os.replace(tmp, cache_path)
-        except OSError as e:
+            tmp = f"{cache_path}.tmp.{os.getpid()}"
             try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            _send_json(handler, {"error": f"write failed: {e}"})
-            return
+                with open(tmp, "wb") as f:
+                    f.write(disk_bytes)
+                os.replace(tmp, cache_path)
+            except OSError as e:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                _send_json(handler, {"error": f"write failed: {e}"})
+                return
 
-        feat_count = len(parsed.get("features") or [])
-        _send_json(handler, {
-            "ok": True,
-            "tile_key": tile_key,
-            "cache_path": cache_path,
-            "encoded": suffix == ".gz",
-            "bytes_written": len(disk_bytes),
-            "bytes_uncompressed": len(raw_json),
-            "feature_count": feat_count,
-        })
-        return
+            feat_count = len(parsed.get("features") or [])
+            _send_json(handler, {
+                "ok": True,
+                "tile_key": tile_key,
+                "cache_path": cache_path,
+                "encoded": suffix == ".gz",
+                "bytes_written": len(disk_bytes),
+                "bytes_uncompressed": len(raw_json),
+                "feature_count": feat_count,
+            })
+            return
+        finally:
+            _SEED_CONCURRENCY.release()
 
     _not_found(handler)
 
@@ -855,24 +917,37 @@ def handle_validation_request(handler, path: str, params: Dict[str, List[str]]) 
     segments = [s for s in rel.split("/") if s]
 
     # Diagnostic: /__val/__status reports whether the token env var is
-    # configured and whether this request's token matched — without
-    # ever revealing the token value itself. Safe to expose.
+    # configured and whether this request's token matched.
+    #
+    # The unauthenticated response shape was previously a security gap:
+    # token_env_length, validation_root, and storms_on_disk all leaked to
+    # any anonymous caller — revealing the token length to attack with,
+    # the volume root path, and every storm dir on disk. Now the
+    # unauthenticated reply only confirms "service is alive, env is
+    # configured"; the diagnostic-rich response is gated on a successful
+    # token match.
     if segments == ["__status"]:
         expected = os.environ.get("VALIDATION_TOKEN", "")
         header_tok = handler.headers.get("X-Validation-Token", "")
         query_tok = (params.get("t", [""])[0]) if params else ""
         supplied = header_tok or query_tok
-        _send_json(handler, {
+        matched = _token_ok(handler, params)
+        payload = {
             "token_env_set": bool(expected),
-            "token_env_length": len(expected) if expected else 0,
             "token_supplied": bool(supplied),
-            "token_supplied_length": len(supplied) if supplied else 0,
-            "token_matches": _token_ok(handler, params),
-            "validation_root": os.path.abspath(VALIDATION_ROOT),
-            "validation_root_exists": os.path.isdir(VALIDATION_ROOT),
-            "storms_on_disk": sorted(os.listdir(VALIDATION_ROOT))
-                if os.path.isdir(VALIDATION_ROOT) else [],
-        })
+            "token_matches": matched,
+        }
+        if matched:
+            # Sensitive diagnostics only after the token matches.
+            payload.update({
+                "token_env_length": len(expected) if expected else 0,
+                "token_supplied_length": len(supplied) if supplied else 0,
+                "validation_root": os.path.abspath(VALIDATION_ROOT),
+                "validation_root_exists": os.path.isdir(VALIDATION_ROOT),
+                "storms_on_disk": sorted(os.listdir(VALIDATION_ROOT))
+                    if os.path.isdir(VALIDATION_ROOT) else [],
+            })
+        _send_json(handler, payload)
         return
 
     if not _token_ok(handler, params):

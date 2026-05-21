@@ -440,16 +440,29 @@ def _path_is_rate_limited(path: str) -> bool:
 
 
 def _client_ip_from_handler(handler) -> str:
-    """Best-effort client IP. Honors X-Forwarded-For when running behind
-    Railway / Cloudflare. Falls back to the socket peer."""
-    fwd = handler.headers.get('X-Forwarded-For') or ''
-    if fwd:
-        # XFF is a comma-separated chain; the LEFTMOST entry is the original
-        # client, the rest are proxy hops. Trust the leftmost since the only
-        # thing in front of this server is the trusted Railway/Cloudflare
-        # edge — a forged XFF from a real client would still appear after
-        # the edge's stamped entry.
-        return fwd.split(',')[0].strip() or handler.client_address[0]
+    """Client IP for per-IP rate limiting.
+
+    Trust hierarchy:
+      1. CF-Connecting-IP  — set by Cloudflare on every proxied request;
+         Cloudflare strips any client-supplied CF-Connecting-IP at the
+         edge, so this value cannot be forged when traffic actually
+         transits Cloudflare.
+      2. socket peer       — used when CF-Connecting-IP is absent
+         (direct Railway hit at surgedps-production.up.railway.app
+         bypasses Cloudflare).
+
+    DO NOT trust X-Forwarded-For. The previous implementation took
+    XFF's leftmost token unconditionally, which let any attacker who
+    hit Railway directly rotate XFF per request and bypass the per-IP
+    rate cap on /api/cell, /api/rainfall, etc. — a one-line bash loop
+    DOS. CF-Connecting-IP is Cloudflare-exclusive and forge-resistant;
+    socket peer is the right fallback for direct hits.
+    """
+    cf = handler.headers.get('CF-Connecting-IP')
+    if cf:
+        cf = cf.strip()
+        if cf:
+            return cf
     return handler.client_address[0]
 
 # ── Rainfall tile server state ──
@@ -1637,7 +1650,7 @@ class CellHandler(BaseHTTPRequestHandler):
             try:
                 handle_validation_post(self, path, params)
             except Exception as e:
-                self._send_error(500, f"seed handler error: {e}")
+                self._send_internal_error(e, where='/__val seed handler')
             return
 
         self._send_error(404, 'Not Found')
@@ -1683,7 +1696,15 @@ class CellHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Retry-After', str(retry_int))
             self.send_header('Cache-Control', 'no-store')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            # Match the per-path ACAO policy from _send_raw: only /api/*.
+            try:
+                _p429 = (self.path or '').split('?', 1)[0]
+                if _p429.startswith('/surgedps'):
+                    _p429 = _p429[len('/surgedps'):]
+                if _p429.startswith('/api/'):
+                    self.send_header('Access-Control-Allow-Origin', '*')
+            except Exception:
+                pass
             rid = getattr(_request_context, 'request_id', None)
             if rid:
                 self.send_header('X-Request-ID', rid)
@@ -1715,7 +1736,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 data = [s for s in get_seasons() if s['year'] >= SEASON_MIN_YEAR]
                 self._send_raw(200, json.dumps(data).encode())
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/storms/historic ── curated notable storms (pre-2015 ok)
@@ -1724,7 +1745,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 data = [_inject_dps(s.to_dict()) for s in HISTORICAL_STORMS]
                 self._send_raw(200, json.dumps(data).encode())
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/season/<year> ── all storms for a year
@@ -1752,7 +1773,7 @@ class CellHandler(BaseHTTPRequestHandler):
             except (ValueError, IndexError):
                 self._send_error(400, 'Invalid year')
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/storms/search?q=katrina ── search by name or ID
@@ -1779,7 +1800,7 @@ class CellHandler(BaseHTTPRequestHandler):
                         break
                 self._send_raw(200, json.dumps(results).encode())
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/storms/active ── currently active NHC storms
@@ -1788,7 +1809,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 active = fetch_active_storms()
                 self._send_raw(200, json.dumps([_inject_dps(s.to_dict()) for s in active]).encode())
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/storm/<id>/activate ── select a storm for analysis
@@ -1974,7 +1995,7 @@ class CellHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"Error loading cell ({col},{row}): {e}")
                 import traceback; traceback.print_exc()
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/cell_ticks?col=N&row=N&storm_id=X ──
@@ -2090,7 +2111,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     self._send_error(500, 'Ticks file unreadable after generation')
             except Exception as e:
                 print(f'[cell_ticks] error col={col} row={row}: {e}')
-                self._send_error(500, f'cell_ticks error: {e}')
+                self._send_internal_error(e, where='/api/cell_ticks')
             return
 
         # ── GET /api/progress ── poll current processing step
@@ -2116,7 +2137,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 result = _geocode_reverse(float(lat), float(lon))
                 self._send_json(200, result)
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/geocode/search?q=address ── cached forward geocoding
@@ -2129,7 +2150,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 result = _geocode_forward(q.strip())
                 self._send_json(200, result)
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/forecast/track ── forecast track points + cone for active storms
@@ -2145,7 +2166,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     result.append(td)
                 self._send_json(200, result)
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/simulate?lat=N&lon=N&wind=N&pressure=N ── what-if scenario
@@ -2330,7 +2351,7 @@ class CellHandler(BaseHTTPRequestHandler):
                                content_type='application/json',
                                cache_control='public, max-age=86400')
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/validation/storm/<id> ── score a single storm
@@ -2370,7 +2391,7 @@ class CellHandler(BaseHTTPRequestHandler):
                                            'storm_id': sid,
                                            'has_ground_truth': get_ground_truth(sid) is not None})
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/validation/predict?loss=N ── confidence interval
@@ -2380,7 +2401,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 result = predict_loss_range(loss)
                 self._send_json(200, result)
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/rainfall?duration=72&pass=2 ──
@@ -2487,7 +2508,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 t.start()
                 self._send_json(200, {'status': 'pending', 'storm_id': sid})
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/rainfall_tile/{z}/{x}/{y}.png?storm_id=<id>[&hour=N] ──
@@ -2560,7 +2581,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=86400')
             except Exception as e:
-                self._send_error(500, f'tile error: {e}')
+                self._send_internal_error(e, where='/api/rainfall_tile')
             return
 
         # ── GET /api/rainfall_frames?storm_id=<id> ──
@@ -2689,7 +2710,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     'landfall_frame_hour': landfall_frame_hour,
                 })
             except Exception as e:
-                self._send_error(500, f'frames error: {e}')
+                self._send_internal_error(e, where='/api/rainfall_frames')
             return
 
         # ── GET /api/qpf_tile/{z}/{x}/{y}.png?storm_id=<id> ──
@@ -2723,7 +2744,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=3600')
             except Exception as e:
-                self._send_error(500, f'qpf tile error: {e}')
+                self._send_internal_error(e, where='/api/qpf_tile')
             return
 
         # ── GET /api/compound?storm_id=<id> ──
@@ -2833,7 +2854,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     'notes': _note,
                 })
             except Exception as e:
-                self._send_error(500, f'shelters error: {e}')
+                self._send_internal_error(e, where='/api/shelters')
             return
 
         # ── GET /api/vendor_coverage ──
@@ -2928,7 +2949,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     'notes': f'Coverage computed against {footprint_source}; {len(out)} vendor(s) in manifest.',
                 })
             except Exception as e:
-                self._send_error(500, f'vendor_coverage error: {e}')
+                self._send_internal_error(e, where='/api/vendor_coverage')
             return
 
         # ── GET /api/time_to_access?ranks=1,2,3&coords=lon,lat;lon,lat ──
@@ -3046,7 +3067,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     'notes': model_note,
                 })
             except Exception as e:
-                self._send_error(500, f'time_to_access error: {e}')
+                self._send_internal_error(e, where='/api/time_to_access')
             return
 
         if path == '/api/compound':
@@ -3080,7 +3101,7 @@ class CellHandler(BaseHTTPRequestHandler):
                              f"surge + rainfall + fluvial combined.",
                 })
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/compound_tile/{z}/{x}/{y}.png?storm_id=<id> ──
@@ -3120,7 +3141,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_raw(200, png_bytes, content_type='image/png',
                                cache_control='public, max-age=300')
             except Exception as e:
-                self._send_error(500, f'tile error: {e}')
+                self._send_internal_error(e, where='/api/compound_tile')
             return
 
         # ── GET /api/qpf ──
@@ -3281,7 +3302,7 @@ class CellHandler(BaseHTTPRequestHandler):
 
                 self._send_json(200, _meta)
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/gauges?radius=4&category=action ──
@@ -3396,7 +3417,7 @@ class CellHandler(BaseHTTPRequestHandler):
                     print(f"[gauges] cache write failed: {werr}")
                 self._send_raw(200, body, cache_control='public, max-age=86400')
             except Exception as e:
-                self._send_error(500, str(e))
+                self._send_internal_error(e)
             return
 
         # ── GET /api/flood_zones?west=&south=&east=&north= ──
@@ -3602,10 +3623,18 @@ class CellHandler(BaseHTTPRequestHandler):
             self._send_error(404, 'Not found')
 
     def do_OPTIONS(self):
+        # CORS preflight. Match the per-path ACAO policy from _send_raw —
+        # only /api/* is CORS-open. Preflighting /__val/* returns 204 with
+        # no CORS headers, which the browser will treat as a CORS failure
+        # for any cross-origin call into the private namespace.
+        _po = (self.path or '').split('?', 1)[0]
+        if _po.startswith('/surgedps'):
+            _po = _po[len('/surgedps'):]
         self.send_response(204)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        if _po.startswith('/api/'):
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
     def _send_raw(self, code, body: bytes, content_type: str = 'application/json', cache_control: str | None = None, content_encoding: str | None = None):
@@ -3632,7 +3661,20 @@ class CellHandler(BaseHTTPRequestHandler):
                     body = _gzip.compress(body, compresslevel=6)
                     self.send_header('Content-Encoding', 'gzip')
             self.send_header('Content-Type', content_type)
-            self.send_header('Access-Control-Allow-Origin', '*')
+            # Only set CORS for /api/* — the public, browser-driven
+            # endpoints. /__val/* is an operator-only token-gated
+            # namespace; sending Access-Control-Allow-Origin: * on those
+            # responses would let any origin's JavaScript probe rate-
+            # limit + cache state through a victim's authenticated
+            # session if the token ever leaked to that browser.
+            try:
+                _req_path = (self.path or '').split('?', 1)[0]
+                if _req_path.startswith('/surgedps'):
+                    _req_path = _req_path[len('/surgedps'):]
+                if _req_path.startswith('/api/'):
+                    self.send_header('Access-Control-Allow-Origin', '*')
+            except Exception:
+                pass
             # Echo the request_id back so clients (curl, browser DevTools)
             # can correlate to server-side logs without needing to read
             # the full transcript.
@@ -3656,6 +3698,40 @@ class CellHandler(BaseHTTPRequestHandler):
 
     def _send_error(self, code, message):
         self._send_json(code, {'error': message})
+
+    def _send_internal_error(self, exc, *, where: str = ''):
+        """Return a generic 500 without leaking the exception message.
+
+        Previous behaviour echoed `str(exc)` to the client, which often
+        contained absolute volume paths (`/app/tmp_integration/cache/...`),
+        Python module names, and rasterio/PIL/etc. error fragments. The
+        Lighthouse + security audit flagged this as info disclosure.
+
+        Now: full traceback goes to the server log (correlated by
+        request_id), client gets a generic body with the request_id so
+        an operator can grep logs without exposing internals."""
+        import traceback as _tb
+        rid = getattr(_request_context, 'request_id', '-')
+        # One-line summary to keep log greppable, then the formatted
+        # traceback for the actual debug info.
+        print(
+            f'[err] rid={rid} where={where or (self.path or "")[:80]} '
+            f'exc={type(exc).__name__}: {str(exc)[:160]}',
+            flush=True,
+        )
+        _tb.print_exc()
+        try:
+            body = json.dumps({
+                'error': 'internal_error',
+                'request_id': rid,
+            }).encode()
+            self._send_raw(
+                500, body,
+                content_type='application/json',
+                cache_control='no-store',
+            )
+        except Exception:
+            pass
 
     def _resolve_storm(self, params: dict, *, action_name: str = 'this endpoint'):
         """Resolve a StormEntry from ?storm_id= for the current request.

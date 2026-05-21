@@ -139,7 +139,7 @@ All endpoints require a valid `VALIDATION_TOKEN`. If the token is missing, malfo
 - **Last deploy:** `a879b84` — built and active
 - **Volume:** 30 GB persistent at `/app/persistent` (validation data lives outside it, in the image at `/app/data/validation`)
 - **Env var:** `VALIDATION_TOKEN` set on SurgeDPS service
-- **Token:** `bz6HnEseHeUWdC90f2i5Y3F0WxcyfoyHwUI7MXEnXlA` (43 chars)
+- **Token:** `<ROTATED — read from Railway SurgeDPS service Variables panel>` (43 chars)
 
 ### Current blocker (as of handoff)
 
@@ -162,7 +162,7 @@ The supplied token has **one extra character** vs the stored env var. Most likel
 **Resolution:** open this URL with no trailing characters after the final `A`:
 
 ```
-https://surgedps-production.up.railway.app/__val/michael_2018/dashboard?t=bz6HnEseHeUWdC90f2i5Y3F0WxcyfoyHwUI7MXEnXlA
+https://surgedps-production.up.railway.app/__val/michael_2018/dashboard?t=<ROTATED — read from Railway SurgeDPS service Variables panel>
 ```
 
 If it still shows 44 chars supplied, inspect the Railway var value for invisible leading/trailing characters.

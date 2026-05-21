@@ -34,6 +34,13 @@ Thumbs.db
 # Lock files (Office temp)
 .~lock.*
 
+# Claude Code session state — .claude/worktrees/*/settings.local.json
+# embeds per-command permission allowlists that contain URL fragments
+# with tokens (e.g. /__val/inventory.json?t=…), plus full transcripts
+# of past sessions. Untracked and unprotected before this rule meant
+# a single `git add .` would have re-leaked the validation token.
+.claude/
+
 # Excel / Word artifacts
 *.xlsx
 *.docx
