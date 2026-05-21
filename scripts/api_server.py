@@ -1426,6 +1426,144 @@ def _empty_fc_pair():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Activate-cache populate — shared compute path for the request handler
+# and the boot-time pre-warmer
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def populate_activate_cache(storm) -> tuple[dict, dict]:
+    """Compute the activate manifest for *storm* and write it through to
+    both cache tiers (in-memory LRU + persistent volume). Returns a
+    ``(payload, grid_cells)`` tuple — payload is the dict the handler
+    serializes to the wire; grid_cells is exposed so callers that want
+    to feed it into the validation ledger can do so. Pre-warmers can
+    ignore grid_cells.
+
+    This function deliberately does NOT touch:
+      * _active_storm (the "current user" pointer; would mislead other
+        handlers about which storm is being viewed)
+      * the validation ledger (we don't want a pre-warm pass to log N
+        synthetic activation entries)
+      * the gauge-warm background thread (it's idempotent but spawning
+        N threads for a sweep is wasteful)
+      * progress polling (no UI is watching during a pre-warm)
+
+    Caller is responsible for those side effects if they're appropriate
+    (the request handler still runs them in the cold path)."""
+    _ACTIVATE_CELLS = [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
+
+    grid_cells: dict = {}
+    for (c, r) in _ACTIVATE_CELLS:
+        try:
+            grid_cells[f'{c},{r}'] = load_cell(c, r, storm)
+        except Exception as _cell_err:
+            import traceback as _tb
+            print(f"  [populate] load_cell({c},{r}) raised: {_cell_err}")
+            _tb.print_exc()
+            grid_cells[f'{c},{r}'] = _empty_fc_pair()
+
+    # R5: Confidence
+    conf = _compute_confidence(storm.storm_id)
+    storm_data = _inject_dps(storm.to_dict())
+    storm_data['confidence'] = conf['confidence']
+    storm_data['building_count'] = conf['building_count']
+    # R8: Expected Loss Index
+    eli = _compute_eli(storm_data.get('dps_score', 0), conf['building_count'])
+    storm_data['eli'] = eli['eli']
+    storm_data['eli_tier'] = eli['eli_tier']
+    # R11: Validated DPS with exposure adjustment
+    exposure_region = storm_data.get('exposure_region', '')
+    _exposure_region_by_storm[storm.storm_id] = exposure_region
+    vdps = _compute_validated_dps(storm_data.get('dps_score', 0), conf['building_count'], exposure_region)
+    storm_data['validated_dps'] = vdps['validated_dps']
+    storm_data['dps_adjustment'] = vdps['dps_adjustment']
+    storm_data['dps_adj_reason'] = vdps['dps_adj_reason']
+
+    # Population context (Census Bureau, has its own per-storm cache)
+    try:
+        pop_ctx = get_population_context(storm.landfall_lat, storm.landfall_lon)
+        if pop_ctx:
+            storm_data['population'] = pop_ctx
+    except Exception as e:
+        print(f"  [populate] census lookup failed for {storm.storm_id}: {e}")
+
+    # Ground truth (cheap dict lookup)
+    try:
+        gt = get_ground_truth(storm.storm_id)
+        if gt:
+            storm_data['ground_truth'] = {
+                'actual_total_B': gt.actual_damage_B,
+                'surge_fraction': gt.surge_fraction,
+                'surge_damage_B': gt.surge_damage_B,
+                'source': gt.source,
+            }
+    except Exception as e:
+        print(f"  [populate] ground truth lookup failed for {storm.storm_id}: {e}")
+
+    # Manifest
+    cells_available = sorted(grid_cells.keys())
+    cell_summary = {
+        k: {
+            'building_count': len((v.get('buildings') or {}).get('features') or []),
+            'flood_count':    len((v.get('flood')     or {}).get('features') or []),
+        }
+        for k, v in grid_cells.items()
+    }
+    payload = {
+        'storm_data': storm_data,
+        'cells_available': cells_available,
+        'cell_summary': cell_summary,
+    }
+    # Active storms intentionally don't get cached — their forecast cone
+    # changes intra-session. The handler's cold path already guards this
+    # before calling us, but defend in depth.
+    if getattr(storm, 'status', '') != 'active':
+        _activate_cache_put(storm.storm_id, payload)
+    return payload, grid_cells
+
+
+def _prewarm_activate_cache() -> None:
+    """Background sweep: warm the activate cache for every historical
+    storm without a fresh disk entry. Runs sequentially after a delay so
+    warm_cache.py has a chance to settle the cell directory first.
+
+    Daemon-thread safe. Catches all per-storm exceptions so a single
+    bad storm can't kill the sweep."""
+    import time as _t
+    # Give warm_cache.py a head start. It's allowed to race with us if a
+    # storm gets touched on both sides — populate_activate_cache reads
+    # whatever's on disk at compute time and stamps the mtime, so the
+    # next /activate read will discard our stamp and recompute if a
+    # newer cell appears.
+    _t.sleep(45)
+    try:
+        names = [s.storm_id for s in HISTORICAL_STORMS]
+    except Exception as e:
+        print(f"[prewarm] could not load HISTORICAL_STORMS: {e}")
+        return
+    print(f"[prewarm] starting sweep over {len(names)} historical storms")
+    warmed = 0
+    skipped = 0
+    failed = 0
+    for storm in HISTORICAL_STORMS:
+        sid = storm.storm_id
+        if not _valid_storm_id(sid):
+            continue
+        # Skip if disk entry exists and is fresh — covers the common case
+        # where a previous deploy already warmed everything.
+        if _activate_cache_read_disk(sid) is not None:
+            skipped += 1
+            continue
+        try:
+            populate_activate_cache(storm)
+            warmed += 1
+            print(f"[prewarm] warmed {sid}")
+        except Exception as e:
+            failed += 1
+            print(f"[prewarm] failed {sid}: {e}")
+    print(f"[prewarm] done — warmed={warmed} skipped={skipped} failed={failed}")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Rainfall XYZ tile rendering (NWS standard precipitation colormap)
 #
 # Serves PNG tiles reprojected from the MRMS-clipped GeoTIFF. The
@@ -2067,74 +2205,44 @@ class CellHandler(BaseHTTPRequestHandler):
                 return
 
             # ── Cache miss: full activation work ──────────────────────────
-            # Load all pre-cached cells around landfall (3×3 for all storms
-            # to stay within Railway 5 GB volume limit).  Cached cells return
-            # instantly; uncached ones are generated on the fly.  Users can
-            # expand coverage on-demand by clicking grid borders.
+            # Hand off the heavy compute (9-cell walk + DPS/ELI/validated-DPS
+            # + population + ground truth + cache write-through) to the
+            # shared populate_activate_cache() helper so the boot-time
+            # pre-warmer uses the same compute path. Progress updates +
+            # validation-ledger write + gauge-warm spawn stay here in the
+            # handler because they're per-request side effects we don't want
+            # firing during a background pre-warm sweep.
             _ACTIVATE_CELLS = [(c, r) for r in range(-1, 2) for c in range(-1, 2)]
-            total_act = len(_ACTIVATE_CELLS) * 4  # 4 steps per cell
+            total_act = len(_ACTIVATE_CELLS) * 4
             _progress.update(step='Initializing', step_num=0, total_steps=total_act,
                              started_at=_time.time(), storm_id=storm.storm_id)
-
-            grid_cells = {}
-            for idx, (c, r) in enumerate(_ACTIVATE_CELLS):
-                _progress.update(step=f'Loading cell ({c},{r})', step_num=idx * 4)
-                print(f"  Loading cell ({c},{r})...")
-                try:
-                    grid_cells[f'{c},{r}'] = load_cell(c, r, storm)
-                except Exception as _cell_err:
-                    import traceback as _tb
-                    print(f"  [ERROR] load_cell({c},{r}) raised: {_cell_err}")
-                    _tb.print_exc()
-                    grid_cells[f'{c},{r}'] = _empty_fc_pair()
-
-            center_data = grid_cells.get('0,0')
+            # populate_activate_cache loops the cells internally; we don't
+            # get fine-grained per-cell progress here, but we set Complete
+            # immediately afterward so the loading dialog dismisses cleanly.
+            payload, grid_cells = populate_activate_cache(storm)
             _progress.update(step='Complete', step_num=total_act)
 
-            # R5: Attach validation confidence after cell load
-            conf = _compute_confidence(storm.storm_id)
-            storm_data = _inject_dps(storm.to_dict())
-            storm_data['confidence'] = conf['confidence']
-            storm_data['building_count'] = conf['building_count']
-            # R8: Compute Expected Loss Index
-            eli = _compute_eli(storm_data.get('dps_score', 0), conf['building_count'])
-            storm_data['eli'] = eli['eli']
-            storm_data['eli_tier'] = eli['eli_tier']
-            # R11: Dynamic exposure reclassification — stored per-storm so a
-            # second user activating a different storm doesn't overwrite the
-            # region this storm computed against.
-            exposure_region = storm_data.get('exposure_region', '')
-            _exposure_region_by_storm[storm.storm_id] = exposure_region
-            vdps = _compute_validated_dps(storm_data.get('dps_score', 0), conf['building_count'], exposure_region)
-            storm_data['validated_dps'] = vdps['validated_dps']
-            storm_data['dps_adjustment'] = vdps['dps_adjustment']
-            storm_data['dps_adj_reason'] = vdps['dps_adj_reason']
-            adj_note = f"  Validated DPS: {vdps['validated_dps']:.1f} ({vdps['dps_adj_reason']})" if vdps['dps_adjustment'] != 0 else ""
-            print(f"  Confidence: {conf['confidence']} ({conf['building_count']} buildings)  ELI: {eli['eli']:.1f} ({eli['eli_tier']}){adj_note}")
+            storm_data = payload['storm_data']
+            conf_lvl = storm_data.get('confidence', 'unvalidated')
+            bcount = storm_data.get('building_count', 0)
+            eli_val = storm_data.get('eli', 0.0)
+            eli_tier = storm_data.get('eli_tier', 'unavailable')
+            adj = storm_data.get('dps_adjustment', 0)
+            adj_note = (f"  Validated DPS: {storm_data.get('validated_dps', 0):.1f} "
+                        f"({storm_data.get('dps_adj_reason', '')})" if adj != 0 else "")
+            print(f"  Confidence: {conf_lvl} ({bcount} buildings)  "
+                  f"ELI: {eli_val:.1f} ({eli_tier}){adj_note}")
+            pop_ctx = storm_data.get('population')
+            if pop_ctx:
+                print(f"  Population: {pop_ctx.get('pop_label', '?')} in "
+                      f"{pop_ctx.get('county_name', '?')}, {pop_ctx.get('state_code', '?')}")
 
-            # Population context (Census Bureau)
-            try:
-                pop_ctx = get_population_context(storm.landfall_lat, storm.landfall_lon)
-                if pop_ctx:
-                    storm_data['population'] = pop_ctx
-                    print(f"  Population: {pop_ctx.get('pop_label', '?')} in {pop_ctx.get('county_name', '?')}, {pop_ctx.get('state_code', '?')}")
-            except Exception as e:
-                print(f"  [warn] Census population lookup failed: {e}")
-
-            # Record model run in validation ledger
+            # Record model run in validation ledger (handler-only — we don't
+            # want a pre-warm sweep to log N synthetic activation entries).
             try:
                 model_run = record_from_activation(storm.storm_id, grid_cells, storm_data)
                 print(f"  Validation: logged run — ${model_run.modeled_loss/1e6:,.1f}M modeled, "
                       f"{model_run.building_count} bldgs ({model_run.nsi_count} NSI / {model_run.osm_count} OSM)")
-                # Attach ground truth comparison if available
-                gt = get_ground_truth(storm.storm_id)
-                if gt:
-                    storm_data['ground_truth'] = {
-                        'actual_total_B': gt.actual_damage_B,
-                        'surge_fraction': gt.surge_fraction,
-                        'surge_damage_B': gt.surge_damage_B,
-                        'source': gt.source,
-                    }
             except Exception as e:
                 print(f"  [warn] Validation ledger failed: {e}")
 
@@ -2179,33 +2287,10 @@ class CellHandler(BaseHTTPRequestHandler):
             # causing the SPA's JSON.parse to throw and leaving the loader
             # stuck on screen. Per-cell responses are each <100 MB, fit
             # within proxy ceilings, and stream progressively to the map.
-            #
-            # Server still loads + walks the 9 cells above for confidence,
-            # ELI, validated-DPS, and ledger entry computation — that work
-            # is unchanged. Only the wire-format payload shrinks.
-            cells_available = sorted(grid_cells.keys())
-            # Per-cell summary (tiny — just counts) lets the client compute
-            # an aggregate dashboard estimate before any cell GeoJSON has
-            # arrived. Useful for the "Buildings: 4,496" badge etc.
-            cell_summary = {
-                k: {
-                    'building_count': len((v.get('buildings') or {}).get('features') or []),
-                    'flood_count':    len((v.get('flood')     or {}).get('features') or []),
-                }
-                for k, v in grid_cells.items()
-            }
-            # Save to cache for historic storms (active storms skip the
-            # store entirely so the next click picks up fresh forecast).
-            if not is_active:
-                _activate_cache_put(storm.storm_id, {
-                    'storm_data': storm_data,
-                    'cells_available': cells_available,
-                    'cell_summary': cell_summary,
-                })
             response_data = {
                 "storm": storm_data,
-                "cells_available": cells_available,
-                "cell_summary": cell_summary,
+                "cells_available": payload['cells_available'],
+                "cell_summary": payload['cell_summary'],
             }
             body = json.dumps(response_data).encode()
             self._send_raw(200, body)
@@ -4064,6 +4149,18 @@ def main():
     print(f"  GET /api/storm/<id>/activate    — select a storm")
     print(f"  GET /api/cell?col=N&row=N       — load a grid cell")
     print(f"\nWaiting for requests...\n")
+
+    # Background: activate-cache pre-warm sweep. Walks HISTORICAL_STORMS
+    # after a delay and computes a manifest for any storm without a disk
+    # cache entry. Lets a fresh deploy (and any newly-added historical
+    # storm in the catalog) ship to users with sub-second activation
+    # without a manual ?refresh= round trip.
+    _threading.Thread(
+        target=_prewarm_activate_cache,
+        daemon=True,
+        name='activate-prewarm',
+    ).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
