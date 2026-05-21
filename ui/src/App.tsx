@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Map, { Source, Layer, NavigationControl, Popup, Marker } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
-import maplibregl from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import { getLazyMapLib } from './lazyMapLib';
+// NOTE: do not statically import 'maplibre-gl' or its CSS here. They get
+// loaded on first <Map> mount via the mapLib prop below (see lazyMapLib).
+// Static imports would force Vite to ship maplibre + ~70 KB CSS in the
+// eager bundle and re-introduce the welcome-screen TBT regression that
+// the conditional Map render was supposed to fix.
 
 // ── Extracted modules (see src/types, src/utils, src/layers, src/hooks, src/components) ──
 // These type-only imports verify the extracted files compile cleanly.
@@ -49,17 +53,9 @@ import type {
 import { rollupByCounty, rollupToCentroidGeoJSON, rollupByCity, cityRollupToCentroidGeoJSON, AVG_HOUSEHOLD, DISPLACEMENT_HAIRCUT } from './jurisdictions';
 import type { CountyRollup, CityEntry } from './jurisdictions';
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// PMTiles Protocol (cloud-native vector tiles for flood polygons)
-// Graceful no-op if pmtiles package is not installed yet
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-(async () => {
-  try {
-    const { Protocol } = await import('pmtiles');
-    const protocol = new Protocol();
-    maplibregl.addProtocol('pmtiles', protocol.tile);
-  } catch { /* pmtiles not installed — GeoJSON fallback */ }
-})();
+// PMTiles protocol registration happens inside getLazyMapLib() now — see
+// ./lazyMapLib.ts. The previous top-level IIFE eagerly loaded maplibre at
+// page load just to call addProtocol(). Now both happen on first Map mount.
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Fetch helpers
@@ -4692,6 +4688,7 @@ ${fieldFlag ? `
         {(!!activeStorm || activating) && (
         <Map
           ref={mapRef}
+          mapLib={getLazyMapLib()}
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
           mapStyle={BASEMAPS[basemap]}
           interactiveLayerIds={['damage-points', 'damage-clusters', 'population-points', 'county-aggregate-circle', 'city-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
