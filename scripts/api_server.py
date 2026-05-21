@@ -317,6 +317,58 @@ _active_storm: StormEntry | None = None  # last-activated; used only by /api/sta
 _exposure_region_by_storm: dict[str, str] = {}
 
 
+# ── Activate response cache (manifest only — no GeoJSON payload) ─────────────
+#
+# /api/storm/<id>/activate walks all 9 cells of pre-cached storm data + runs
+# DPS/ELI/validated-DPS + population lookup + ground-truth lookup. For Ian /
+# Milton-class storms this takes 25-60 seconds end-to-end *every time the
+# user clicks the storm row* — even though the result is deterministic for
+# historical storms (the inputs never change).
+#
+# This LRU cache stores only the lightweight manifest (storm_data, the list
+# of available cell coordinates, and the per-cell {building_count,
+# flood_count} summary used for the dashboard badge). The actual GeoJSON
+# payloads for buildings/flood are NEVER cached here — those come back
+# through /api/cell on demand and stay on disk in CACHE_DIR.
+#
+# Cache hit cost: ~50 ms (just _active_storm bookkeeping + JSON serialize).
+# Cache miss cost: 25-60 s (the existing cell walk + DPS compute).
+#
+# Active storms (status='active') skip the cache because the forecast cone /
+# wind probabilities can update intra-session. Historic storms cache forever
+# (until the process restarts on a Railway deploy).
+#
+# Capacity 32 comfortably covers our ~25-storm catalog with headroom for
+# experimental storm_ids during development.
+from collections import OrderedDict
+_ACTIVATE_CACHE: OrderedDict[str, dict] = OrderedDict()
+_ACTIVATE_CACHE_LOCK = _threading.Lock()
+_ACTIVATE_CACHE_MAX = 32
+
+
+def _activate_cache_get(storm_id: str) -> dict | None:
+    with _ACTIVATE_CACHE_LOCK:
+        if storm_id in _ACTIVATE_CACHE:
+            _ACTIVATE_CACHE.move_to_end(storm_id)  # mark as most-recently-used
+            return _ACTIVATE_CACHE[storm_id]
+    return None
+
+
+def _activate_cache_put(storm_id: str, payload: dict) -> None:
+    with _ACTIVATE_CACHE_LOCK:
+        _ACTIVATE_CACHE[storm_id] = payload
+        _ACTIVATE_CACHE.move_to_end(storm_id)
+        while len(_ACTIVATE_CACHE) > _ACTIVATE_CACHE_MAX:
+            _ACTIVATE_CACHE.popitem(last=False)
+
+
+def _activate_cache_invalidate(storm_id: str) -> None:
+    """Drop a single storm's cached manifest. Used when the underlying
+    pre-cached cells change (warm_cache.py re-run, manual delete)."""
+    with _ACTIVATE_CACHE_LOCK:
+        _ACTIVATE_CACHE.pop(storm_id, None)
+
+
 # ── Structured request logging ────────────────────────────────────────────────
 # Every HTTP request gets a short request_id stamped into a thread-local so
 # any code in the handler tree can correlate its log lines to the request
@@ -1846,6 +1898,53 @@ class CellHandler(BaseHTTPRequestHandler):
             print(f"  Grid origin: ({storm.grid_origin_lon}, {storm.grid_origin_lat})")
             print(f"{'='*60}\n")
 
+            # ── Cache fast path ────────────────────────────────────────────
+            # Historic storms produce deterministic activate manifests —
+            # storm_data/cell_summary/cells_available are pure functions of
+            # disk state. If we've already computed them this process-
+            # lifetime, return the cached manifest and skip the 25-60 s of
+            # cell-walking + DPS compute. Side-effect updates (_active_storm,
+            # exposure_region, etc.) still run on every request above /
+            # below this block; only the heavy computation is skipped.
+            #
+            # Active storms bypass the cache so forecast cone / wind probability
+            # changes are picked up immediately.
+            #
+            # Manual cache bust: ?refresh=1 in the URL invalidates the entry
+            # before reading. Useful after warm_cache.py re-runs.
+            refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+            is_active = getattr(storm, 'status', '') == 'active'
+            cached_payload = None
+            if refresh:
+                _activate_cache_invalidate(storm.storm_id)
+            elif not is_active:
+                cached_payload = _activate_cache_get(storm.storm_id)
+
+            if cached_payload is not None:
+                # Cache hit. Apply the per-request side effects we'd
+                # normally do after the heavy compute, then return.
+                storm_data = cached_payload['storm_data']
+                # exposure region needs to be live for cell handlers that
+                # read _exposure_region_by_storm during /api/cell calls.
+                _exposure_region_by_storm[storm.storm_id] = storm_data.get('exposure_region', '')
+                print(f"  [cache] HIT for {storm.storm_id} — skipping cell walk + DPS compute")
+                # Flag progress as complete immediately so the client poll
+                # doesn't show a stale "Loading cell..." string from a
+                # prior storm's activation.
+                _progress.update(
+                    step='Complete', step_num=1, total_steps=1,
+                    started_at=_time.time(), storm_id=storm.storm_id,
+                )
+                response_data = {
+                    "storm": storm_data,
+                    "cells_available": cached_payload['cells_available'],
+                    "cell_summary": cached_payload['cell_summary'],
+                }
+                body = json.dumps(response_data).encode()
+                self._send_raw(200, body)
+                return
+
+            # ── Cache miss: full activation work ──────────────────────────
             # Load all pre-cached cells around landfall (3×3 for all storms
             # to stay within Railway 5 GB volume limit).  Cached cells return
             # instantly; uncached ones are generated on the fly.  Users can
@@ -1973,6 +2072,14 @@ class CellHandler(BaseHTTPRequestHandler):
                 }
                 for k, v in grid_cells.items()
             }
+            # Save to cache for historic storms (active storms skip the
+            # store entirely so the next click picks up fresh forecast).
+            if not is_active:
+                _activate_cache_put(storm.storm_id, {
+                    'storm_data': storm_data,
+                    'cells_available': cells_available,
+                    'cell_summary': cell_summary,
+                })
             response_data = {
                 "storm": storm_data,
                 "cells_available": cells_available,

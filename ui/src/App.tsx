@@ -4021,9 +4021,31 @@ ${fieldFlag ? `
       // small manifest; cells stream in here in parallel via /api/cell,
       // which already handles single-cell loads gracefully (and has been
       // proxy-friendly the whole time since each cell is ≤100 MB).
-      const cellsAvailable: string[] = Array.isArray(data.cells_available)
+      const cellsAvailableRaw: string[] = Array.isArray(data.cells_available)
         ? data.cells_available
         : ['0,0'];  // legacy fallback: at least load the center cell
+
+      // ── Skip cells the server already told us are empty ──
+      // The activate manifest includes cell_summary: { "col,row": { building_count, flood_count }, ... }
+      // Cells with 0 buildings AND 0 flood features carry no payload worth
+      // fetching — they're usually corner cells over water or far inland.
+      // Filtering them out at this stage cuts queue depth from 9 to 5-7 on
+      // most storms, which both reduces server-side semaphore pressure and
+      // hides the long tail-cell latency we saw in the perf-audit timing.
+      const cellSummary: Record<string, { building_count: number; flood_count: number } | undefined> =
+        (data && typeof data.cell_summary === 'object') ? data.cell_summary : {};
+      const cellsAvailable: string[] = cellsAvailableRaw.filter(k => {
+        const sum = cellSummary[k];
+        if (!sum) return true; // no summary info → fetch to be safe
+        return (sum.building_count || 0) > 0 || (sum.flood_count || 0) > 0;
+      });
+      // Pre-populate loadedCells with empty-cell keys so a map click into
+      // one of those cells doesn't trigger a useless fetch — the user gets
+      // immediate "loaded, nothing here" semantics.
+      const skippedKeys = cellsAvailableRaw.filter(k => !cellsAvailable.includes(k));
+      if (skippedKeys.length) {
+        setLoadedCells(prev => new Set([...prev, ...skippedKeys]));
+      }
       const totalCells = cellsAvailable.length;
       let cellsDone = 0;
 
@@ -4111,21 +4133,29 @@ ${fieldFlag ? `
       // after the flyTo to landfall. Surrounding cells fill in afterward
       // with a small concurrency cap so a high-payload storm (Milton has
       // ~80 MB / cell × 9 = 720 MB total) doesn't drown the browser's
-      // main thread in nine simultaneous JSON.parse + Maplibre source
+      // main thread in many simultaneous JSON.parse + Maplibre source
       // updates — that pattern froze the renderer for 30+ s during the
       // mobile-walkthrough test even after the activate response was
-      // shrunk. Two concurrent loaders is the sweet spot: progressive
-      // paint, ~150 MB peak in-flight bytes, total wall-clock around
-      // (cells-1)/2 × per-cell-latency.
+      // shrunk.
+      //
+      // Concurrency bumped 2 → 3 once empty cells were filtered out
+      // upstream: with 5-7 cells in the queue (vs the old 9) and 3 workers
+      // in flight we cap peak in-flight bytes at ~240 MB, paying ~30%
+      // shorter wall-clock for storm activations.
       const CENTER_KEY = '0,0';
       const centerFirst = cellsAvailable.includes(CENTER_KEY)
         ? [CENTER_KEY, ...cellsAvailable.filter(k => k !== CENTER_KEY)]
         : cellsAvailable;
-      await loadOneCell(centerFirst[0]);
+      if (centerFirst.length === 0) {
+        // Pathological: server returned an empty manifest. Bail cleanly.
+        setLoadProgress(prev => ({ ...prev, step: 'Complete', step_num: 0, total_steps: 0 }));
+      } else {
+        await loadOneCell(centerFirst[0]);
+      }
 
-      // Remaining cells through a 2-worker queue
+      // Remaining cells through a 3-worker queue
       const queue = centerFirst.slice(1);
-      const CELL_CONCURRENCY = 2;
+      const CELL_CONCURRENCY = 3;
       const workers = Array.from({ length: CELL_CONCURRENCY }, async () => {
         while (queue.length > 0) {
           const next = queue.shift();
