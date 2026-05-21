@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import Map, { Source, Layer, NavigationControl, Popup, Marker } from 'react-map-gl/maplibre';
 import type { MapRef } from 'react-map-gl/maplibre';
 import { getLazyMapLib } from './lazyMapLib';
@@ -3948,8 +3949,21 @@ ${fieldFlag ? `
     activatingRef.current = stormId;
     setActivating(true);
     markWelcomed();
-    setAllBuildings(null); setAllFlood(null);
-    setLoadedCells(new Set()); setLoadingCells(new Set());
+    // flushSync the data-heavy clears so React commits them in the same
+    // tick as the click. Without this, React would batch these with the
+    // ~15 setState calls below and the next activate fetch would start
+    // while MapLibre still had the prior storm's ~100 MB of GeoJSON in
+    // its source — the paint-pipeline thrash during rapid storm switches
+    // was the freeze we saw in the multi-storm test. The orphan-clear is
+    // safe to flush synchronously because the new activate fetch hasn't
+    // started yet; the only observable effect is an empty map for ~1
+    // frame, which is preferable to a 5-second freeze.
+    flushSync(() => {
+      setAllBuildings(null);
+      setAllFlood(null);
+      setLoadedCells(new Set());
+      setLoadingCells(new Set());
+    });
     setImpactTotals({ buildings: 0, loss: 0, totalDepth: 0 }); setHoverInfo(null);
     setPinnedInfo(null);
     // Reset tick slider so stale tick data from a previous storm doesn't
