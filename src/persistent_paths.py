@@ -64,7 +64,7 @@ MRMS_DIR       = PERSISTENT_DATA_DIR / "mrms"       # MRMS QPE GeoTIFF cache
 # don't re-walk all 9 cells + recompute DPS/ELI for storms we've already
 # seen. Lives on the persistent volume so a Railway deploy doesn't wipe it.
 # Schema version is stamped in each file; bump the constant in api_server.py
-# to invalidate the whole directory. Trigger redeploy: 63dcf57.
+# to invalidate the whole directory. Verified persistence: a8652b3.
 ACTIVATE_CACHE_DIR = PERSISTENT_DATA_DIR / "activate_cache"
 # ── HAND/NWM (fluvial layer) ─────────────────────────────────────────────────
 # HAND rasters are downloaded once per HUC8 from NOAA OWP FIM and kept
