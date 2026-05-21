@@ -3233,6 +3233,13 @@ function App() {
   // Progress tracking for loading overlay
   const [loadProgress, setLoadProgress] = useState<{ step: string; step_num: number; total_steps: number; elapsed: number }>({ step: '', step_num: 0, total_steps: 4, elapsed: 0 });
   const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Belt-and-suspenders unmount cleanup. activateStorm's finally block
+  // clears the interval on normal/aborted/timed-out exit, but if the App
+  // unmounts mid-activation (route change, error boundary catching), the
+  // interval would keep polling /api/progress forever. (Audit #7.)
+  useEffect(() => () => {
+    if (progressIntervalRef.current) { clearInterval(progressIntervalRef.current); progressIntervalRef.current = null; }
+  }, []);
 
   // ── Address search (geocoding via Nominatim) ──
   const [addressQuery, setAddressQuery] = useState('');
@@ -3240,6 +3247,13 @@ function App() {
   const [addressError, setAddressError] = useState('');
   const flyToPopupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; } }, []);
+  // Also clear on storm switch — the 2.2 s delayed setPinnedInfo captures
+  // `nearest` from a stale closure, and without this it can fire after the
+  // new storm is active and pin an orphaned building from the old storm.
+  // (Audit #5.)
+  useEffect(() => {
+    if (flyToPopupTimer.current) { clearTimeout(flyToPopupTimer.current); flyToPopupTimer.current = null; }
+  }, [activeStorm?.storm_id]);
   const handleAddressSearch = useCallback(() => {
     const q = addressQuery.trim();
     if (!q || !mapRef.current) return;
@@ -3871,11 +3885,24 @@ ${fieldFlag ? `
   const geocodeCache = useRef<Record<string, string>>({});
   const [hoverAddress, setHoverAddress] = useState<string | null>(null);
 
-  // Activate a storm (use ref to avoid recreating callback on activating changes)
-  const activatingRef = useRef(false);
+  // Activate a storm.
+  // activatingRef holds the storm_id of the in-flight activation (or null).
+  // Clicking the same storm twice is a no-op; clicking a *different* storm
+  // aborts the in-flight one and starts the new one. (The previous "silent
+  // no-op on storm switch" bug was the activatingRef guard rejecting B
+  // while A was still loading — see audit #2.)
+  const activatingRef = useRef<string | null>(null);
   const activateStorm = useCallback(async (stormId: string) => {
-    if (activatingRef.current) return;
-    activatingRef.current = true;
+    if (activatingRef.current === stormId) return; // already loading this storm
+    if (activatingRef.current && activateAbortRef.current) {
+      // Switching storms mid-activation: abort the prior fetch. The aborted
+      // activation's AbortError branch will set activating=false on its
+      // own; we don't await it because the per-cell `activeStormRef.current
+      // ?.storm_id !== stormId` guards already protect against stale state
+      // updates from the dying activation.
+      try { activateAbortRef.current.abort(); } catch { /* already aborted */ }
+    }
+    activatingRef.current = stormId;
     setActivating(true);
     markWelcomed();
     setAllBuildings(null); setAllFlood(null);
@@ -3950,6 +3977,19 @@ ${fieldFlag ? `
         const [colStr, rowStr] = key.split(',');
         const col = parseInt(colStr, 10), row = parseInt(rowStr, 10);
         if (!Number.isFinite(col) || !Number.isFinite(row)) return;
+        // Dedupe against any in-flight map-click loadCell for the same key.
+        // (Audit #1: without this, clicking a grid cell during activation
+        //  fired a parallel duplicate fetch.)
+        if (loadingCellsRef.current.has(key) || loadedCellsRef.current.has(key)) {
+          cellsDone += 1; // still advance the progress counter
+          return;
+        }
+        setLoadingCells(prev => new Set([...prev, key]));
+        // Re-check both storm AND activation-id on every state commit —
+        // covers the window between user-switch and activeStormRef catching up.
+        const stillCurrent = () =>
+          activeStormRef.current?.storm_id === stormId &&
+          activatingRef.current === stormId;
         try {
           const cellAc = new AbortController();
           const cellTimeout = setTimeout(() => cellAc.abort(), 90_000);
@@ -3959,7 +3999,7 @@ ${fieldFlag ? `
           );
           clearTimeout(cellTimeout);
           // Guard against the user switching storms while cells are in flight.
-          if (activeStormRef.current?.storm_id !== stormId) return;
+          if (!stillCurrent()) return;
 
           // Merge flood polygons first (cheap, repaints quickly).
           if (cellData.flood?.features) {
@@ -3972,7 +4012,7 @@ ${fieldFlag ? `
           // Defer building merge by one tick so flood paints before
           // React commits the much larger building feature set.
           setTimeout(() => {
-            if (activeStormRef.current?.storm_id !== stormId) return;
+            if (!stillCurrent()) return;
             const feats = cellData.buildings?.features || [];
             if (feats.length) {
               setAllBuildings((p: any) => p
@@ -3994,6 +4034,7 @@ ${fieldFlag ? `
           // log + continue. The other cells still merge in successfully.
           console.warn(`Cell (${col},${row}) load failed:`, cellErr);
         } finally {
+          setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; });
           cellsDone += 1;
           setLoadProgress(prev => ({
             ...prev,
@@ -4042,9 +4083,14 @@ ${fieldFlag ? `
         setCellError('Failed to load storm data. The server may be warming up — try again in a moment.');
       }
     } finally {
-      if (progressIntervalRef.current) { clearInterval(progressIntervalRef.current); progressIntervalRef.current = null; }
-      setActivating(false);
-      activatingRef.current = false;
+      // Only clear shared state if no newer activation has taken over.
+      // (Without this check, a fast B-then-A-finish sequence would have A's
+      //  finally clobber B's activating flag and stop B's progress polling.)
+      if (activatingRef.current === stormId) {
+        if (progressIntervalRef.current) { clearInterval(progressIntervalRef.current); progressIntervalRef.current = null; }
+        setActivating(false);
+        activatingRef.current = null;
+      }
     }
   }, []); // stable — no dependencies
 
@@ -4546,6 +4592,11 @@ ${fieldFlag ? `
   const loadCell = useCallback(async (col: number, row: number) => {
     const key = cellKey(col, row);
     if (loadedCellsRef.current.has(key) || loadingCellsRef.current.has(key)) return;
+    // Bail if an activation is in flight — activateStorm's loadOneCell will
+    // load this cell as part of the manifest. (Audit #6: without this guard,
+    // a map click during activation could fire a duplicate fetch for a cell
+    // the activator was already about to load.)
+    if (activatingRef.current !== null) return;
     const stormId = activeStormRef.current?.storm_id || '';
     if (!stormId) return; // no active storm
     setLoadingCells(prev => new Set([...prev, key]));
@@ -4565,10 +4616,16 @@ ${fieldFlag ? `
       if (cellData.validated_dps) setValidatedDps({ value: cellData.validated_dps, adj: cellData.dps_adjustment || 0, reason: cellData.dps_adj_reason || '' });
 
       // ── Flood first: render immediately for fast visual feedback ──
-      setAllFlood((p: any) => {
-        if (!p) return flood;
-        return { type: 'FeatureCollection', features: p.features.concat(flood.features) };
-      });
+      // Guard against cells with no flood data (e.g. inland cells where
+      // only buildings are returned). Without this the .concat threw a
+      // TypeError that fell through to the outer catch and surfaced a
+      // misleading "data source unavailable" toast. (Audit #4.)
+      if (flood?.features) {
+        setAllFlood((p: any) => {
+          if (!p) return flood;
+          return { type: 'FeatureCollection', features: p.features.concat(flood.features) };
+        });
+      }
       setLoadedCells(prev => new Set([...prev, key]));
 
       // ── Buildings deferred: push to next tick so flood paints first ──
