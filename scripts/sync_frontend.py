@@ -112,57 +112,59 @@ def sync_assets(assets: dict[str, Path], dry_run: bool) -> None:
 
 
 def update_index_html(assets: dict[str, Path], dry_run: bool) -> None:
-    """Rewrite index.html with the new hashed filenames."""
+    """Replace the destination index.html with Vite's freshly-built copy.
+
+    Earlier this function did regex hash replacement against the existing
+    StormDPS index.html. That broke once Vite started emitting multiple
+    CSS files and modulepreload hints (added during the manualChunks
+    split): the regex only patched the main JS/CSS names, leaving the
+    new `<link rel="modulepreload">` lines and the maplibre CSS file
+    out of the synced file entirely — so the map rendered unstyled in
+    production until someone noticed.
+
+    Now we just copy the build's index.html verbatim. Vite already
+    emits the correct hashed asset names, modulepreload hints, and
+    the full set of CSS links. The dest dir's content-stable bits
+    (favicon path, etc.) are owned by what Vite produces from
+    ui/index.html anyway, so a verbatim copy is the right behaviour.
+    """
     print("── Updating index.html ──────────────────────────────")
 
-    if not INDEX_HTML.exists():
-        print(f"ERROR: index.html not found at {INDEX_HTML}", file=sys.stderr)
+    src_index = UI_DIR / "dist" / "index.html"
+    if not src_index.exists():
+        print(f"ERROR: build index.html not found at {src_index}", file=sys.stderr)
         sys.exit(1)
 
-    html = INDEX_HTML.read_text(encoding="utf-8")
-    original = html
+    new_html = src_index.read_text(encoding="utf-8")
+    if INDEX_HTML.exists():
+        old_html = INDEX_HTML.read_text(encoding="utf-8")
+    else:
+        old_html = ""
 
-    js_main  = assets.get("js_main")
-    css_main = assets.get("css_main")
+    if new_html == old_html:
+        print("  index.html — already matches build output")
+        print()
+        return
 
-    if js_main:
-        # Replace any existing index-HASH.js references (preload + script src)
-        html = re.sub(
-            r'index-[A-Za-z0-9_-]+\.js',
-            js_main.name,
-            html,
-        )
-
-    if css_main:
-        # Replace any existing index-HASH.css references (preload + link href)
-        html = re.sub(
-            r'index-[A-Za-z0-9_-]+\.css',
-            css_main.name,
-            html,
-        )
-
-    # Handle any extra JS chunks (e.g. maplibre split chunk)
-    for role, path in assets.items():
-        if role.startswith("js_chunk_"):
-            old_stem = re.escape(path.stem.rsplit("-", 1)[0])  # strip hash
-            html = re.sub(
-                rf'{old_stem}-[A-Za-z0-9_-]+\.js',
-                path.name,
-                html,
-            )
-
-    if html == original:
-        print("  index.html — no changes needed (hashes already match)")
-    elif dry_run:
-        print("[dry-run] Would update index.html with new hashes")
-        # Show a diff-style preview
-        for old_line, new_line in zip(original.splitlines(), html.splitlines()):
+    if dry_run:
+        print(f"[dry-run] Would overwrite {INDEX_HTML} with {src_index}")
+        # Show a diff-style preview of the lines that differ
+        for old_line, new_line in zip(old_html.splitlines(), new_html.splitlines()):
             if old_line != new_line:
                 print(f"  - {old_line.strip()}")
                 print(f"  + {new_line.strip()}")
+        # If line counts differ, show the trailing additions/removals
+        old_lines = old_html.splitlines()
+        new_lines = new_html.splitlines()
+        if len(new_lines) > len(old_lines):
+            for nl in new_lines[len(old_lines):]:
+                print(f"  + {nl.strip()}")
+        elif len(old_lines) > len(new_lines):
+            for ol in old_lines[len(new_lines):]:
+                print(f"  - {ol.strip()}")
     else:
-        INDEX_HTML.write_text(html, encoding="utf-8")
-        print(f"  index.html updated at {INDEX_HTML}")
+        INDEX_HTML.write_text(new_html, encoding="utf-8")
+        print(f"  index.html overwritten with build copy ({INDEX_HTML})")
     print()
 
 
