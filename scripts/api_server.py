@@ -1950,13 +1950,34 @@ class CellHandler(BaseHTTPRequestHandler):
             except Exception as _e:
                 print(f"  [warn] gauge pre-warm setup failed: {_e}")
 
+            # Wire format: send only metadata + a small manifest. The cells
+            # themselves go through /api/cell on individual requests so a
+            # 700-MB-payload storm (Milton, Ian) doesn't blow past Cloudflare
+            # / Railway proxy buffers — the previous response shape bundled
+            # all 9 cells inline and was truncated mid-stream by the edge,
+            # causing the SPA's JSON.parse to throw and leaving the loader
+            # stuck on screen. Per-cell responses are each <100 MB, fit
+            # within proxy ceilings, and stream progressively to the map.
+            #
+            # Server still loads + walks the 9 cells above for confidence,
+            # ELI, validated-DPS, and ledger entry computation — that work
+            # is unchanged. Only the wire-format payload shrinks.
+            cells_available = sorted(grid_cells.keys())
+            # Per-cell summary (tiny — just counts) lets the client compute
+            # an aggregate dashboard estimate before any cell GeoJSON has
+            # arrived. Useful for the "Buildings: 4,496" badge etc.
+            cell_summary = {
+                k: {
+                    'building_count': len((v.get('buildings') or {}).get('features') or []),
+                    'flood_count':    len((v.get('flood')     or {}).get('features') or []),
+                }
+                for k, v in grid_cells.items()
+            }
             response_data = {
                 "storm": storm_data,
-                "center_cell": center_data,
+                "cells_available": cells_available,
+                "cell_summary": cell_summary,
             }
-            # R6: Include all grid cells if 3x3 was loaded
-            if grid_cells:
-                response_data["grid_cells"] = grid_cells
             body = json.dumps(response_data).encode()
             self._send_raw(200, body)
             return

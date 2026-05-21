@@ -3918,44 +3918,92 @@ ${fieldFlag ? `
       const timeout = setTimeout(() => { timedOut = true; ac.abort(); }, 300_000); // 5 min timeout (loading 3×3 grid)
       const data = await fetchJson<any>(`/surgedps/api/storm/${stormId}/activate`, { signal: ac.signal });
       clearTimeout(timeout);
-      const { storm, center_cell } = data;
+      const { storm } = data;
       setActiveStorm(storm);
       if (storm.confidence) setConfidence({ level: storm.confidence, count: storm.building_count || 0 });
       if (storm.eli) setEli({ value: storm.eli, tier: storm.eli_tier || 'unavailable' });
       if (storm.validated_dps) setValidatedDps({ value: storm.validated_dps, adj: storm.dps_adjustment || 0, reason: storm.dps_adj_reason || '' });
 
-      // Fetch pre-computed cell manifest (non-blocking — shades grid cells as "ready")
-      const manifestStormId = stormId;
-      fetchJson<{ cells?: Record<string, any> }>(`/surgedps/api/manifest?storm_id=${stormId}`)
-        .then(m => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest(m?.cells || {}); })
-        .catch(() => { if (activeStormRef.current?.storm_id === manifestStormId) setManifest({}); });
-
-      // Load all grid cells returned by the server (3×3 when pre-cached)
-      const gridCells = data.grid_cells || (center_cell ? { '0,0': center_cell } : {});
-      const loadedKeys = new Set<string>();
-      let mergedBuildings: any[] = [];
-      let mergedFlood: any[] = [];
-      let totalBuildings = 0, totalLoss = 0, totalDepthSum = 0;
-
-      for (const [key, cellData] of Object.entries(gridCells) as [string, any][]) {
-        loadedKeys.add(key);
-        if (cellData.buildings?.features) mergedBuildings = mergedBuildings.concat(cellData.buildings.features);
-        if (cellData.flood?.features) mergedFlood = mergedFlood.concat(cellData.flood.features);
-        const feats = cellData.buildings?.features || [];
-        totalBuildings += feats.length;
-        totalLoss += feats.reduce((s: number, f: any) => s + (f.properties.estimated_loss_usd || 0), 0);
-        totalDepthSum += feats.reduce((s: number, f: any) => s + (f.properties.depth_ft || 0), 0);
-      }
-
-      setAllBuildings({ type: 'FeatureCollection', features: mergedBuildings });
-      setAllFlood({ type: 'FeatureCollection', features: mergedFlood });
-      setLoadedCells(loadedKeys);
-      setImpactTotals({ buildings: totalBuildings, loss: totalLoss, totalDepth: totalDepthSum });
-
+      // Fly to landfall immediately on dashboard arrival; cells will paint
+      // in as their individual fetches complete.
       mapRef.current?.flyTo({ center: [storm.landfall_lon, storm.landfall_lat], zoom: 10, pitch: 30, duration: 2500 });
-
-      // Server may return partial data with a cell_error flag
       if (storm.cell_error) setCellError(storm.cell_error);
+
+      // ── Progressive per-cell fetch (replaces the old in-response bundle) ──
+      // The activate endpoint used to ship all 9 cells in one ~700 MB JSON
+      // for Milton/Ian, which Cloudflare/Railway proxies truncated mid-
+      // stream — SPA's r.json() threw "Unexpected end of JSON input" and
+      // the loader stayed stuck forever.  Now the activate response is a
+      // small manifest; cells stream in here in parallel via /api/cell,
+      // which already handles single-cell loads gracefully (and has been
+      // proxy-friendly the whole time since each cell is ≤100 MB).
+      const cellsAvailable: string[] = Array.isArray(data.cells_available)
+        ? data.cells_available
+        : ['0,0'];  // legacy fallback: at least load the center cell
+      const totalCells = cellsAvailable.length;
+      let cellsDone = 0;
+
+      const aggregate = { buildings: 0, loss: 0, totalDepth: 0 };
+      setImpactTotals(aggregate);
+
+      const cellPromises = cellsAvailable.map(async (key) => {
+        const [colStr, rowStr] = key.split(',');
+        const col = parseInt(colStr, 10), row = parseInt(rowStr, 10);
+        if (!Number.isFinite(col) || !Number.isFinite(row)) return;
+        try {
+          const cellAc = new AbortController();
+          const cellTimeout = setTimeout(() => cellAc.abort(), 90_000);
+          const cellData = await fetchJson<any>(
+            `/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`,
+            { signal: cellAc.signal },
+          );
+          clearTimeout(cellTimeout);
+          // Guard against the user switching storms while cells are in flight.
+          if (activeStormRef.current?.storm_id !== stormId) return;
+
+          // Merge flood polygons first (cheap, repaints quickly).
+          if (cellData.flood?.features) {
+            setAllFlood((p: any) => p
+              ? { type: 'FeatureCollection', features: p.features.concat(cellData.flood.features) }
+              : cellData.flood);
+          }
+          setLoadedCells(prev => new Set([...prev, key]));
+
+          // Defer building merge by one tick so flood paints before
+          // React commits the much larger building feature set —
+          // matches the existing single-cell loadCell pattern below.
+          setTimeout(() => {
+            if (activeStormRef.current?.storm_id !== stormId) return;
+            const feats = cellData.buildings?.features || [];
+            if (feats.length) {
+              setAllBuildings((p: any) => p
+                ? { type: 'FeatureCollection', features: p.features.concat(feats) }
+                : cellData.buildings);
+            }
+            aggregate.buildings += feats.length;
+            aggregate.loss += feats.reduce((s: number, f: any) => s + (f.properties?.estimated_loss_usd || 0), 0);
+            aggregate.totalDepth += feats.reduce((s: number, f: any) => s + (f.properties?.depth_ft || 0), 0);
+            setImpactTotals({ ...aggregate });
+          }, 0);
+
+          // Track per-cell confidence updates as they arrive
+          if (cellData.confidence) setConfidence({ level: cellData.confidence, count: cellData.building_count || 0 });
+          if (cellData.eli) setEli({ value: cellData.eli, tier: cellData.eli_tier || 'unavailable' });
+          if (cellData.validated_dps) setValidatedDps({ value: cellData.validated_dps, adj: cellData.dps_adjustment || 0, reason: cellData.dps_adj_reason || '' });
+        } catch (cellErr: any) {
+          // A single cell failing shouldn't sink the whole activation —
+          // log + continue. The other cells still merge in successfully.
+          console.warn(`Cell (${col},${row}) load failed:`, cellErr);
+        } finally {
+          cellsDone += 1;
+          setLoadProgress(prev => ({
+            ...prev,
+            step: `Loading cells (${cellsDone}/${totalCells})`,
+            step_num: cellsDone, total_steps: totalCells,
+          }));
+        }
+      });
+      await Promise.allSettled(cellPromises);
     } catch (err: any) {
       if (err?.name === 'AbortError' && !timedOut) {
         console.log('Storm activation cancelled by user');
