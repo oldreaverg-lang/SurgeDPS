@@ -3720,13 +3720,26 @@ class CellHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         _tb.print_exc()
+        # Pull the deepest frame from the traceback so the body can
+        # report file:line — gives us pinpoint diagnosis without
+        # paging the user. Wrapped defensively in case format_tb misses.
+        exc_loc = ''
+        try:
+            tb = exc.__traceback__
+            while tb is not None and tb.tb_next is not None:
+                tb = tb.tb_next
+            if tb is not None:
+                fr = tb.tb_frame
+                fname = (fr.f_code.co_filename or '').rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+                exc_loc = f'{fname}:{tb.tb_lineno}:{fr.f_code.co_name}'
+        except Exception:
+            pass
         try:
             body = json.dumps({
                 'error': 'internal_error',
-                # Class name only — bounded set of identifiers, no path leaks,
-                # but enough to tell us "AttributeError vs FileNotFoundError"
-                # when triaging from log-correlated request_ids.
                 'exc_type': type(exc).__name__,
+                'exc_loc': exc_loc,
+                'exc_msg': str(exc)[:120],
                 'request_id': rid,
             }).encode()
             self._send_raw(
