@@ -3723,6 +3723,10 @@ class CellHandler(BaseHTTPRequestHandler):
         try:
             body = json.dumps({
                 'error': 'internal_error',
+                # Class name only — bounded set of identifiers, no path leaks,
+                # but enough to tell us "AttributeError vs FileNotFoundError"
+                # when triaging from log-correlated request_ids.
+                'exc_type': type(exc).__name__,
                 'request_id': rid,
             }).encode()
             self._send_raw(
