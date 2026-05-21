@@ -1758,9 +1758,17 @@ class CellHandler(BaseHTTPRequestHandler):
                 # accordion shows both 'al092017' AND 'harvey_2017' for the
                 # same storm, lets users click either, and they get
                 # divergent damage estimates from independent cell caches.
-                from storm_catalog.catalog import (
-                    HISTORICAL_STORMS, _normalize_storm_name,
-                )
+                # NOTE: do NOT re-import HISTORICAL_STORMS here. It's already
+                # in scope from the top-of-file import (line 42). Adding it to
+                # this inline `from ... import` would mark HISTORICAL_STORMS
+                # as a function-local for _do_GET_dispatch, and every OTHER
+                # `for s in HISTORICAL_STORMS` line earlier in the same
+                # function (incl. /api/storms/historic at line 1745) would
+                # hit UnboundLocalError because Python's scope rule "any
+                # assignment in a function makes the name local for the
+                # WHOLE function" applies even to imports. Cost us a 500 on
+                # /api/storms/historic until the build that fixed it shipped.
+                from storm_catalog.catalog import _normalize_storm_name
                 curated_name_year = {
                     (_normalize_storm_name(h.name), h.year)
                     for h in HISTORICAL_STORMS
@@ -3720,26 +3728,9 @@ class CellHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         _tb.print_exc()
-        # Pull the deepest frame from the traceback so the body can
-        # report file:line — gives us pinpoint diagnosis without
-        # paging the user. Wrapped defensively in case format_tb misses.
-        exc_loc = ''
-        try:
-            tb = exc.__traceback__
-            while tb is not None and tb.tb_next is not None:
-                tb = tb.tb_next
-            if tb is not None:
-                fr = tb.tb_frame
-                fname = (fr.f_code.co_filename or '').rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
-                exc_loc = f'{fname}:{tb.tb_lineno}:{fr.f_code.co_name}'
-        except Exception:
-            pass
         try:
             body = json.dumps({
                 'error': 'internal_error',
-                'exc_type': type(exc).__name__,
-                'exc_loc': exc_loc,
-                'exc_msg': str(exc)[:120],
                 'request_id': rid,
             }).encode()
             self._send_raw(
