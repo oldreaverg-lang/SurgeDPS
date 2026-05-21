@@ -5,6 +5,21 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SurgeDPS — Storm Surge Damage Analysis</title>
+
+    <!-- Preconnect to the basemap tile origin. Lighthouse mobile reported
+         the dark-matter style.json fetch alone added ~1.7 s to the critical
+         path; preconnecting opens the TCP + TLS handshake during the HTML
+         parse so by the time the map needs tiles the connection is live. -->
+    <link rel="preconnect" href="https://basemaps.cartocdn.com" crossorigin />
+    <link rel="dns-prefetch" href="https://basemaps.cartocdn.com" />
+
+    <!-- Preconnect to CARTO tile servers used at runtime (sub-domains rotate
+         a-d.basemaps.cartocdn.com). dns-prefetch is cheap and covers all of
+         them; an explicit preconnect to the wildcard isn't possible. -->
+    <link rel="dns-prefetch" href="https://a.basemaps.cartocdn.com" />
+    <link rel="dns-prefetch" href="https://b.basemaps.cartocdn.com" />
+    <link rel="dns-prefetch" href="https://c.basemaps.cartocdn.com" />
+    <link rel="dns-prefetch" href="https://d.basemaps.cartocdn.com" />
   </head>
   <body>
     <div id="root"></div>

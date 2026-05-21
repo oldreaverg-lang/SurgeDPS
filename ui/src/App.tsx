@@ -2451,6 +2451,13 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeStorm, setActiveStorm] = useState<StormInfo | null>(null);
   const [activating, setActivating] = useState(false);
+  // Tracks whether the maplibre Map has finished mounting + initializing
+  // its GL context. Set true by Map's onLoad, false on unmount. Used to
+  // fire deferred flyTo() after the map first appears (since the Map
+  // element is now conditionally mounted only when a storm is active or
+  // activating, mapRef.current can be null at the moment activateStorm
+  // completes its fetch).
+  const [mapReady, setMapReady] = useState(false);
   // Lightweight cache of the historic-storm catalog so the welcome card's
   // notable-storms chips can render the same Saffir-Simpson category the
   // dashboard ends up showing once a storm is loaded. Previously the
@@ -2652,6 +2659,30 @@ function App() {
       mapRef.current.flyTo({ center: [activeStorm.landfall_lon, activeStorm.landfall_lat], zoom: 10, pitch: 30, duration: 2000 });
     }
   }, [activeStorm]);
+
+  // After-mount flyTo: when the Map mounts for the first time (or remounts
+  // after a tab return), its onLoad sets mapReady=true. If a storm was
+  // activated before the map was ready, fly to the landfall now. Without
+  // this, the inline flyTo in activateStorm misses because mapRef.current
+  // is still null at the moment activation completes.
+  useEffect(() => {
+    if (mapReady && activeStorm && mapRef.current) {
+      mapRef.current.flyTo({
+        center: [activeStorm.landfall_lon, activeStorm.landfall_lat],
+        zoom: 10, pitch: 30, duration: 1200,
+      });
+    }
+  }, [mapReady, activeStorm]);
+
+  // Reset mapReady when the Map is conditionally unmounted (no storm
+  // active, not activating). Without this, mapReady stays true after a
+  // storm clear, and the next activation's flyTo useEffect doesn't
+  // re-fire because the dependency value never transitions false→true.
+  useEffect(() => {
+    if (!activeStorm && !activating) {
+      setMapReady(false);
+    }
+  }, [activeStorm, activating]);
 
   // ── County boundaries (bundled coastal-states GeoJSON) ──
   // The overlay ships as a static asset (~1.2 MB, Census cartographic boundary,
@@ -4649,8 +4680,16 @@ ${fieldFlag ? `
         />
       )}
 
-      {/* Map Area */}
+      {/* Map Area
+          Map is mounted only when a storm is active or actively being
+          activated. Lighthouse mobile flagged the unconditional Map mount
+          as a 970ms TBT cost on the welcome screen — maplibre's parse +
+          GL context init runs for users who haven't picked a storm yet.
+          With this gate, the welcome screen stays at minimal main-thread
+          cost; the map mounts during the existing 2-3s activation window
+          where its ~500ms init is invisible to the user. */}
       <div className="relative flex-1">
+        {(!!activeStorm || activating) && (
         <Map
           ref={mapRef}
           initialViewState={{ longitude: -85, latitude: 30, zoom: 5, pitch: 0 }}
@@ -4658,6 +4697,7 @@ ${fieldFlag ? `
           interactiveLayerIds={['damage-points', 'damage-clusters', 'population-points', 'county-aggregate-circle', 'city-aggregate-circle', ...(showGrid ? ['grid-available-fill', 'grid-ready-fill'] : [])]}
           cursor={hoverInfo?.type === 'cluster' || hoverInfo?.type === 'grid' || hoverInfo?.type === 'damage' || hoverInfo?.type === 'population' || hoverInfo?.type === 'county' || hoverInfo?.type === 'city' ? 'pointer' : ''}
           onMouseMove={onHover} onClick={onClick}
+          onLoad={() => setMapReady(true)}
           onMoveEnd={e => {
             setZoom(e.viewState.zoom);
             if (basemap === 'satellite') fetchImageryMeta(e.viewState.latitude, e.viewState.longitude);
@@ -5477,6 +5517,7 @@ ${fieldFlag ? `
             </Popup>
           )}
         </Map>
+        )}
 
         {/* ── Sidebar reopen toggle — visible whenever sidebar is collapsed ── */}
         {!sidebarOpen && (
