@@ -2649,6 +2649,11 @@ function App() {
   const [gridHintDismissed, setGridHintDismissed] = useState(false);
   const gridHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activateAbortRef = useRef<AbortController | null>(null);
+  // Registry of all in-flight /api/cell fetches. Storm-switch and unmount
+  // abort everything in here so orphaned cell generations don't keep
+  // streaming ~80 MB of GeoJSON to a client that will discard it.
+  // (Audit pass 2, finding #1 — data-spike root cause.)
+  const cellAbortsRef = useRef<Set<AbortController>>(new Set());
   const batchAbortRef = useRef(false);
   const handleResetView = useCallback(() => {
     if (activeStorm && mapRef.current) {
@@ -3237,8 +3242,12 @@ function App() {
   // clears the interval on normal/aborted/timed-out exit, but if the App
   // unmounts mid-activation (route change, error boundary catching), the
   // interval would keep polling /api/progress forever. (Audit #7.)
+  // Also abort any in-flight cell fetches so the server can stop streaming.
   useEffect(() => () => {
     if (progressIntervalRef.current) { clearInterval(progressIntervalRef.current); progressIntervalRef.current = null; }
+    for (const ac of cellAbortsRef.current) { try { ac.abort(); } catch { /* already aborted */ } }
+    cellAbortsRef.current.clear();
+    try { activateAbortRef.current?.abort(); } catch { /* already aborted */ }
   }, []);
 
   // ── Address search (geocoding via Nominatim) ──
@@ -3902,6 +3911,13 @@ ${fieldFlag ? `
       // updates from the dying activation.
       try { activateAbortRef.current.abort(); } catch { /* already aborted */ }
     }
+    // Also abort every in-flight cell fetch — these are the biggest
+    // bandwidth offenders. Without this, ~80 MB per cell × up to 2 workers
+    // keeps streaming until the server finishes generating them.
+    for (const ac of cellAbortsRef.current) {
+      try { ac.abort(); } catch { /* already aborted */ }
+    }
+    cellAbortsRef.current.clear();
     activatingRef.current = stormId;
     setActivating(true);
     markWelcomed();
@@ -3990,9 +4006,10 @@ ${fieldFlag ? `
         const stillCurrent = () =>
           activeStormRef.current?.storm_id === stormId &&
           activatingRef.current === stormId;
+        const cellAc = new AbortController();
+        cellAbortsRef.current.add(cellAc);
+        const cellTimeout = setTimeout(() => cellAc.abort(), 90_000);
         try {
-          const cellAc = new AbortController();
-          const cellTimeout = setTimeout(() => cellAc.abort(), 90_000);
           const cellData = await fetchJson<any>(
             `/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`,
             { signal: cellAc.signal },
@@ -4032,8 +4049,13 @@ ${fieldFlag ? `
         } catch (cellErr: any) {
           // A single cell failing shouldn't sink the whole activation —
           // log + continue. The other cells still merge in successfully.
-          console.warn(`Cell (${col},${row}) load failed:`, cellErr);
+          // AbortError on storm switch is expected and not worth a warn.
+          if (cellErr?.name !== 'AbortError') {
+            console.warn(`Cell (${col},${row}) load failed:`, cellErr);
+          }
         } finally {
+          clearTimeout(cellTimeout);
+          cellAbortsRef.current.delete(cellAc);
           setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; });
           cellsDone += 1;
           setLoadProgress(prev => ({
@@ -4102,22 +4124,34 @@ ${fieldFlag ? `
       setSimMode(false);
       return;
     }
+    // Capture stormId + AbortController so a rapid storm switch can't have
+    // a late A response overwrite B's setForecastTrack/setSimMarker.
+    // (Audit pass 2, finding #2.)
+    const sid = activeStorm.storm_id;
+    const ac = new AbortController();
     (async () => {
       try {
-        const tracks = await fetchJson<any[]>('/surgedps/api/forecast/track');
+        const tracks = await fetchJson<any[]>('/surgedps/api/forecast/track', { signal: ac.signal });
+        if (ac.signal.aborted) return;
+        if (activeStormRef.current?.storm_id !== sid) return;
         if (!tracks?.length) return;
         // Match by storm name
         const name = activeStorm.name.replace(/^Hurricane\s+/i, '').replace(/^Tropical Storm\s+/i, '').toUpperCase();
         const match = tracks.find((t: any) => t.storm_name?.toUpperCase() === name);
-        if (match) {
-          setForecastTrack(match.points || []);
-          if (match.cone) setForecastCone(match.cone);
-          if (match.predicted_landfall) {
-            setSimMarker({ lng: match.predicted_landfall.lon, lat: match.predicted_landfall.lat });
-          }
+        if (!match) return;
+        if (activeStormRef.current?.storm_id !== sid) return;
+        setForecastTrack(match.points || []);
+        if (match.cone) setForecastCone(match.cone);
+        if (match.predicted_landfall) {
+          setSimMarker({ lng: match.predicted_landfall.lon, lat: match.predicted_landfall.lat });
         }
-      } catch { }
+      } catch (err: any) {
+        if (err?.name !== 'AbortError') {
+          console.warn('Forecast track fetch failed:', err);
+        }
+      }
     })();
+    return () => { try { ac.abort(); } catch { /* already aborted */ } };
   }, [activeStorm]);
 
   // ── Run simulation at custom landfall point ──
@@ -4600,9 +4634,10 @@ ${fieldFlag ? `
     const stormId = activeStormRef.current?.storm_id || '';
     if (!stormId) return; // no active storm
     setLoadingCells(prev => new Set([...prev, key]));
+    const ac = new AbortController();
+    cellAbortsRef.current.add(ac);
+    const timeout = setTimeout(() => ac.abort(), 90_000); // 90s timeout for cell generation
     try {
-      const ac = new AbortController();
-      const timeout = setTimeout(() => ac.abort(), 90_000); // 90s timeout for cell generation
       const cellData = await fetchJson<any>(
         `/surgedps/api/cell?col=${col}&row=${row}&storm_id=${encodeURIComponent(stormId)}`,
         { signal: ac.signal }
@@ -4662,8 +4697,18 @@ ${fieldFlag ? `
           setBuildingTicksVersion(v => v + 1);
         })
         .catch(() => { /* 404s / network blips are expected & non-fatal */ });
-    } catch (err) { console.error(`Failed cell (${col},${row}):`, err); setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.'); }
-    finally { setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; }); }
+    } catch (err: any) {
+      // AbortError on storm switch is expected — not a real failure.
+      if (err?.name !== 'AbortError') {
+        console.error(`Failed cell (${col},${row}):`, err);
+        setCellError('Could not load this area — the data source may be temporarily unavailable. Try again in a moment.');
+      }
+    }
+    finally {
+      clearTimeout(timeout);
+      cellAbortsRef.current.delete(ac);
+      setLoadingCells(prev => { const n = new Set([...prev]); n.delete(key); return n; });
+    }
   }, []); // stable — all state accessed via refs
 
   // Reverse-geocode building popup via Nominatim (debounced 300ms to avoid hammering the API)
