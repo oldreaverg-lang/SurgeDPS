@@ -3946,7 +3946,7 @@ ${fieldFlag ? `
       const aggregate = { buildings: 0, loss: 0, totalDepth: 0 };
       setImpactTotals(aggregate);
 
-      const cellPromises = cellsAvailable.map(async (key) => {
+      const loadOneCell = async (key: string): Promise<void> => {
         const [colStr, rowStr] = key.split(',');
         const col = parseInt(colStr, 10), row = parseInt(rowStr, 10);
         if (!Number.isFinite(col) || !Number.isFinite(row)) return;
@@ -3970,8 +3970,7 @@ ${fieldFlag ? `
           setLoadedCells(prev => new Set([...prev, key]));
 
           // Defer building merge by one tick so flood paints before
-          // React commits the much larger building feature set —
-          // matches the existing single-cell loadCell pattern below.
+          // React commits the much larger building feature set.
           setTimeout(() => {
             if (activeStormRef.current?.storm_id !== stormId) return;
             const feats = cellData.buildings?.features || [];
@@ -4002,8 +4001,34 @@ ${fieldFlag ? `
             step_num: cellsDone, total_steps: totalCells,
           }));
         }
+      };
+
+      // Priority-load the center cell first — it's what's visible right
+      // after the flyTo to landfall. Surrounding cells fill in afterward
+      // with a small concurrency cap so a high-payload storm (Milton has
+      // ~80 MB / cell × 9 = 720 MB total) doesn't drown the browser's
+      // main thread in nine simultaneous JSON.parse + Maplibre source
+      // updates — that pattern froze the renderer for 30+ s during the
+      // mobile-walkthrough test even after the activate response was
+      // shrunk. Two concurrent loaders is the sweet spot: progressive
+      // paint, ~150 MB peak in-flight bytes, total wall-clock around
+      // (cells-1)/2 × per-cell-latency.
+      const CENTER_KEY = '0,0';
+      const centerFirst = cellsAvailable.includes(CENTER_KEY)
+        ? [CENTER_KEY, ...cellsAvailable.filter(k => k !== CENTER_KEY)]
+        : cellsAvailable;
+      await loadOneCell(centerFirst[0]);
+
+      // Remaining cells through a 2-worker queue
+      const queue = centerFirst.slice(1);
+      const CELL_CONCURRENCY = 2;
+      const workers = Array.from({ length: CELL_CONCURRENCY }, async () => {
+        while (queue.length > 0) {
+          const next = queue.shift();
+          if (next) await loadOneCell(next);
+        }
       });
-      await Promise.allSettled(cellPromises);
+      await Promise.allSettled(workers);
     } catch (err: any) {
       if (err?.name === 'AbortError' && !timedOut) {
         console.log('Storm activation cancelled by user');
