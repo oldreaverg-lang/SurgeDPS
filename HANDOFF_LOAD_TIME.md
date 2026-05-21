@@ -13,8 +13,9 @@ A persistent two-tier cache for `/api/storm/<id>/activate` that survives Railway
 ### Commits on `main` (in order)
 
 1. `a017b99` — Add in-memory LRU + empty-cell skip + concurrency 2→3
-2. `63dcf57` — Persist activate cache to Railway volume (this layer's centerpiece)
+2. `63dcf57` — Persist activate cache to Railway volume
 3. `a8652b3` / `d61018e` — No-op redeploys that verified cross-deploy hydration
+4. `7d88d8f` — Extract `populate_activate_cache()` + boot-time pre-warm sweep
 
 Prior load-time work (data-spike fix, paint-pipeline freeze, abort plumbing) lives in commits `9da93e2` (cell abort registry), `e69e50f` (flushSync orphan clears), and the seven-bug UI audit at `32e557b`. Those are referenced here but documented in their own commit bodies.
 
@@ -112,13 +113,48 @@ Typical effect: 9-cell manifest → 5–7 cells actually fetched.
 
 `CELL_CONCURRENCY = 3` in `activateStorm`. Safe because the empty-cell filter dropped the worst case from 9 cells to 5–7, so peak in-flight bytes are 3 cells × ~80 MB ≈ 240 MB on a Milton-class storm — comfortably below the freeze threshold we hit at 9 cells parallel.
 
+### Boot-time pre-warm sweep
+
+`api_server.main()` spawns a daemon thread that:
+
+1. Sleeps 45 s so `warm_cache.py` can settle the cell directory first
+2. Iterates `HISTORICAL_STORMS` sequentially
+3. For each entry, calls `_activate_cache_read_disk` — if a fresh disk file exists, skips
+4. Otherwise calls `populate_activate_cache(storm)` which does the full cold compute and writes through to both cache tiers
+5. Catches all per-storm exceptions so one bad storm can't kill the sweep
+6. Logs `[prewarm] warmed=N skipped=N failed=N` at the end
+
+This means a fresh Railway deploy lands with the entire historical catalog hot on disk within a few minutes of boot, before most users have clicked anything. The very first user click of *any* historical storm — even one newly added to the catalog — should be sub-second.
+
+**Active storms are never touched by the pre-warm.** They come from `fetch_active_storms()` (a separate code path) and their data updates intra-session, so caching would serve stale forecasts.
+
+### Compute-path consolidation
+
+The handler's cold path and the pre-warm sweep both go through a single shared function:
+
+```python
+def populate_activate_cache(storm) -> tuple[dict, dict]:
+    # 9-cell walk + DPS/ELI/validated-DPS + population + ground truth
+    # + cache write-through (both tiers)
+    # Returns (payload, grid_cells)
+```
+
+Side effects that should ONLY fire on real user activations stay in the request handler, NOT in `populate_activate_cache`:
+
+- `_active_storm` global pointer
+- Validation ledger entry (`record_from_activation`)
+- Gauge-cache warm spawn
+- Progress polling updates
+
+Both the handler and the pre-warm thread call `populate_activate_cache` to make sure they cache the exact same shape — no drift between "what got written by pre-warm" and "what would have been written by a real click."
+
 ---
 
 ## Files added / modified
 
 | Path | Change |
 |---|---|
-| `scripts/api_server.py` | Added `_ACTIVATE_CACHE` (OrderedDict LRU), disk helpers (`_activate_cache_read_disk` / `_write_disk` / `_delete_disk`), `_storm_cells_mtime`, `_CACHE_SCHEMA`. Activate handler now checks cache first, writes through on miss. Honors `?refresh=1` query param. |
+| `scripts/api_server.py` | Added `_ACTIVATE_CACHE` (OrderedDict LRU), disk helpers (`_activate_cache_read_disk` / `_write_disk` / `_delete_disk`), `_storm_cells_mtime`, `_CACHE_SCHEMA`. Activate handler now checks cache first, writes through on miss. Honors `?refresh=1` query param. Extracted shared compute path `populate_activate_cache(storm) -> (payload, grid_cells)`. Added `_prewarm_activate_cache()` daemon-thread sweep, spawned from `main()`. |
 | `src/persistent_paths.py` | Registered `ACTIVATE_CACHE_DIR` and added it to the mkdir-on-import list so the volume directory exists at boot. |
 | `ui/src/App.tsx` | `activateStorm`: filters `cellsAvailableRaw` by `cell_summary`, pre-populates `loadedCells` with skipped keys, bumps `CELL_CONCURRENCY` 2→3, handles the empty-manifest edge case cleanly. |
 
@@ -243,10 +279,11 @@ On hit we still run (always):
 
 ## Open / deferred
 
-- **Cache-stats endpoint.** A `/api/__cache/stats` returning hit/miss counters, disk size, oldest entry. Useful for ops dashboards. Not strictly needed — the perf numbers above are the validation.
+- **Cache-stats endpoint.** A `/api/__cache/stats` returning hit/miss counters, disk size, oldest entry, last pre-warm sweep result. Useful for ops dashboards. Not strictly needed — the perf numbers above are the validation.
 - **Schema migration runbook.** If `_schema` is bumped, the disk is silently re-cold-computed; if we ever want to actively migrate vs invalidate, that's a separate doc.
 - **Compression.** The JSON files are ~6 KB each. gzip would shave maybe 4 KB total across the catalog. Not worth it.
-- **Pre-warming on boot.** We could have api_server load every entry from `ACTIVATE_CACHE_DIR/*.json` at startup so Tier 1 is fully populated before the first request. Adds ~150 ms to boot vs ~5 ms per first-hit. Skipping for now because per-storm lazy hydration is fast enough.
+- **Active-storm forecast cache with TTL.** A separate short-TTL cache keyed by `(storm_id, advisory_number)` would let active storms get the same speedup. Requires plumbing the NHC advisory number through the activate response and choosing a sensible TTL (probably 10 min). Skipped for now because active storms are rare and their cold cost is the same as historicals.
+- **Eager hydration of Tier 1 on boot.** Currently Tier 1 is lazy — first request per storm reads from disk. We could pre-load every disk entry into Tier 1 at startup to save the ~5 ms disk read on the first request. Probably overkill given how cheap that is, but it'd make the very first user click of any storm cache hit faster than the pre-warm sweep alone provides.
 
 ---
 
