@@ -106,6 +106,24 @@ def sync_assets(assets: dict[str, Path], dry_run: bool) -> None:
             dest = DEST_ASSETS / src.name
             shutil.copy2(src, dest)
             print(f"  copied    {src.name}")
+
+        # Also mirror non-asset root files from dist/ → frontend/surgedps/.
+        # Vite copies anything in ui/public/ to dist/ root (logos, favicons,
+        # geojson seeds). Before this pass, root-level files like
+        # logo-180.webp landed in dist/ but never reached StormDPS, so the
+        # <picture> source tags 404'd in production and browsers fell back
+        # to the larger PNG. Skipping index.html (handled separately) and
+        # the assets/ dir (already done above).
+        dist_root = DIST_ASSETS.parent  # ui/dist
+        dest_root = DEST_ASSETS.parent  # StormDPS/frontend/surgedps
+        for p in dist_root.iterdir():
+            if p.is_dir() and p.name == "assets":
+                continue
+            if p.name == "index.html":
+                continue
+            dest = dest_root / p.name
+            shutil.copy2(p, dest)
+            print(f"  copied    {p.name}  (root-level)")
     else:
         print("[dry-run] Would clear old hashed .js/.css and copy new assets")
     print()

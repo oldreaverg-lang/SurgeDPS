@@ -683,9 +683,29 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
   useEffect(() => {
     let failed = 0;
     const onErr = () => { failed++; if (failed >= 3) setLoadError(true); };
+    // Two-tier fetch strategy. The historic catalog + seasons drive the
+    // sidebar's main scroll area; load them immediately. /api/storms/active
+    // proxies NHC RSS and runs 2-3 s off-season for what's an empty list
+    // most of the year — defer it past the initial paint so it doesn't
+    // contend with the catalog fetches for bandwidth on mobile.
     fetchJsonArray<Season>('/surgedps/api/seasons', undefined, onErr).then(setSeasons);
     fetchJsonArray<StormInfo>('/surgedps/api/storms/historic', undefined, onErr).then(setHistoricStorms);
-    fetchJsonArray<StormInfo>('/surgedps/api/storms/active', undefined, onErr).then(setActiveNHC);
+
+    // requestIdleCallback fires once the main thread is free post-mount.
+    // Safari (and old Firefox) lack it; fall back to a 600 ms setTimeout
+    // — long enough to clear the LCP window, short enough that during
+    // an actual active-storm event the user sees the list quickly.
+    const fetchActive = () => {
+      fetchJsonArray<StormInfo>('/surgedps/api/storms/active', undefined, onErr).then(setActiveNHC);
+    };
+    const ric = (window as any).requestIdleCallback as
+      | ((cb: () => void, opts?: { timeout?: number }) => number)
+      | undefined;
+    if (typeof ric === 'function') {
+      ric(fetchActive, { timeout: 2000 });
+    } else {
+      setTimeout(fetchActive, 600);
+    }
   }, []);
 
   const toggleYear = useCallback((year: number) => {
@@ -5721,7 +5741,14 @@ ${fieldFlag ? `
         {!activeStorm && !activating && !hasUsedWelcome && (
           <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
             <div className="bg-slate-900/95 backdrop-blur-sm rounded-2xl px-8 py-6 text-center shadow-2xl border border-slate-700 max-w-sm w-full mx-4 pointer-events-auto">
-              <img src="/surgedps/logo-180.png" alt="SurgeDPS" className="w-16 h-16 mx-auto mb-3 rounded-2xl" style={{ boxShadow: '0 4px 20px rgba(99,102,241,0.4)', filter: 'brightness(1.15)' }} />
+              {/* WebP with PNG fallback: 29 KB PNG → 2.8 KB WebP (10× smaller).
+                  Lighthouse mobile flagged this as the only image-size finding;
+                  the welcome card LCP also speeds up because the logo isn't
+                  fighting the JS bundles for bandwidth on a fresh load. */}
+              <picture>
+                <source srcSet="/surgedps/logo-180.webp" type="image/webp" />
+                <img src="/surgedps/logo-180.png" alt="SurgeDPS" width={64} height={64} className="w-16 h-16 mx-auto mb-3 rounded-2xl" style={{ boxShadow: '0 4px 20px rgba(99,102,241,0.4)', filter: 'brightness(1.15)' }} />
+              </picture>
               <p className="text-white font-bold text-lg">Select a storm to begin</p>
               <p className="text-slate-400 text-sm mt-1 mb-4">Choose a hurricane from the list on the left to see surge depths and damage estimates across the impact zone.</p>
               {/* Quick-launch notable storms — category comes from the
@@ -5770,12 +5797,17 @@ ${fieldFlag ? `
               <div className="relative w-14 h-14 mx-auto mb-4">
                 <div className="absolute inset-0 animate-spin rounded-full border-4 border-slate-700 border-t-indigo-500"></div>
                 <div className="absolute inset-2 rounded-full bg-slate-900 flex items-center justify-center overflow-hidden">
-                  <img
-                    src="/surgedps/logo-180.png"
-                    alt="SurgeDPS"
-                    className="w-8 h-8 object-contain"
-                    style={{ filter: 'brightness(1.15)' }}
-                  />
+                  <picture>
+                    <source srcSet="/surgedps/logo-180.webp" type="image/webp" />
+                    <img
+                      src="/surgedps/logo-180.png"
+                      alt="SurgeDPS"
+                      width={32}
+                      height={32}
+                      className="w-8 h-8 object-contain"
+                      style={{ filter: 'brightness(1.15)' }}
+                    />
+                  </picture>
                 </div>
               </div>
               <p className="font-bold text-white text-base">
