@@ -57,9 +57,10 @@ from validation.private_routes import handle_validation_request
 from storm_catalog.forecast_track import fetch_forecast_track, fetch_forecast_cone
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-from persistent_paths import CELLS_DIR, GEOCODE_DIR, PERSISTENT_DATA_DIR
+from persistent_paths import CELLS_DIR, GEOCODE_DIR, PERSISTENT_DATA_DIR, ACTIVATE_CACHE_DIR
 PERSISTENT_DIR = str(PERSISTENT_DATA_DIR)
 CACHE_DIR = str(CELLS_DIR)
+ACTIVATE_CACHE_DISK_DIR = str(ACTIVATE_CACHE_DIR)
 
 
 # ── Storm ID validation ─────────────────────────────────────────────
@@ -325,18 +326,30 @@ _exposure_region_by_storm: dict[str, str] = {}
 # user clicks the storm row* — even though the result is deterministic for
 # historical storms (the inputs never change).
 #
-# This LRU cache stores only the lightweight manifest (storm_data, the list
-# of available cell coordinates, and the per-cell {building_count,
-# flood_count} summary used for the dashboard badge). The actual GeoJSON
-# payloads for buildings/flood are NEVER cached here — those come back
-# through /api/cell on demand and stay on disk in CACHE_DIR.
+# This is a two-tier cache:
 #
-# Cache hit cost: ~50 ms (just _active_storm bookkeeping + JSON serialize).
-# Cache miss cost: 25-60 s (the existing cell walk + DPS compute).
+#   1. In-memory LRU (OrderedDict) — instant access, ~6 KB per storm × 32
+#      capacity ≈ 200 KB total. Wiped on container restart.
+#
+#   2. Persistent volume (ACTIVATE_CACHE_DIR/<storm_id>.json) — write-through
+#      from tier 1, survives Railway deploys. First activation of a storm
+#      after a deploy hydrates tier 1 from disk in ~5 ms instead of paying
+#      the 25-60 s cold compute again.
+#
+# We store only the lightweight manifest (storm_data + cells_available +
+# cell_summary). The actual GeoJSON for buildings/flood is never cached
+# here — those come back through /api/cell on demand and stay on disk in
+# CACHE_DIR.
+#
+# Freshness: each disk entry stamps the cell-directory mtime at write time.
+# On read, we compare against the current mtime; if warm_cache.py or anything
+# else has touched the cell dir since the cache was written, we invalidate
+# and recompute. Schema version is also stamped — bump _CACHE_SCHEMA to
+# wholesale-invalidate every entry across a deploy.
 #
 # Active storms (status='active') skip the cache because the forecast cone /
-# wind probabilities can update intra-session. Historic storms cache forever
-# (until the process restarts on a Railway deploy).
+# wind probabilities can update intra-session. Historic storms cache until
+# the cell dir is regenerated.
 #
 # Capacity 32 comfortably covers our ~25-storm catalog with headroom for
 # experimental storm_ids during development.
@@ -344,29 +357,138 @@ from collections import OrderedDict
 _ACTIVATE_CACHE: OrderedDict[str, dict] = OrderedDict()
 _ACTIVATE_CACHE_LOCK = _threading.Lock()
 _ACTIVATE_CACHE_MAX = 32
+_CACHE_SCHEMA = 1  # bump to invalidate every persisted entry
+
+
+def _storm_cells_mtime(storm_id: str) -> float:
+    """Latest mtime across all files in the storm's cell directory. Used as
+    a cheap freshness signal — if warm_cache.py overwrites a cell on disk,
+    the cached manifest for that storm is considered stale and recomputed.
+
+    Returns 0.0 if the dir doesn't exist (cell-less storm) or any stat fails.
+    Cost: ~9 cells × 4 files × 1 stat call ≈ 30 stats per check (~1 ms)."""
+    sdir = os.path.join(CACHE_DIR, storm_id)
+    if not os.path.isdir(sdir):
+        return 0.0
+    latest = 0.0
+    try:
+        for name in os.listdir(sdir):
+            try:
+                latest = max(latest, os.path.getmtime(os.path.join(sdir, name)))
+            except OSError:
+                continue
+    except OSError:
+        return 0.0
+    return latest
+
+
+def _activate_cache_disk_path(storm_id: str) -> str | None:
+    if not _valid_storm_id(storm_id):
+        return None
+    return os.path.join(ACTIVATE_CACHE_DISK_DIR, f'{storm_id}.json')
+
+
+def _activate_cache_read_disk(storm_id: str) -> dict | None:
+    p = _activate_cache_disk_path(storm_id)
+    if not p or not os.path.exists(p):
+        return None
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            entry = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  [cache] disk read failed for {storm_id}: {e}")
+        return None
+    if entry.get('_schema') != _CACHE_SCHEMA:
+        return None
+    # Stale-if-cells-newer check. A 1 s slack lets clock-skew between
+    # processes writing in the same second pass through cleanly.
+    cached_mtime = entry.get('_cells_mtime', 0)
+    current_mtime = _storm_cells_mtime(storm_id)
+    if current_mtime > cached_mtime + 1.0:
+        print(f"  [cache] stale on-disk entry for {storm_id} "
+              f"(cells mtime {current_mtime:.0f} > cache {cached_mtime:.0f}) — discarding")
+        return None
+    return {
+        'storm_data': entry['storm_data'],
+        'cells_available': entry['cells_available'],
+        'cell_summary': entry['cell_summary'],
+    }
+
+
+def _activate_cache_write_disk(storm_id: str, payload: dict) -> None:
+    p = _activate_cache_disk_path(storm_id)
+    if not p:
+        return
+    entry = {
+        '_schema': _CACHE_SCHEMA,
+        '_cells_mtime': _storm_cells_mtime(storm_id),
+        'storm_data': payload['storm_data'],
+        'cells_available': payload['cells_available'],
+        'cell_summary': payload['cell_summary'],
+    }
+    tmp = p + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(entry, f)
+        os.replace(tmp, p)  # atomic on POSIX + Windows
+    except OSError as e:
+        print(f"  [cache] disk write failed for {storm_id}: {e}")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _activate_cache_delete_disk(storm_id: str) -> None:
+    p = _activate_cache_disk_path(storm_id)
+    if not p:
+        return
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
 
 
 def _activate_cache_get(storm_id: str) -> dict | None:
+    """Two-tier lookup: in-memory LRU first, then persistent disk.
+    A disk hit populates the in-memory LRU so subsequent activations
+    don't pay the file-read + JSON-decode cost on every click."""
     with _ACTIVATE_CACHE_LOCK:
         if storm_id in _ACTIVATE_CACHE:
             _ACTIVATE_CACHE.move_to_end(storm_id)  # mark as most-recently-used
             return _ACTIVATE_CACHE[storm_id]
-    return None
+    # In-memory miss — try disk.
+    disk = _activate_cache_read_disk(storm_id)
+    if disk is None:
+        return None
+    # Hydrate in-memory LRU from disk.
+    with _ACTIVATE_CACHE_LOCK:
+        _ACTIVATE_CACHE[storm_id] = disk
+        _ACTIVATE_CACHE.move_to_end(storm_id)
+        while len(_ACTIVATE_CACHE) > _ACTIVATE_CACHE_MAX:
+            _ACTIVATE_CACHE.popitem(last=False)
+    print(f"  [cache] hydrated {storm_id} from persistent volume")
+    return disk
 
 
 def _activate_cache_put(storm_id: str, payload: dict) -> None:
+    """Write-through: update in-memory LRU + persist to volume so the entry
+    survives a Railway deploy. The disk write is synchronous but tiny
+    (~6 KB), well below the cost of the activation work that just finished."""
     with _ACTIVATE_CACHE_LOCK:
         _ACTIVATE_CACHE[storm_id] = payload
         _ACTIVATE_CACHE.move_to_end(storm_id)
         while len(_ACTIVATE_CACHE) > _ACTIVATE_CACHE_MAX:
             _ACTIVATE_CACHE.popitem(last=False)
+    _activate_cache_write_disk(storm_id, payload)
 
 
 def _activate_cache_invalidate(storm_id: str) -> None:
-    """Drop a single storm's cached manifest. Used when the underlying
-    pre-cached cells change (warm_cache.py re-run, manual delete)."""
+    """Drop a single storm's cached manifest from both tiers. Called by the
+    ?refresh=1 query param and by anything that re-generates cells."""
     with _ACTIVATE_CACHE_LOCK:
         _ACTIVATE_CACHE.pop(storm_id, None)
+    _activate_cache_delete_disk(storm_id)
 
 
 # ── Structured request logging ────────────────────────────────────────────────

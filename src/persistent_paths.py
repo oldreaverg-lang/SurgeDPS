@@ -58,6 +58,14 @@ CENSUS_DIR     = PERSISTENT_DATA_DIR / "census"
 FORECASTS_DIR  = PERSISTENT_DATA_DIR / "forecasts"
 GEOCODE_DIR    = PERSISTENT_DATA_DIR / "geocode"
 MRMS_DIR       = PERSISTENT_DATA_DIR / "mrms"       # MRMS QPE GeoTIFF cache
+# ── Activate-manifest cache ──────────────────────────────────────────────────
+# Tiny per-storm JSON (storm_data + cells_available + cell_summary) written
+# after every successful cold activation so subsequent container restarts
+# don't re-walk all 9 cells + recompute DPS/ELI for storms we've already
+# seen. Lives on the persistent volume so a Railway deploy doesn't wipe it.
+# Schema version is stamped in each file; bump the constant in api_server.py
+# to invalidate the whole directory.
+ACTIVATE_CACHE_DIR = PERSISTENT_DATA_DIR / "activate_cache"
 # ── HAND/NWM (fluvial layer) ─────────────────────────────────────────────────
 # HAND rasters are downloaded once per HUC8 from NOAA OWP FIM and kept
 # permanently — they don't change between storms.  NWM discharge is
@@ -80,7 +88,8 @@ LEDGER_FILE        = VALIDATION_DIR / "run_ledger.json"
 
 # ── Create all directories on import ────────────────────────────────────────
 for _d in (CELLS_DIR, VALIDATION_DIR, CENSUS_DIR, FORECASTS_DIR,
-           GEOCODE_DIR, MRMS_DIR, HAND_DIR, NWM_CACHE_DIR, QPF_DIR, ATLAS14_DIR):
+           GEOCODE_DIR, MRMS_DIR, HAND_DIR, NWM_CACHE_DIR, QPF_DIR, ATLAS14_DIR,
+           ACTIVATE_CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 logger.info("SurgeDPS storage root: %s", PERSISTENT_DATA_DIR)
