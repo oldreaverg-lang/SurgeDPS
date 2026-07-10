@@ -36,7 +36,9 @@ SURGE_ROOT   = SCRIPT_DIR.parent                          # SurgeDPS/
 UI_DIR       = SURGE_ROOT / "ui"                          # SurgeDPS/ui/
 DIST_ASSETS  = UI_DIR / "dist" / "assets"                 # SurgeDPS/ui/dist/assets/
 
-STORM_ROOT   = SURGE_ROOT.parent / "StormDPS"             # ../StormDPS/
+# Post-reset (2026-07-09) both repos live under APPS as *-recovered; the old
+# ../StormDPS checkout is a dead empty .git — never sync into it.
+STORM_ROOT   = SURGE_ROOT.parent / "StormDPS-recovered"   # ../StormDPS-recovered/
 DEST_ASSETS  = STORM_ROOT / "frontend" / "surgedps" / "assets"
 INDEX_HTML   = STORM_ROOT / "frontend" / "surgedps" / "index.html"
 

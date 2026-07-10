@@ -4255,13 +4255,28 @@ ${fieldFlag ? `
     }
   }, [simMarker, activeStorm]);
 
-  // ── Welcome card always wins on first paint ──
-  // Previously ?storm=X auto-activated the storm and bypassed the welcome
-  // card. During a live event that produced a "site loads straight into the
-  // storm" UX with no chance to surface the Active Storms list. Now the
-  // welcome card always shows on mount; live storms are picked from the
-  // sidebar. Shareable deep links can come back later as a "pre-highlight
-  // in sidebar without activating" pattern if needed.
+  // ── Deep-link activation (?storm=<id>) ──
+  // History: ?storm= auto-activation was removed 2026-05 because ORGANIC
+  // visits during a live event loaded straight into a storm with no chance
+  // to see the Active Storms list. Restored 2026-07-09 by operator
+  // instruction, scoped to what the old removal was NOT about: an explicit
+  // ?storm= URL is the visitor choosing a storm (StormDPS's landfall panel
+  // links Atlantic storms here as "view modeled surge & building damage",
+  // and handleShareLink has emitted these URLs all along). Organic visits
+  // (no query param) keep the welcome-card-first flow. Runs once; an
+  // invalid id fails activation with the normal error toast and the
+  // sidebar stays available. StormDPS ids map as AL092026 →
+  // active_al092026 (built by the panel, matching fetch_active_storms).
+  const deepLinkDoneRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkDoneRef.current) return;
+    deepLinkDoneRef.current = true;
+    try {
+      const sid = (new URLSearchParams(window.location.search).get('storm') || '').trim();
+      if (!sid || !/^[a-z0-9_]{3,40}$/i.test(sid)) return;
+      activateStorm(sid);
+    } catch { /* malformed URL — fall through to the welcome flow */ }
+  }, [activateStorm]);
 
   // Grid GeoJSON — includes "ready" status for pre-computed cells from manifest
   const gridGeoJson = useMemo(() => {
