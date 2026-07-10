@@ -6,9 +6,13 @@
 > absolute paths in docs/scripts may say `...\APPS\SurgeDPS`). State of the
 > restore: `.venv` rebuilt on Python 3.13 via the `py` launcher (the bare
 > `python` command on this machine is the WindowsApps stub — don't use it)
-> and the full source tree compiles; **`.env` is EMPTY — refill from the
-> Railway dashboard (SurgeDPS service → Variables) using `.env.example`**;
-> Node/npm are NOT installed (needed only to rebuild `ui/`); any local work
+> and the full source tree compiles; **`.env` is a placeholder — paste
+> `VALIDATION_TOKEN` from the Railway dashboard (SurgeDPS service →
+> Variables)**; `.env.example` was created 2026-07-09 (it never existed in
+> git before — nothing auto-loads .env, it's the local reference copy);
+> Node/npm restored 2026-07-09 (v24.18.0 LTS, user-scope zip at
+> `%LOCALAPPDATA%\Programs\nodejs`, on user PATH; `npm ci` + `tsc -b` +
+> `vite build` all verified green in `ui/`); any local work
 > after the 2026-05-23 last commit died with the reset (operator flagged
 > none); `*.xlsx`/`*.docx` were gitignored and are unrecoverable from git.
 > The live site never broke (deploys GitHub→Railway). Everything below this
