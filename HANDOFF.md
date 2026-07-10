@@ -1,6 +1,20 @@
 # SurgeDPS — Current Handoff
 
-**Last updated:** 2026-05-21
+> **⚠️ RECOVERY NOTE (2026-07-09):** the original local working copy died in
+> a Windows reset; this repo was re-cloned fresh to
+> `C:\Users\Ryan\APPS\SurgeDPS-recovered` (note the new folder name — old
+> absolute paths in docs/scripts may say `...\APPS\SurgeDPS`). State of the
+> restore: `.venv` rebuilt on Python 3.13 via the `py` launcher (the bare
+> `python` command on this machine is the WindowsApps stub — don't use it)
+> and the full source tree compiles; **`.env` is EMPTY — refill from the
+> Railway dashboard (SurgeDPS service → Variables) using `.env.example`**;
+> Node/npm are NOT installed (needed only to rebuild `ui/`); any local work
+> after the 2026-05-23 last commit died with the reset (operator flagged
+> none); `*.xlsx`/`*.docx` were gitignored and are unrecoverable from git.
+> The live site never broke (deploys GitHub→Railway). Everything below this
+> note is the pre-reset handoff and remains accurate about the CODE.
+
+**Last updated:** 2026-05-21 (recovery note added 2026-07-09)
 **Consolidated from:** `HANDOFF.md` (Apr 4), `HANDOFF_VALIDATION_LAYER.md` (Apr 14), `HANDOFF_RAINFALL_LAYER.md` (May 16), `HANDOFF_UX_AUDIT.md` (May 18), `HANDOFF_LOAD_TIME.md` (May 21)
 **Status:** All subsystems live. Activate cache warm across deploys. Cloudflare hardened.
 
