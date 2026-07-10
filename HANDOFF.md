@@ -12,7 +12,11 @@
 > git before — nothing auto-loads .env, it's the local reference copy);
 > Node/npm restored 2026-07-09 (v24.18.0 LTS, user-scope zip at
 > `%LOCALAPPDATA%\Programs\nodejs`, on user PATH; `npm ci` + `tsc -b` +
-> `vite build` all verified green in `ui/`); any local work
+> `vite build` all verified green in `ui/`). 2026-07-10: DPS scores synced
+> to StormDPS's canonical bundle (`51c39a4`) — **rerun
+> `scripts/build_dps_scores.py` after any StormDPS bake** (regenerates
+> data/dps_scores.json + prints the catalog.py HISTORICAL_STORMS diffs to
+> patch); any local work
 > after the 2026-05-23 last commit died with the reset (operator flagged
 > none); `*.xlsx`/`*.docx` were gitignored and are unrecoverable from git.
 > The live site never broke (deploys GitHub→Railway). Everything below this
