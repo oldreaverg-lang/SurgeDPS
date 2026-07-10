@@ -4274,6 +4274,10 @@ ${fieldFlag ? `
     try {
       const sid = (new URLSearchParams(window.location.search).get('storm') || '').trim();
       if (!sid || !/^[a-z0-9_]{3,40}$/i.test(sid)) return;
+      // Below Tailwind lg the sidebar is a full-screen overlay — leaving it
+      // open would hide the very storm the deep link selected (manual storm
+      // taps already close it via the sidebar's own handler).
+      if (window.matchMedia('(max-width: 1023px)').matches) setSidebarOpen(false);
       activateStorm(sid);
     } catch { /* malformed URL — fall through to the welcome flow */ }
   }, [activateStorm]);
@@ -6133,15 +6137,17 @@ ${fieldFlag ? `
                 {loadProgress.step_num === 0 ? 'Loading storm data…' : 'Analyzing storm…'}
               </p>
               <p className="text-xs text-indigo-300 mt-1 font-medium">{loadProgress.step || 'Connecting to server…'}</p>
-              {/* Progress bar */}
+              {/* Progress bar — clamp the denominator: the server's /progress
+                  totals and the client's per-cell counts interleave, which
+                  briefly rendered "Step 4 of 1" (mobile review 2026-07-10). */}
               <div className="mt-4 w-full bg-slate-700 rounded-full h-1.5 overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 rounded-full transition-all duration-700 ease-out"
-                  style={{ width: `${Math.max(4, (loadProgress.step_num / loadProgress.total_steps) * 100)}%` }}
+                  style={{ width: `${Math.min(100, Math.max(4, (loadProgress.step_num / Math.max(loadProgress.total_steps, loadProgress.step_num, 1)) * 100))}%` }}
                 />
               </div>
               <p className="text-[10px] text-slate-500 mt-2">
-                Step {loadProgress.step_num} of {loadProgress.total_steps}
+                Step {loadProgress.step_num} of {Math.max(loadProgress.total_steps, loadProgress.step_num, 1)}
                 {loadProgress.elapsed > 0 ? ` · ${Math.round(loadProgress.elapsed)}s elapsed` : ''}
               </p>
               <button
