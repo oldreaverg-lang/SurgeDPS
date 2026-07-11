@@ -609,13 +609,18 @@ function findComparables(
 // to read as a per-storm alert that competed with the actual severe-damage
 // markers; the indigo family preserves the magnitude signal (saturation
 // scales with DPS) without inheriting damage-category semantics.
+// Contrast note (Lighthouse a11y audit 2026-07-11): these render at ~12 px
+// on the slate-900 sidebar, so every stop must clear WCAG AA 4.5:1 there.
+// The old top stops (indigo-600 @ 2.8:1, indigo-500 @ 4.0:1) failed for the
+// storms users care most about; the ramp is shifted lighter while keeping
+// the deep-indigo→pale-sky magnitude ordering. Only used on dark surfaces.
 const dpsColor = (score: number): string => {
-  if (score >= 80) return '#4f46e5'; // indigo-600 — heavy DPS
-  if (score >= 60) return '#6366f1'; // indigo-500
-  if (score >= 40) return '#818cf8'; // indigo-400
-  if (score >= 20) return '#7dd3fc'; // sky-300
-  if (score >= 10) return '#bae6fd'; // sky-200
-  return '#94a3b8';                  // slate-400 — minimal
+  if (score >= 80) return '#818cf8'; // indigo-400 — heavy DPS (5.2:1)
+  if (score >= 60) return '#a5b4fc'; // indigo-300 (7.2:1)
+  if (score >= 40) return '#7dd3fc'; // sky-300
+  if (score >= 20) return '#bae6fd'; // sky-200
+  if (score >= 10) return '#e0f2fe'; // sky-100
+  return '#94a3b8';                  // slate-400 — minimal (6.1:1)
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -639,13 +644,16 @@ function StormRow({ s, activeStormId, activating, onSelect }: {
       {/* Category dot */}
       <span style={{ background: catColor, width: 8, height: 8, borderRadius: '50%', flexShrink: 0 }} />
       <span className="truncate font-medium">{shortName(s.name)}</span>
-      {/* Year chip — muted, helps disambiguate same-name storms */}
-      <span className="text-[10px] text-slate-600 font-normal shrink-0">{s.year}</span>
+      {/* Year chip — muted, helps disambiguate same-name storms.
+          slate-400, not 500/600: on the slate-900 sidebar those hit 3.3:1
+          and 2.0:1 (Lighthouse a11y fail); 400 is the darkest AA-passing
+          slate at this size (6.1:1). */}
+      <span className="text-[10px] text-slate-400 font-normal shrink-0">{s.year}</span>
       {/* DPS score */}
       <span className="ml-auto text-xs shrink-0">
         {s.dps_score
-          ? <><span style={{ color: dot, fontWeight: 700 }}>{s.dps_score.toFixed(0)}</span><span className="text-slate-600"> DPS</span></>
-          : <span className="text-slate-600">—</span>
+          ? <><span style={{ color: dot, fontWeight: 700 }}>{s.dps_score.toFixed(0)}</span><span className="text-slate-400"> DPS</span></>
+          : <span className="text-slate-400">—</span>
         }
       </span>
     </button>
@@ -785,14 +793,14 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
           </div>
           {activeNHC.length === 0 ? (
             <div
-              className="text-xs text-slate-500 leading-relaxed space-y-1"
+              className="text-xs text-slate-400 leading-relaxed space-y-1"
               title="During hurricane season (Jun–Nov Atlantic, May–Nov East Pacific), active storms appear here automatically."
             >
               <p>
                 <span aria-hidden className="mr-1">🌤️</span>
                 No active Atlantic or East Pacific cyclones.
               </p>
-              <p className="text-[11px] text-slate-600">
+              <p className="text-[11px] text-slate-400">
                 Pick a historic storm below to explore — Katrina, Ida, Harvey, Sandy, and 11 more are pre-cached.
               </p>
             </div>
@@ -811,7 +819,7 @@ function StormBrowser({ onSelectStorm, activeStormId, activating, isOpen, onClos
             curated/by-season lists. */}
         <div className="px-4 pt-4 pb-3">
           <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Storm Browser</h2>
-          <p className="text-[10px] text-slate-600 mb-2">Sorted by Damage Potential Score (DPS) — higher = more destructive surge</p>
+          <p className="text-[10px] text-slate-400 mb-2">Sorted by Damage Potential Score (DPS) — higher = more destructive surge</p>
           <div className="mb-3">
             <input
               type="text"
