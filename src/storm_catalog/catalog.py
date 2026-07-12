@@ -103,7 +103,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=140, min_pressure_mb=919,
         heading_deg=25, speed_kt=14,
         basin="AL", advisory="best-track",
-        dps_score=81.7,
+        dps_score=81.6,
         rmax_nm=17.0,   # NHC TCR: compact eyewall ~15-20 nm at Mexico Beach
         landfall_date="2018-10-10",
     ),
@@ -271,7 +271,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=120, min_pressure_mb=949,
         heading_deg=60, speed_kt=16,
         basin="AL", advisory="best-track",
-        dps_score=81.1,
+        dps_score=81.0,
         rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
         landfall_date="2024-10-09",
     ),
