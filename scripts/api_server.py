@@ -994,6 +994,53 @@ _FZ_CACHE_CAP_BYTES = int(os.environ.get('SURGEDPS_FZ_CACHE_MB', '256')) * 1024 
 _evict_lock = _threading.Lock()
 _evict_last: dict = {}
 
+# A byte cap alone is NOT a wall. It bounds the disk but nothing bounds the
+# rate of cache MISSES, and each miss is a ~20 s FEMA round-trip holding a
+# thread — and worse, each junk write evicts a legitimately hot entry. Someone
+# walking thousands of distinct empty bboxes therefore cannot fill the volume
+# but CAN thrash the cache until real users are back to 20 s round-trips.
+#
+# So: a GLOBAL budget on upstream fetches. Deliberately global rather than
+# per-IP — the per-IP limiter above is evadable by rotating an IPv6 /64 against
+# the direct Railway origin, whereas a global budget cannot be out-run by
+# changing identity. Real users are overwhelmingly cache HITS (they cluster on
+# the storm everyone is looking at) and never approach it; an enumerator walks
+# into it immediately and is told to come back later.
+_FZ_MISS_BUDGET_PER_MIN = int(os.environ.get('SURGEDPS_FZ_MISS_PER_MIN', '60'))
+_fz_miss_times: list = []
+_fz_miss_lock = _threading.Lock()
+
+
+def _upstream_budget_ok(times: list, lock, max_per_min: int):
+    """Global sliding-window budget for expensive upstream fetches.
+
+    Returns (allowed, retry_after_s). Shape mirrors _RateLimiter.check, but
+    the window is shared by ALL callers rather than keyed on client identity.
+    """
+    now = _time.time()
+    cutoff = now - 60.0
+    with lock:
+        while times and times[0] < cutoff:
+            times.pop(0)
+        if len(times) >= max(1, max_per_min):
+            return False, max((times[0] + 60.0) - now, 1.0)
+        times.append(now)
+        return True, 0.0
+
+
+def _touch(path: str) -> None:
+    """Mark a cache file as just-used so eviction is LRU, not FIFO.
+
+    Without this the eviction below sorts on WRITE time, so a bbox a thousand
+    users load every day is discarded ahead of junk written five minutes ago —
+    i.e. the hot set gets no protection at all, which is the opposite of what
+    a cache is for.
+    """
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
 
 def _evict_cache_dir_if_over_cap(cache_dir: str, cap_bytes: int,
                                  min_interval_s: float = 60.0) -> None:
@@ -3997,6 +4044,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 if not refresh and os.path.exists(cache_path_gz):
                     with open(cache_path_gz, 'rb') as fh:
                         gz_bytes = fh.read()
+                    _touch(cache_path_gz)      # keep the hot set out of eviction
                     accept_enc = self.headers.get('Accept-Encoding', '')
                     if 'gzip' in accept_enc:
                         self._send_raw(
@@ -4015,9 +4063,27 @@ class CellHandler(BaseHTTPRequestHandler):
                     return
                 if not refresh and os.path.exists(cache_path):
                     with open(cache_path, 'rb') as fh:
-                        self._send_raw(200, fh.read(),
-                                       content_type='application/json',
-                                       cache_control='public, max-age=86400')
+                        _body = fh.read()
+                    _touch(cache_path)         # keep the hot set out of eviction
+                    self._send_raw(200, _body,
+                                   content_type='application/json',
+                                   cache_control='public, max-age=86400')
+                    return
+
+                # ── The wall ──
+                # Past this point the request costs a FEMA round-trip. Cache
+                # hits above are free and unmetered; only MISSES are budgeted,
+                # so panning around the area everyone is looking at is never
+                # affected while walking thousands of fresh bboxes stops here.
+                _ok, _retry = _upstream_budget_ok(
+                    _fz_miss_times, _fz_miss_lock, _FZ_MISS_BUDGET_PER_MIN)
+                if not _ok:
+                    print(f'[flood_zones] upstream budget exhausted '
+                          f'({_FZ_MISS_BUDGET_PER_MIN}/min) — refusing miss for {cache_name}')
+                    self._send_error(
+                        503,
+                        'flood-zone data temporarily unavailable (upstream '
+                        f'fetch budget reached); retry in {int(_retry)}s')
                     return
 
                 envelope = json.dumps({
