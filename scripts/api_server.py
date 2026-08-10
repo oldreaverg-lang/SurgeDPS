@@ -942,6 +942,99 @@ _GAUGE_CATEGORIES = frozenset({
 })
 
 
+def _refresh_authorized(handler, params) -> bool:
+    """True only when ?refresh=1 was asked for AND carries the operator token.
+
+    `refresh` is both a cache-BYPASS and a cache-DESTROY primitive: on
+    /api/cell it deletes damage / flood / depth / compound / rainfall_ft /
+    ticks for the cell and regenerates them from scratch. Unauthenticated,
+    that let anyone repeatedly force the single most expensive path in the
+    service — and if an upstream (Overpass, CFIM) throttled mid-rebuild, the
+    cell was left deleted rather than merely stale. The per-IP rate limiter
+    caps the frequency but not the cost, and the whole point of the Railway
+    persistent volume is that this work happens once.
+
+    The UI never sends refresh (grep ui/src) — it is purely an operator
+    affordance — so gating it behind the VALIDATION_TOKEN that already
+    protects /__val costs no real caller anything.
+
+    Asking without a token is NOT an error: the request is served normally
+    from cache, it simply does not get the rebuild. That keeps a stale
+    bookmarked ?refresh=1 URL working instead of 403-ing a legitimate user.
+    """
+    asked = bool(params) and params.get('refresh', ['0'])[0] in ('1', 'true')
+    if not asked:
+        return False
+    try:
+        from validation.private_routes import _token_ok
+        if _token_ok(handler, params):
+            return True
+    except Exception:
+        pass
+    print('[refresh] ignoring unauthenticated ?refresh=1 for '
+          f'{str(getattr(handler, "path", "?"))[:120]}')
+    return False
+
+
+# ── Bounded on-disk caches ───────────────────────────────────────────────────
+# /api/flood_zones keys its cache on a quantized bbox, so the number of
+# distinct cache files is unbounded. A hurricane swath is legitimately
+# enormous and users must be able to pan across all of it, so the bound goes
+# on what is KEPT rather than on what may be ASKED FOR: an LRU cap over the
+# directory, evicting oldest-by-use.
+#
+# Worth recording because it inverts the obvious intuition: the EMPTY results
+# are the cheap ones to keep (~45 bytes of empty FeatureCollection — ocean, or
+# anywhere FEMA has no NFHL coverage). The expensive ones are the populated
+# polygon payloads. So a "don't retain empty results" rule would have bounded
+# the wrong side and forced a 20 s FEMA round-trip every time a user panned
+# back over open water. A byte cap bounds both and keeps the hot set — the
+# area people are actually looking at — resident.
+_FZ_CACHE_CAP_BYTES = int(os.environ.get('SURGEDPS_FZ_CACHE_MB', '256')) * 1024 * 1024
+_evict_lock = _threading.Lock()
+_evict_last: dict = {}
+
+
+def _evict_cache_dir_if_over_cap(cache_dir: str, cap_bytes: int,
+                                 min_interval_s: float = 60.0) -> None:
+    """Delete oldest-by-mtime files until *cache_dir* is under *cap_bytes*.
+
+    Throttled per directory and entirely best-effort — cache eviction must
+    never be able to fail the request that triggered it.
+    """
+    now = _time.time()
+    with _evict_lock:
+        if now - _evict_last.get(cache_dir, 0.0) < min_interval_s:
+            return
+        _evict_last[cache_dir] = now
+    try:
+        entries, total = [], 0
+        with os.scandir(cache_dir) as it:
+            for e in it:
+                if not e.is_file():
+                    continue
+                st = e.stat()
+                entries.append((st.st_mtime, st.st_size, e.path))
+                total += st.st_size
+        if total <= cap_bytes:
+            return
+        entries.sort()                     # oldest first
+        target, removed = int(cap_bytes * 0.75), 0
+        for _mtime, size, p in entries:
+            try:
+                os.remove(p)
+            except OSError:
+                continue
+            total -= size
+            removed += 1
+            if total <= target:
+                break
+        print(f'[cache] evicted {removed} file(s) from '
+              f'{os.path.basename(cache_dir)} → {total // (1024 * 1024)} MB')
+    except Exception as exc:
+        print(f'[cache] eviction failed for {cache_dir}: {exc}')
+
+
 def _safe_cache_path(base_dir: str, filename: str) -> Optional[str]:
     """Join *filename* onto *base_dir*, or None if it would escape *base_dir*."""
     try:
@@ -2250,7 +2343,7 @@ class CellHandler(BaseHTTPRequestHandler):
             #
             # Manual cache bust: ?refresh=1 in the URL invalidates the entry
             # before reading. Useful after warm_cache.py re-runs.
-            refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+            refresh = _refresh_authorized(self, params)
             is_active = getattr(storm, 'status', '') == 'active'
             cached_payload = None
             if refresh:
@@ -2397,7 +2490,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 self._send_error(400, _cell_err)
                 return
 
-            refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+            refresh = _refresh_authorized(self, params)
 
             try:
                 print(f"\n--- Loading cell ({col}, {row}) for {storm.name} (refresh={refresh}) ---")
@@ -2764,7 +2857,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 bt_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'validation')
                 os.makedirs(bt_cache_dir, exist_ok=True)
                 bt_path = os.path.join(bt_cache_dir, 'backtest.json')
-                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+                refresh = _refresh_authorized(self, params)
 
                 if os.path.exists(bt_path) and not refresh:
                     with open(bt_path, 'rb') as fh:
@@ -2798,7 +2891,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 storm_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'validation', 'storms')
                 os.makedirs(storm_cache_dir, exist_ok=True)
                 cache_path = os.path.join(storm_cache_dir, f'{sid}.json')
-                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+                refresh = _refresh_authorized(self, params)
 
                 if os.path.exists(cache_path) and not refresh:
                     with open(cache_path, 'rb') as fh:
@@ -3760,7 +3853,7 @@ class CellHandler(BaseHTTPRequestHandler):
             try:
                 radius  = float(params.get('radius', ['4.0'])[0])
                 min_cat = params.get('category', ['action'])[0]
-                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+                refresh = _refresh_authorized(self, params)
 
                 # `category` reaches a cache FILENAME on the live path below.
                 # Anything outside this set was already undefined behaviour
@@ -3895,7 +3988,7 @@ class CellHandler(BaseHTTPRequestHandler):
                 cache_name = f"fz_{qw:+.2f}_{qs_:+.2f}_{qe:+.2f}_{qn:+.2f}.json"
                 cache_path = os.path.join(fz_cache_dir, cache_name)
                 cache_path_gz = cache_path + '.gz'
-                refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
+                refresh = _refresh_authorized(self, params)
 
                 # Prefer the gzipped seed-uploaded copy if present —
                 # browsers handle Content-Encoding: gzip transparently and
@@ -3957,6 +4050,10 @@ class CellHandler(BaseHTTPRequestHandler):
                 try:
                     with open(cache_path, 'wb') as fh:
                         fh.write(raw)
+                    # Bounded, not restricted: every bbox a user can pan to
+                    # stays fetchable; the directory just does not grow
+                    # without limit. See _evict_cache_dir_if_over_cap.
+                    _evict_cache_dir_if_over_cap(fz_cache_dir, _FZ_CACHE_CAP_BYTES)
                 except Exception as werr:
                     print(f"[flood_zones] cache write failed: {werr}")
                 self._send_raw(200, raw, content_type='application/json',
