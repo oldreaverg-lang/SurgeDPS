@@ -921,6 +921,39 @@ def _validate_cell_index(col: int, row: int, storm: StormEntry) -> Optional[str]
     return None
 
 
+# ── Request params that become filenames ─────────────────────────────────────
+# Several endpoints build a cache filename out of query params. That is fine
+# for numerics (a float format spec cannot emit a path separator) but NOT for
+# free-text params: /api/gauges interpolated an unvalidated `category` into
+# "{storm_id}_{radius}_{category}.json", then both READ that path and streamed
+# it to the client, and WROTE to it — so `?category=../../..` was an arbitrary
+# .json read and overwrite anywhere the process could reach.
+#
+# Two layers, because a whitelist protects only the param someone remembered
+# to whitelist:
+#   1. _GAUGE_CATEGORIES — the exact vocabulary the handler already
+#      understands ('none'/'all'/'0' mean "no filter"; the other four are the
+#      NWS flood-category ladder the UI's own type union uses).
+#   2. _safe_cache_path — refuses any assembled path that escapes its cache
+#      directory, so the next param added to a cache key fails closed instead
+#      of reopening this hole.
+_GAUGE_CATEGORIES = frozenset({
+    'none', 'all', '0', 'action', 'minor', 'moderate', 'major',
+})
+
+
+def _safe_cache_path(base_dir: str, filename: str) -> Optional[str]:
+    """Join *filename* onto *base_dir*, or None if it would escape *base_dir*."""
+    try:
+        base = os.path.realpath(base_dir)
+        candidate = os.path.realpath(os.path.join(base_dir, filename))
+    except (OSError, ValueError):
+        return None
+    if candidate != base and not candidate.startswith(base + os.sep):
+        return None
+    return candidate
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Cell Loading
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3729,6 +3762,15 @@ class CellHandler(BaseHTTPRequestHandler):
                 min_cat = params.get('category', ['action'])[0]
                 refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
+                # `category` reaches a cache FILENAME on the live path below.
+                # Anything outside this set was already undefined behaviour
+                # (the rank lookup silently fell back to 1), so rejecting it
+                # costs no legitimate caller — the UI's own type union is
+                # action|minor|moderate|major.
+                if min_cat not in _GAUGE_CATEGORIES:
+                    self._send_error(400, 'invalid category')
+                    return
+
                 # Historical path ─────────────────────────────────────────
                 landfall_date = getattr(storm, 'landfall_date', None)
                 is_historical = (
@@ -3779,7 +3821,13 @@ class CellHandler(BaseHTTPRequestHandler):
                 gauges_cache_dir = os.path.join(PERSISTENT_DIR, 'cache', 'gauges')
                 os.makedirs(gauges_cache_dir, exist_ok=True)
                 cache_key = f"{storm.storm_id}_{radius:.2f}_{min_cat}.json"
-                cache_path = os.path.join(gauges_cache_dir, cache_key)
+                # Belt AND braces: min_cat is whitelisted above, but storm_id
+                # comes from a live NHC/CPHC feed on this path, so the join is
+                # containment-checked rather than trusted.
+                cache_path = _safe_cache_path(gauges_cache_dir, cache_key)
+                if cache_path is None:
+                    self._send_error(400, 'invalid cache key')
+                    return
 
                 if os.path.exists(cache_path) and not refresh:
                     with open(cache_path, 'rb') as fh:
