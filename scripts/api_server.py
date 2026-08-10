@@ -876,6 +876,51 @@ def cell_bbox(col: int, row: int, storm: StormEntry):
     return lon_min, lat_min, lon_min + CELL_WIDTH, lat_min + CELL_HEIGHT
 
 
+# ── Grid-cell index bounds ───────────────────────────────────────────────────
+# col/row are SIGNED offsets from the storm's centre cell (0,0), and they flow
+# straight into cache filenames — cell_{col}_{row}_damage.geojson — and into a
+# full surge + building-footprint + raster generation on a miss.
+#
+# Unvalidated that is an unauthenticated way to (a) mint unbounded cache
+# artefacts on the persistent volume and (b) force arbitrarily many expensive
+# generations, which is how a handful of concurrent requests could take the
+# container down. /api/cell_ticks already had a (very loose) guard; /api/cell
+# did not, and /api/cell is the one that does the generating.
+#
+# Real usage is tiny: the UI loads a server-built manifest around landfall
+# (~9 cells) and lets the user walk outward one neighbour at a time, so
+# legitimate offsets are single digits. +/-32 is ~1400 km x ~1050 km — far
+# beyond any storm's damage domain — while capping the per-storm key space at
+# 65x65 instead of unbounded. Env-overridable so it can be loosened without a
+# deploy if it ever bites a real workflow.
+_MAX_CELL_OFFSET = max(1, int(os.environ.get('SURGEDPS_MAX_CELL_OFFSET', '32')))
+
+
+def _validate_cell_index(col: int, row: int, storm: StormEntry) -> Optional[str]:
+    """Return an error string if (col,row) is not a plausible cell, else None."""
+    if abs(col) > _MAX_CELL_OFFSET or abs(row) > _MAX_CELL_OFFSET:
+        return (f'col/row out of range (max ±{_MAX_CELL_OFFSET} cells from the '
+                f'storm centre cell)')
+    # Latitude must land on Earth: a large offset against a high-latitude
+    # origin walks the bbox off the pole. (83°N is the highest storm latitude
+    # in hurdat2, and 83 + 32*0.3 = 92.6 — reachable, so this check bites.)
+    #
+    # Deliberately NO longitude check. It would buy nothing — the offset bound
+    # above already pins the cell within ~13° of a real storm position — and it
+    # would break the antimeridian: the catalog polls the CPHC feed, whose AOR
+    # runs to 180°, so a system at 179.7°W has legitimate cells at lon < -180.
+    # Worse, populate_activate_cache generates its 3x3 via load_cell WITHOUT
+    # going through this validator, so a longitude check here would 400 cells
+    # the server had already built and advertised in its own manifest.
+    try:
+        _w, s, _e, n = cell_bbox(col, row, storm)
+    except Exception:
+        return 'cell bbox not computable for this storm'
+    if not (-90.0 <= s and n <= 90.0):
+        return 'cell latitude out of range'
+    return None
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Cell Loading
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2309,6 +2354,16 @@ class CellHandler(BaseHTTPRequestHandler):
             if storm is None:
                 return
 
+            # Reject implausible cells BEFORE any generation work — see
+            # _validate_cell_index. This is the endpoint that writes cache
+            # artefacts and runs the surge/building pipeline, so an unbounded
+            # index here is an unauthenticated disk- and memory-exhaustion
+            # vector, not merely a bad-input nuisance.
+            _cell_err = _validate_cell_index(col, row, storm)
+            if _cell_err:
+                self._send_error(400, _cell_err)
+                return
+
             refresh = params.get('refresh', ['0'])[0] in ('1', 'true')
 
             try:
@@ -2355,10 +2410,15 @@ class CellHandler(BaseHTTPRequestHandler):
             try:
                 col = int((params.get('col') or [''])[0])
                 row = int((params.get('row') or [''])[0])
-                if not (-500 < col < 500 and -500 < row < 500):
-                    self._send_error(400, 'col/row out of range'); return
             except (ValueError, TypeError):
                 self._send_error(400, 'col and row must be integers'); return
+            # Was an inline ±500 guard (1M keys/storm); now shares the same
+            # bound as /api/cell so the two endpoints, which write into the
+            # same cell_{col}_{row}_* namespace, cannot disagree about which
+            # cells exist.
+            _cell_err = _validate_cell_index(col, row, storm)
+            if _cell_err:
+                self._send_error(400, _cell_err); return
             try:
                 sdir = _storm_cache_dir(storm)
                 ticks_path  = os.path.join(sdir, f'cell_{col}_{row}_ticks.json')
