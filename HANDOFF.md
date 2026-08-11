@@ -22,7 +22,92 @@
 > The live site never broke (deploys GitHub→Railway). Everything below this
 > note is the pre-reset handoff and remains accurate about the CODE.
 
-**Last updated:** 2026-05-21 (recovery note added 2026-07-09)
+---
+
+## ⚠️ 2026-08-10 — security + resource-abuse pass (READ THIS FIRST)
+
+`main` == `64566b4`, deployed and verified live (all five fixes confirmed
+holding simultaneously against the running service). Four commits, two of them
+security. Nothing below changes the data model or the UI.
+
+### 1. `/api/cell` — unauthenticated DoS (`7f20cd1`)
+
+`col`/`row` came off the query string, went straight into cache filenames AND
+into full grid-cell generation. Any anonymous caller could walk arbitrary
+offsets, each miss spawning a real generation — on a stdlib
+`ThreadingHTTPServer` (one thread per request, no pool ceiling). Now bounded
+by `_MAX_CELL_OFFSET` (env `SURGEDPS_MAX_CELL_OFFSET`, default 32 → a 65×65
+grid around landfall, far wider than any real swath) via `_validate_cell_index`.
+
+**Do NOT "fix" this by also range-checking longitude.** A longitude bound was
+in the first draft and review killed it: cell (0,0) is centered on LANDFALL,
+not on a fixed meridian, so a CPHC storm near 180° produces legitimate cells
+that a naive lon check would 400. `populate_activate_cache` also builds its
+3×3 without going through the validator. Latitude-only is deliberate.
+
+### 2. `/api/gauges` — path traversal (`3e23ee6`)
+
+The `category` param was interpolated into a cache path. Closed with an
+allow-list, `_GAUGE_CATEGORIES = {none, all, 0, action, minor, moderate,
+major}`, plus `_safe_cache_path` as a second line of defence.
+
+### 3. `?refresh` gated behind the operator token (`236aa18`)
+
+`?refresh=1` forced a full upstream re-fetch and was open to the world at
+**six** endpoints. Now `_refresh_authorized(handler, params)`, which reuses
+`validation.private_routes._token_ok` (same `VALIDATION_TOKEN` as `/__val`) —
+one auth story for the service, not two. Applied at all six sites.
+
+**This is the "redo it from scratch" button the operator flagged.** A previous
+agent reported it as fixed via persistent-volume caching; it was not — the
+cache existed, but any request carrying `?refresh` bypassed it. Verify any
+change here against the LIVE service, not against the code.
+
+### 4. Flood-zone cache: byte cap, a real LRU, and a miss wall (`236aa18`, `64566b4`)
+
+- `_FZ_CACHE_CAP_BYTES` = 256 MB with `_evict_cache_dir_if_over_cap`.
+- **The first version of that cap was FIFO, not LRU** — eviction sorted on
+  `st_mtime` (WRITE time), so the hottest long-lived entries were evicted
+  first and immediately re-fetched. Fixed by `_touch`-ing on every cache hit.
+  If you touch this code the invariant is: **a hit updates mtime.**
+- `_FZ_MISS_BUDGET_PER_MIN = 60` + `_upstream_budget_ok` — a GLOBAL wall, so a
+  caller sweeping empty ocean squares cannot burn unbounded upstream calls
+  even though every individual index is in range. The cap bounds STORAGE, the
+  wall bounds SPEND; both are needed. This is the operator's stated preference
+  in force: limit what is PRESERVED and what is FETCHED, not what users may
+  ask for.
+
+### 5. Deleted `scripts/api_server_fastapi.py` (`236aa18`)
+
+Orphaned alternate server, not referenced by `railway.toml` or the Dockerfile
+CMD, and still carrying the original unbounded `load_cell`. Removed rather
+than patched — a door nobody used with a lock nobody fixed.
+**`scripts/api_server.py` is the ONLY deployed entrypoint.** Confirm against
+`railway.toml` before believing any other file is live.
+
+### `/api/flood_zones` 502s are NOT a bug
+
+FEMA's WAF blocks Railway's egress at the **TLS handshake** — the service
+cannot reach FEMA from production, by FEMA's choice, and no amount of
+retry/timeout work will change that. This is precisely why
+`scripts/seed_flood_zones_local.py` exists: run it from a machine that CAN
+reach FEMA and it POSTs into the token-gated `/__val/seed_flood_zone`. The
+layer is **unseeded, not broken**.
+
+### Open on SurgeDPS
+
+- Seed flood zones: `py scripts/seed_flood_zones_local.py` (needs
+  `VALIDATION_TOKEN` in `.env`). Not done yet.
+- `/api/season/2024` and `/api/season/2025` both return `[]`, so the browser
+  hangs on "Loading…" for those two seasons. Not diagnosed.
+- The flood-zone wall (`64566b4`) landed after the account spend limit was hit
+  and did **not** get an adversarial review pass. The other three did, and
+  review caught a real defect in two of them (the antimeridian break and the
+  FIFO-masquerading-as-LRU above). Treat `64566b4` as provisional.
+
+---
+
+**Last updated:** 2026-08-10 (security pass; recovery note 2026-07-09; body below 2026-05-21)
 **Consolidated from:** `HANDOFF.md` (Apr 4), `HANDOFF_VALIDATION_LAYER.md` (Apr 14), `HANDOFF_RAINFALL_LAYER.md` (May 16), `HANDOFF_UX_AUDIT.md` (May 18), `HANDOFF_LOAD_TIME.md` (May 21)
 **Status:** All subsystems live. Activate cache warm across deploys. Cloudflare hardened.
 
