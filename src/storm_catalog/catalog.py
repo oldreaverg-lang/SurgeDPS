@@ -126,7 +126,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=95, min_pressure_mb=950,
         heading_deg=315, speed_kt=13,
         basin="AL", advisory="best-track",
-        dps_score=88.9,
+        dps_score=87.4,
         rmax_nm=35.0,   # NHC TCR: large wind field at Galveston
         landfall_date="2008-09-13",  # Pre-MRMS archive; S3 fetch will return None
     ),
@@ -180,7 +180,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=130, min_pressure_mb=930,
         heading_deg=330, speed_kt=13,
         basin="AL", advisory="best-track",
-        dps_score=86.9,
+        dps_score=87.4,
         rmax_nm=20.0,   # NHC TCR: ~20 nm at Port Fourchon
         landfall_date="2021-08-29",
     ),
@@ -203,7 +203,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=75, min_pressure_mb=958,
         heading_deg=315, speed_kt=5,
         basin="AL", advisory="best-track",
-        dps_score=75.9,
+        dps_score=77.3,
         rmax_nm=50.0,   # NHC TCR: very large, sprawling wind field at Wilmington
         landfall_date="2018-09-14",
     ),
@@ -226,7 +226,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=85, min_pressure_mb=970,
         heading_deg=350, speed_kt=14,
         basin="AL", advisory="best-track",
-        dps_score=65.1,
+        dps_score=69.0,
         rmax_nm=25.0,   # NHC TCR: moderate wind field at Creole, LA
         landfall_date="2020-10-09",
     ),
@@ -260,7 +260,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=120, min_pressure_mb=938,
         heading_deg=15, speed_kt=20,
         basin="AL", advisory="best-track",
-        dps_score=80.3,
+        dps_score=74.0,
         rmax_nm=15.0,   # NHC TCR: compact at Big Bend; coastal geometry limits surge further
         landfall_date="2024-09-26",
     ),
@@ -271,7 +271,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=120, min_pressure_mb=949,
         heading_deg=60, speed_kt=16,
         basin="AL", advisory="best-track",
-        dps_score=81.0,
+        dps_score=84.3,
         rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
         landfall_date="2024-10-09",
     ),
@@ -282,7 +282,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=90, min_pressure_mb=972,
         heading_deg=20, speed_kt=14,
         basin="AL", advisory="best-track",
-        dps_score=53.2,   # estimated; pending StormDPS bundle refresh
+        dps_score=53.8,   # estimated; pending StormDPS bundle refresh
         rmax_nm=20.0,    # NHC TCR: moderate Cat 2 at Morgan City, LA
         landfall_date="2024-09-11",
     ),
@@ -293,7 +293,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=70, min_pressure_mb=979,
         heading_deg=350, speed_kt=12,
         basin="AL", advisory="best-track",
-        dps_score=79.6,   # estimated; widespread Houston flooding raises DPS above pure Cat-1
+        dps_score=78.6,   # estimated; widespread Houston flooding raises DPS above pure Cat-1
         rmax_nm=30.0,    # NHC TCR: weakened from Cat 5 (Caribbean) to Cat 1 at Matagorda
         landfall_date="2024-07-08",
     ),
