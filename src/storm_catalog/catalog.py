@@ -169,7 +169,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=130, min_pressure_mb=937,
         heading_deg=350, speed_kt=15,
         basin="AL", advisory="best-track",
-        dps_score=86.6,
+        dps_score=87.3,
         rmax_nm=15.0,   # NHC TCR: compact Cat 4 at Cameron, LA
         landfall_date="2020-08-27",
     ),
@@ -180,7 +180,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=130, min_pressure_mb=930,
         heading_deg=330, speed_kt=13,
         basin="AL", advisory="best-track",
-        dps_score=87.4,
+        dps_score=87.6,
         rmax_nm=20.0,   # NHC TCR: ~20 nm at Port Fourchon
         landfall_date="2021-08-29",
     ),
@@ -192,7 +192,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=115, min_pressure_mb=929,
         heading_deg=350, speed_kt=8,
         basin="AL", advisory="best-track",
-        dps_score=91.1,
+        dps_score=91.3,
         rmax_nm=20.0,   # NHC TCR: contracted eyewall at FL Keys landfall
         landfall_date="2017-09-10",
     ),
@@ -271,7 +271,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=120, min_pressure_mb=949,
         heading_deg=60, speed_kt=16,
         basin="AL", advisory="best-track",
-        dps_score=84.3,
+        dps_score=84.4,
         rmax_nm=12.0,   # NHC TCR: extremely compact eyewall at Siesta Key
         landfall_date="2024-10-09",
     ),
@@ -304,7 +304,7 @@ HISTORICAL_STORMS: List[StormEntry] = [
         max_wind_kt=70, min_pressure_mb=979,
         heading_deg=355, speed_kt=10,
         basin="AL", advisory="best-track",
-        dps_score=45.8,   # estimated; freshwater flooding-dominant event
+        dps_score=46.9,   # estimated; freshwater flooding-dominant event
         rmax_nm=25.0,    # NHC TCR: moderate Cat 1 near Steinhatchee, FL
         landfall_date="2024-08-05",
     ),
